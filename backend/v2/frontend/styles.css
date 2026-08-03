@@ -1,0 +1,447 @@
+:root{
+  --bg:#0b0e11; --rail:#0f1418; --panel:#141b21; --panel-2:#1a232b; --sunk:#0d1216;
+  --border:#232d36; --border-soft:#1a232a;
+  --text:#dbe2ea; --muted:#8792a1; --faint:#5c6672;
+  --ink-faint:#5c6672;
+  --chaos:#52c8ae; --chaos-deep:#1f4f47;
+  --divine:#e4bb52;
+  --u-unique:#d3873f; --u-rare:#e6d24d; --u-magic:#7f95ff;
+  --u-currency-c:#cbab63; --u-normal:#c8ced6; --u-gem:#27b3a6; --u-div:#c8ced6;
+  --good:#67bd7a; --warn:#d8a24a; --crit:#d97066;
+  --sans:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  --mono:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{background:var(--bg); color:var(--text); font-family:var(--sans); font-size:16px; line-height:1.5;
+  -webkit-font-smoothing:antialiased;}
+.app{display:grid; grid-template-columns:270px 1fr; min-height:100vh;}
+
+/* ---------- LEFT RAIL ---------- */
+.rail{background:linear-gradient(180deg,var(--rail),#0b0f13); border-right:1px solid var(--border);
+  padding:20px 18px; position:sticky; top:0; height:100vh; overflow-y:auto;
+  scrollbar-gutter:stable; /* reserve the scrollbar lane on every page, else nav boxes are wider on pages whose rail doesn't scroll */
+  display:flex; flex-direction:column; gap:18px;}
+.logo{display:flex; flex-wrap:wrap; align-items:center; gap:9px;}
+.logo .sq{width:22px;height:22px;border-radius:6px;background:linear-gradient(140deg,var(--chaos),var(--chaos-deep));
+  box-shadow:0 0 14px rgba(82,200,174,.35);}
+.logo b{font-size:15px; letter-spacing:.03em; font-weight:650;}
+.logo span{display:block; font-size:11px; letter-spacing:.18em; text-transform:uppercase; color:var(--faint);}
+
+/* headline C:D ratio */
+.cd{border:1px solid var(--border); border-radius:14px; padding:16px 15px;
+  background:radial-gradient(120% 140% at 100% 0%, rgba(228,187,82,.08), transparent 60%), var(--panel);}
+.cd .cap{font-size:11px; letter-spacing:.2em; text-transform:uppercase; color:var(--muted);}
+.cd .rate{display:flex; align-items:baseline; gap:6px; margin-top:8px;
+  font-family:var(--mono); font-variant-numeric:tabular-nums;}
+.cd .rate .v{font-size:35px; font-weight:600; color:var(--divine); line-height:1;}
+.cd .rate .u{font-size:13px; color:var(--muted);}
+.cd .conv{margin-top:8px; font-family:var(--mono); font-size:13.5px; color:var(--text);}
+.cd .conv .c{color:var(--chaos);} .cd .conv .d{color:var(--divine);}
+.cd .foot{display:flex; align-items:center; justify-content:space-between; margin-top:12px;
+  font-size:12px; color:var(--faint);}
+.cd .foot .up{color:var(--good); font-family:var(--mono);}
+.spark{height:34px; margin-top:10px; display:block; width:100%;}
+
+.ref{margin-top:2px;}
+.ref .rsec + .rsec{margin-top:14px;}
+.ref .rh{font-size:11px; letter-spacing:.18em; text-transform:uppercase; color:var(--faint); margin-bottom:8px;}
+.ref .rrow{display:flex; align-items:center; justify-content:space-between; gap:8px; padding:5px 2px;
+  font-size:13.5px; border-bottom:1px dashed var(--border-soft);}
+.ref .rsec .rrow:last-child{border-bottom:0;}
+.ref .rrow .n{color:var(--muted); min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+.ref .rrow .rv{display:flex; align-items:center; gap:8px; flex:none;}
+.ref .rrow .p{font-family:var(--mono); font-variant-numeric:tabular-nums; color:var(--text);}
+/* Sell-side hint: which currency pays a SELLER more right now (details in the
+   tooltip). Colour = the recommended currency (teal chaos / gold divine),
+   muted when both pay the same. */
+.ref .rrow .sellhint{font-family:var(--mono); font-size:10.5px; line-height:1.5; flex:none;
+  padding:0 4px; border:1px solid var(--border-soft); border-radius:4px; cursor:help; white-space:nowrap;}
+.ref .rrow .sellhint.c{color:var(--chaos);}
+.ref .rrow .sellhint.d{color:var(--divine);}
+.ref .rrow .sellhint.e{color:var(--muted);}
+/* Source marker: which feed the number comes from. It must cost ZERO width —
+   at 270 px the row names already ellipsize — so it rides on the number itself:
+   Faustus (sell side) dotted-underlined, poe.ninja plain, a row without a value
+   neither. No colour: the two accents next to it already mean "chaos" and
+   "divine" on the badge. Every number names its source in full in its tooltip;
+   the footer legend (.rstamp) sets each source name in its own style. */
+.ref .rrow .p{cursor:help;}
+.ref .src-faustus{text-decoration:underline dotted; text-decoration-color:var(--faint);
+  text-underline-offset:3px; text-decoration-thickness:1px;}
+.ref .nspark{width:46px; height:14px; display:block; flex:none;}
+/* Footer: one line per source in use, each with its OWN timestamp — the feeds
+   refresh on different clocks, a shared stamp would be wrong for half the rail.
+   Typography unchanged; the longest line ("poe.ninja · updated 14:05") measures
+   ~195 px against the rail's 218 px content box (270 minus padding, border and
+   the reserved scrollbar lane). Keep the wordings in app.js that short. */
+.ref .rstamp{margin-top:16px; font-size:12.5px; letter-spacing:.06em; color:var(--faint); font-family:var(--mono);}
+.ref .rstamp .rsrc{white-space:nowrap;}
+.ref .rstamp .rsrc + .rsrc{margin-top:4px;}
+.ref .nspark.up{color:var(--good);} .ref .nspark.dn{color:var(--crit);}
+.rail .push{margin-top:auto; font-size:11.5px; color:var(--faint); line-height:1.5;}
+.rail kbd{font-family:var(--mono); background:var(--panel-2); border:1px solid var(--border);
+  border-radius:4px; padding:1px 5px; font-size:11px; color:var(--text);}
+
+/* ---------- MAIN ---------- */
+.main{padding:20px 22px 40px; min-width:0;}
+.mhead{display:flex; align-items:center; gap:12px; margin-bottom:16px; position:sticky; top:0; z-index:10;
+  padding:14px 0 12px; background:linear-gradient(180deg,var(--bg) 70%, transparent);}
+.mhead h1{font-size:18px; font-weight:600; letter-spacing:.01em;}
+.mhead .badge{font-family:var(--mono); font-variant-numeric:tabular-nums; font-size:13px; color:var(--chaos);
+  border:1px solid var(--chaos-deep); background:rgba(82,200,174,.06); border-radius:20px; padding:2px 10px;}
+.mhead .note{font-size:12.5px; color:var(--faint);}
+.mhead .conn{display:inline-flex; align-items:center; gap:6px; font-size:12px; color:var(--faint);
+  font-family:var(--mono);}
+.mhead .conn .cdot{width:7px; height:7px; border-radius:50%; background:var(--faint);}
+.mhead .conn.live .cdot{background:var(--good); box-shadow:0 0 7px rgba(103,189,122,.6);}
+.mhead .conn.down .cdot{background:var(--crit); box-shadow:0 0 7px rgba(217,112,102,.6);}
+.mhead .clear{margin-left:auto; background:transparent; border:1px solid var(--border); color:var(--muted);
+  border-radius:9px; padding:11px 26px; font-size:16px; cursor:pointer; transition:.12s;}
+.mhead .clear:hover{border-color:#3a4650; color:var(--text);}
+
+/* Shared trade-queue rate-limit banner — warning amber, not error red: it's a
+   pause, not a crash. Sits between the sticky header and the grid. */
+.ratebanner{display:flex; align-items:flex-start; gap:11px; margin:0 0 16px;
+  padding:11px 14px; border-radius:11px; font-size:14px; line-height:1.45;
+  color:var(--text); border:1px solid rgba(216,162,74,.42);
+  background:linear-gradient(180deg, rgba(216,162,74,.13), rgba(216,162,74,.06));}
+.ratebanner[hidden]{display:none;}
+.ratebanner .i{flex:none; width:18px; height:18px; margin-top:1px; border-radius:50%;
+  display:inline-flex; align-items:center; justify-content:center; font-weight:700;
+  font-size:13px; color:#0b0e11; background:var(--warn);}
+.ratebanner .tx b{font-weight:600;}
+.ratebanner .tx span{color:var(--muted);}
+
+.grid{display:grid; grid-template-columns:repeat(auto-fill,minmax(440px,1fr)); gap:12px; align-items:start;}
+.card{position:relative; background:var(--panel); border:1px solid var(--border-soft); border-radius:12px;
+  padding:14px 15px 13px; display:flex; flex-direction:column; gap:10px;
+  border-top:2px solid var(--tp,#333); transition:border-color .12s, transform .12s;}
+.card:hover{border-color:var(--border); border-top-color:var(--tp);}
+.card.expanded{border-color:var(--border);}
+.card.dismissing{opacity:0; transform:scale(.97); transition:opacity .18s, transform .18s;}
+.card.appearing{animation:cardIn .28s ease;}
+@keyframes cardIn{from{opacity:0; transform:translateY(6px);} to{opacity:1; transform:none;}}
+.tp-unique{--tp:var(--u-unique);} .tp-rare{--tp:var(--u-rare);} .tp-magic{--tp:var(--u-magic);}
+.tp-currency{--tp:var(--u-currency-c);} .tp-gem{--tp:var(--u-gem);} .tp-normal{--tp:var(--u-normal);}
+.tp-divination{--tp:var(--u-div);}
+
+.chead{display:flex; align-items:flex-start; justify-content:space-between; gap:10px;}
+.name{font-weight:640; font-size:16.5px; line-height:1.2; text-wrap:balance;}
+/* .x (dismiss, absolute top:11px/right:11px, 22px) overlaps the right edge of
+   .chead's content box -> reserve the same ~24px clearance the name used to
+   keep for itself (back when it was chead's only child). */
+.opentrade{flex:none; margin-right:24px; font-family:var(--mono); font-size:14px; letter-spacing:.03em;
+  color:var(--muted); background:none; border:1px solid var(--border); border-radius:7px;
+  padding:7px 14px; cursor:pointer; white-space:nowrap; transition:color .12s, border-color .12s, background .12s;}
+.opentrade:hover{color:var(--chaos); border-color:var(--chaos-deep); background:rgba(82,200,174,.06);}
+.opentrade:focus-visible{outline:2px solid var(--chaos); outline-offset:2px;}
+.opentrade[disabled]{opacity:.35; cursor:not-allowed;}
+.opentrade.ninja:hover{color:#b98cff; border-color:#6d4bab; background:rgba(150,110,255,.08);}
+.opentrade.ninja:focus-visible{outline-color:#b98cff;}
+.name.n-unique{color:var(--u-unique);} .name.n-rare{color:var(--u-rare);}
+.name.n-magic{color:var(--u-magic); font-size:15px;} .name.n-currency{color:var(--u-currency-c);}
+.name.n-gem{color:var(--u-gem);} .name.n-normal{color:var(--u-normal);} .name.n-divination{color:var(--u-div);}
+.name small{display:block; color:var(--muted); font-weight:400; font-size:12.5px; letter-spacing:.02em; margin-top:2px;}
+.name small .corrupt{color:var(--crit); font-weight:600;}
+
+.pblock{display:flex; align-items:flex-end; justify-content:space-between; gap:10px;
+  background:var(--sunk); border:1px solid var(--border-soft); border-radius:9px; padding:9px 11px;}
+.pblock .pr{font-family:var(--mono); font-variant-numeric:tabular-nums; font-size:21px; font-weight:600; color:var(--divine); line-height:1;}
+.pblock .pr.c{color:var(--chaos);}
+.pblock .pr.wait{color:var(--muted); font-size:16px; font-weight:500; letter-spacing:.02em;}
+.pblock .pr.err{color:var(--crit); font-size:16px; font-weight:500;}
+.pblock .pr.wait.rl{color:var(--warn);}
+.pblock .pr .u{font-size:12px; color:var(--muted); font-weight:500; letter-spacing:.1em; text-transform:uppercase; margin-left:3px;}
+/* Median next to the range: secondary weight — the range stays the headline,
+   this is the "typical" read that outliers can't skew. */
+.pblock .pr .med{font-size:15px; color:var(--muted); font-weight:500; margin-left:9px; padding-left:9px;
+  border-left:1px solid var(--border-soft);}
+.pblock .pr .psp{display:inline-block; width:11px; height:11px; margin-right:7px; vertical-align:-1px;
+  border-radius:50%; border:2px solid rgba(82,200,174,.25); border-top-color:var(--chaos); animation:spin .7s linear infinite;}
+/* Left column when the price carries extra provenance (Currency Exchange
+   headline + trade-site ask underneath). Without it those two lines would be
+   siblings in the .pblock row and land next to the number instead of below. */
+.pblock .pcol{display:flex; flex-direction:column; align-items:flex-start; gap:5px; min-width:0;}
+.pblock .psrc{font-family:var(--mono); font-size:12px; color:var(--faint);
+  letter-spacing:.1em; text-transform:uppercase; line-height:1;}
+.pblock .pask{font-family:var(--mono); font-size:12px; color:var(--muted); line-height:1.2;}
+.pblock .hits{text-align:right; font-family:var(--mono); font-size:12px; color:var(--faint); line-height:1.35; transition:color .3s;}
+.pblock .hits b{display:block; color:var(--chaos); font-size:15px;}
+.pblock .hits.flash b{color:var(--divine);}
+/* Exchange headline: the traded span takes the place the listing count used to
+   have. Deliberately quiet — same muted register as .pask, it's context, not a
+   number to read first. */
+.pblock .hits .xrange{color:var(--muted); white-space:nowrap;}
+
+.mods{display:flex; flex-wrap:wrap; gap:5px;}
+.mod{font-size:12.5px; color:#a6b0a2; background:rgba(82,200,174,.05); border:1px solid var(--border-soft);
+  border-radius:5px; padding:2px 7px; line-height:1.3;}
+.mod b{color:#cee3d2; font-weight:600; font-variant-numeric:tabular-nums;}
+/* Active non-mod search filters (quality, item level) — read-only context, so
+   set apart from the mod chips rather than mistaken for one. */
+.mod.fact{color:#8fb8a8; background:rgba(82,200,174,.11); border-color:rgba(82,200,174,.28);
+  font-variant-numeric:tabular-nums;}
+
+.listings{display:flex; flex-direction:column; gap:1px; border-top:1px solid var(--border-soft); padding-top:9px;}
+.listings:empty{display:none;}
+.lrow{display:grid; grid-template-columns:76px 1fr auto; align-items:center; gap:8px;
+  font-family:var(--mono); font-variant-numeric:tabular-nums; font-size:13px; padding:3px 2px;}
+.lrow .p{color:var(--divine); font-weight:600;} .lrow .p.c{color:var(--chaos);}
+.lrow .who{color:var(--muted); font-family:var(--sans); font-size:12.5px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+.lrow .age{color:var(--faint); text-align:right;}
+
+/* Listings expander: first 5 visible, rest behind the toggle. */
+.lwrap{display:flex; flex-direction:column; gap:1px;}
+.lwrap .lrow.extra{display:none;}
+.lwrap.showall .lrow.extra{display:grid;}
+.lmore{align-self:flex-start; margin-top:6px; font-family:var(--mono); font-size:11.5px;
+  letter-spacing:.04em; color:var(--chaos); background:none; border:1px solid var(--chaos-deep);
+  border-radius:6px; padding:2px 9px; cursor:pointer; transition:background .12s, border-color .12s;}
+.lmore:hover{background:rgba(82,200,174,.08); border-color:var(--chaos);}
+.lmore:focus-visible{outline:2px solid var(--chaos); outline-offset:2px;}
+.lmore .lmi.less{display:none;}
+.lwrap.showall .lmore .lmi{display:none;}
+.lwrap.showall .lmore .lmi.less{display:inline;}
+
+/* ---------- MOD PICKER ---------- */
+.modbar{display:flex; align-items:center; gap:9px; border-top:1px solid var(--border-soft);
+  padding-top:10px; cursor:pointer; user-select:none;}
+.modbar .tag{font-size:11px; letter-spacing:.16em; text-transform:uppercase; color:var(--faint);}
+.modbar .cnt{font-family:var(--mono); font-variant-numeric:tabular-nums; font-size:12px; color:var(--chaos);
+  border:1px solid var(--chaos-deep); background:rgba(82,200,174,.06); border-radius:20px; padding:1px 8px;}
+.modbar .chev{margin-left:auto; color:var(--faint); font-size:13px; transition:transform .2s;}
+.card.expanded .modbar .chev{transform:rotate(180deg); color:var(--muted);}
+.modbar:hover .tag,.modbar:hover .chev{color:var(--muted);}
+
+.editor{overflow:hidden; max-height:0; opacity:0;
+  transition:max-height .28s ease, opacity .22s ease;}
+.card.expanded .editor{max-height:1600px; opacity:1;}
+.ed-inner{background:var(--sunk); border:1px solid var(--border-soft); border-radius:10px;
+  padding:12px; margin-top:9px; display:flex; flex-direction:column; gap:11px;}
+.ed-head{display:flex; align-items:flex-start; gap:14px;}
+.ed-head .ed-lead{flex:1;}
+.allmods, .toptier{flex:none; font:inherit; font-size:13px; font-family:var(--sans); color:var(--muted);
+  background:var(--panel); border:1px solid var(--border); border-radius:8px; padding:7px 14px;
+  cursor:pointer; white-space:nowrap; transition:.12s;}
+.toptier{font-family:var(--mono); padding:7px 11px;}
+.allmods:hover, .toptier:hover{border-color:var(--chaos-deep); color:var(--chaos);}
+.allmods:focus-visible, .toptier:focus-visible{outline:2px solid var(--chaos); outline-offset:2px;}
+.ed-lead{font-size:12px; color:var(--faint); line-height:1.4;}
+.ed-lead b{color:var(--muted); font-weight:600;}
+
+.mgroup{display:flex; flex-direction:column; gap:6px;}
+.mgroup .gh{font-size:10.5px; letter-spacing:.18em; text-transform:uppercase; color:var(--faint); margin-top:3px;}
+.mgroup .gh.pfx{color:#c78f5a;} .mgroup .gh.sfx{color:#7f95ff;} .mgroup .gh.frac{color:#e0a552;}
+
+.mrow{border:1px solid transparent; border-radius:8px; background:rgba(255,255,255,.012);
+  padding:7px 9px; display:flex; flex-direction:column; gap:7px; transition:border-color .12s, background .12s;}
+.mrow:hover{background:rgba(82,200,174,.04);}
+.mrow.on{border-color:var(--chaos-deep); background:rgba(82,200,174,.07);}
+.mrow .top{display:flex; align-items:center; gap:10px; cursor:pointer;}
+.chk{appearance:none; -webkit-appearance:none; flex:none; width:17px; height:17px; border-radius:5px;
+  border:1px solid var(--border); background:var(--panel); cursor:pointer; position:relative; transition:.12s;}
+.chk:checked{background:linear-gradient(150deg,var(--chaos),var(--chaos-deep)); border-color:var(--chaos);}
+.chk:checked::after{content:"✓"; position:absolute; inset:0; display:grid; place-items:center;
+  color:#06120f; font-size:12px; font-weight:800;}
+.chk:focus-visible{outline:2px solid var(--chaos); outline-offset:2px;}
+.mtxt{flex:1; font-size:13.5px; color:#a6b0a2; line-height:1.3;}
+.mrow.on .mtxt{color:#cbd6d0;}
+.mtxt b{color:#cee3d2; font-weight:600; font-variant-numeric:tabular-nums;}
+.mtxt.impl{color:#8f9fd6;} .mtxt.impl b{color:#b3c0ea;}
+.mtxt.frac{color:#d99a5c;} .mtxt.frac b{color:#f0b980;}
+.tier{font-family:var(--mono); font-size:10.5px; letter-spacing:.03em; color:var(--divine);
+  border:1px solid #4a3d1e; border-radius:20px; padding:1px 6px; margin-left:5px; white-space:nowrap;}
+.fracbadge{font-family:var(--mono); font-size:10px; letter-spacing:.05em; text-transform:uppercase;
+  color:#f0b980; border:1px solid #6b4a26; border-radius:20px; padding:1px 6px; margin-left:5px; white-space:nowrap;}
+
+.range{display:flex; align-items:center; gap:9px; padding-left:27px;}
+.range .mm{font-family:var(--mono); font-size:11px; color:var(--faint); font-variant-numeric:tabular-nums; min-width:20px;}
+.range .mm.hi{text-align:right;}
+
+/* Dual range: two overlaid range inputs (min + max) over one rail.
+   The band is deliberately tall (24px) for a large, easily grabbable hit area;
+   the visible rail stays slim and centered. */
+.dual{position:relative; flex:1; height:24px; display:flex; align-items:center;}
+.drail{position:absolute; left:0; right:0; top:50%; transform:translateY(-50%);
+  height:3px; border-radius:3px; background:#242e2b;}
+.dfill{position:absolute; top:50%; transform:translateY(-50%); left:0; right:0;
+  height:3px; border-radius:3px; background:linear-gradient(90deg,var(--chaos-deep),var(--chaos));}
+.sl{-webkit-appearance:none; appearance:none; position:absolute; left:0; right:0; width:100%;
+  margin:0; height:24px; background:none; outline:none; pointer-events:none;}
+.dual .slmin{z-index:3;} .dual .slmax{z-index:4;}
+/* large handle = large horizontal hit area (18px visible). */
+.sl::-webkit-slider-thumb{-webkit-appearance:none; width:18px; height:18px; border-radius:50%;
+  background:radial-gradient(circle at 35% 30%,#8fe6d4,#2c8f7a); border:1px solid var(--chaos);
+  box-shadow:0 0 7px rgba(82,200,174,.45); cursor:grab; pointer-events:auto;}
+.sl::-webkit-slider-thumb:active{cursor:grabbing;}
+.sl::-moz-range-thumb{width:18px; height:18px; border-radius:50%; border:1px solid var(--chaos);
+  background:radial-gradient(circle at 35% 30%,#8fe6d4,#2c8f7a); box-shadow:0 0 7px rgba(82,200,174,.45);
+  cursor:grab; pointer-events:auto;}
+.sl::-moz-range-track{background:none; border:none; height:24px;}
+.sl:focus-visible::-webkit-slider-thumb{outline:2px solid var(--chaos); outline-offset:2px;}
+.sl:focus-visible::-moz-range-thumb{outline:2px solid var(--chaos); outline-offset:2px;}
+.range .val{font-family:var(--mono); font-variant-numeric:tabular-nums; font-size:13px; font-weight:600;
+  color:var(--chaos); min-width:56px; text-align:right; white-space:nowrap;}
+.range .val .vdash{color:var(--faint); margin:0 1px;}
+
+.ed-foot{display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap;
+  border-top:1px solid var(--border-soft); padding-top:11px;}
+.flow{display:flex; align-items:center; gap:6px; font-size:12px; color:var(--muted); flex-wrap:wrap;}
+.flow .sel{font-family:var(--mono); color:var(--chaos);}
+.flow .arw{color:var(--faint);}
+.flow .chip{border:1px solid var(--border); border-radius:6px; padding:1px 7px; font-size:11.5px; color:var(--muted);}
+.resetbtn{margin-left:8px; font-family:var(--mono); font-size:11.5px; letter-spacing:.03em;
+  color:var(--muted); background:none; border:1px solid var(--border); border-radius:6px;
+  padding:2px 9px; cursor:pointer; transition:color .12s, border-color .12s, background .12s;}
+.resetbtn:hover{color:var(--chaos); border-color:var(--chaos-deep); background:rgba(82,200,174,.06);}
+.resetbtn:focus-visible{outline:2px solid var(--chaos); outline-offset:2px;}
+.searchbtn{display:inline-flex; align-items:center; gap:8px; font-family:var(--sans); font-weight:650;
+  font-size:13.5px; color:#06120f; cursor:pointer; border:0; border-radius:8px; padding:8px 16px;
+  background:linear-gradient(150deg,#6ad7bf,#2f9e88); box-shadow:0 3px 12px rgba(82,200,174,.22);
+  transition:transform .1s, box-shadow .12s, filter .12s;}
+.searchbtn:hover{filter:brightness(1.07); box-shadow:0 5px 16px rgba(82,200,174,.34);}
+.searchbtn:active{transform:translateY(1px);}
+.searchbtn:focus-visible{outline:2px solid var(--chaos); outline-offset:3px;}
+.searchbtn.busy{filter:saturate(.55) brightness(.85); pointer-events:none;}
+.searchbtn .sp{width:11px; height:11px; border-radius:50%; border:2px solid rgba(6,18,15,.3);
+  border-top-color:#06120f; display:none;}
+.searchbtn.busy .sp{display:inline-block; animation:spin .7s linear infinite;}
+@keyframes spin{to{transform:rotate(360deg)}}
+.ed-note{display:flex; align-items:center; gap:8px; font-size:11.5px; color:var(--faint); line-height:1.35;}
+.pbadge{display:inline-flex; align-items:center; gap:5px; font-family:var(--mono); font-size:10.5px;
+  letter-spacing:.12em; text-transform:uppercase; color:var(--chaos); flex:none;
+  border:1px solid var(--chaos-deep); background:rgba(82,200,174,.08); border-radius:20px; padding:2px 8px;}
+.pbadge .dot{width:5px; height:5px; border-radius:50%; background:var(--chaos); box-shadow:0 0 6px var(--chaos);
+  animation:pulse 1.6s ease-in-out infinite;}
+@keyframes pulse{0%,100%{opacity:.4} 50%{opacity:1}}
+
+.x{position:absolute; top:11px; right:11px; z-index:5; width:22px; height:22px; border-radius:6px;
+  background:transparent; border:1px solid transparent; color:var(--ink-faint); cursor:pointer;
+  font-size:14px; display:grid; place-items:center; transition:.12s;}
+.card:hover .x{color:var(--muted);}
+.x:hover{background:rgba(217,112,102,.14); border-color:#5a2f2c; color:#e69a93;}
+
+.empty{display:none; grid-column:1 / -1; text-align:center; color:var(--faint); padding:60px 20px;}
+
+/* ---------- League selector (F2) ---------- */
+.leaguebar{display:flex; align-items:center; gap:8px;}
+.leaguebar label{font-size:10.5px; letter-spacing:.18em; text-transform:uppercase; color:var(--faint); flex:none;}
+.leaguebar select{flex:1; min-width:0; font-family:var(--sans); font-size:13.5px; color:var(--text);
+  background:var(--panel); border:1px solid var(--border); border-radius:8px; padding:6px 9px; cursor:pointer;
+  appearance:none; -webkit-appearance:none;
+  background-image:linear-gradient(45deg,transparent 50%,var(--muted) 50%),linear-gradient(135deg,var(--muted) 50%,transparent 50%);
+  background-position:calc(100% - 15px) 50%, calc(100% - 10px) 50%; background-size:5px 5px, 5px 5px; background-repeat:no-repeat;}
+.leaguebar select:hover{border-color:#3a4650;}
+.leaguebar select:focus-visible{outline:2px solid var(--chaos); outline-offset:2px;}
+
+/* ---------- Corruption toggle (F1) ---------- */
+.corruptbar{display:flex; align-items:center; gap:9px; margin-top:2px;}
+.corruptbar .cl{font-size:10.5px; letter-spacing:.16em; text-transform:uppercase; color:var(--faint);}
+.ctog{display:inline-flex; border:1px solid var(--border); border-radius:7px; overflow:hidden; background:var(--panel);}
+.ctog button{font-family:var(--mono); font-size:11.5px; letter-spacing:.03em; color:var(--muted);
+  background:transparent; border:0; border-left:1px solid var(--border-soft); padding:3px 10px; cursor:pointer;
+  transition:color .12s, background .12s;}
+.ctog button:first-child{border-left:0;}
+.ctog button:hover{color:var(--text);}
+.ctog button.on{color:#06120f; background:linear-gradient(150deg,#6ad7bf,#2f9e88); font-weight:650;}
+.ctog button:focus-visible{outline:2px solid var(--chaos); outline-offset:-2px;}
+
+/* ---------- poe.ninja reference (F3) ---------- */
+.ninja{display:flex; align-items:center; gap:8px; min-height:0;}
+.ninja:empty{display:none;}
+.ninja .nlabel{font-family:var(--mono); font-size:10px; letter-spacing:.12em; text-transform:uppercase; color:var(--faint);
+  border:1px solid var(--border-soft); border-radius:20px; padding:1px 7px; flex:none;}
+.ninja .nprice{font-family:var(--mono); font-variant-numeric:tabular-nums; font-size:13.5px; color:var(--muted);}
+.ninja .nprice .u{font-size:11px; color:var(--faint); text-transform:uppercase; letter-spacing:.08em;}
+.ninja .nspark{width:66px; height:16px; margin-left:auto; display:block;}
+.ninja .nspark.up{color:var(--good);} .ninja .nspark.dn{color:var(--crit);}
+
+@media (prefers-reduced-motion:reduce){
+  .editor{transition:none;} .searchbtn.busy .sp{animation:none;}
+  .pbadge .dot,.card.appearing,.pblock .pr .psp{animation:none;}
+}
+@media (max-width:820px){
+  .app{grid-template-columns:1fr;}
+  .rail{position:static; height:auto; flex-direction:row; flex-wrap:wrap; align-items:flex-start;
+    border-right:0; border-bottom:1px solid var(--border);}
+  .rail .cd{flex:1; min-width:220px;}
+  .ref,.push{display:none;}
+}
+@media (max-width:600px){ .grid{grid-template-columns:1fr;} .range{padding-left:0;} }
+
+/* ---------- Global shell: shared main-head slots (M1/M2) ----------
+   Every page uses the Price-Check rail as its shell; the main column starts
+   with .mhead (title left, context meta + conn + primary action right). */
+/* Right-aligned context meta block in .mhead (Net Worth: account/league/scan). */
+.mhead .meta{text-align:right; font-size:12px; color:var(--faint); font-family:var(--mono); line-height:1.5;}
+.mhead .meta b{color:var(--muted); font-weight:500;}
+
+/* Connection status pill — shared by all pages, always inside .mhead.
+   JS sets className to "conn live|down". */
+.conn{display:inline-flex; align-items:center; gap:6px; font-size:12px; color:var(--faint); font-family:var(--mono);}
+.conn .cdot{width:7px; height:7px; border-radius:50%; background:var(--faint);}
+.conn.live .cdot{background:var(--good); box-shadow:0 0 7px rgba(103,189,122,.6);}
+.conn.down .cdot{background:var(--crit); box-shadow:0 0 7px rgba(217,112,102,.6);}
+
+/* M2: reserved global status line (#appStatus). Amber attention styling like
+   the rate banner — it announces operational states, not errors. Collapses
+   completely while empty ([hidden]); content arrives via Shell.setStatus. */
+.statusline{margin:0 0 16px; padding:11px 14px; border-radius:11px; font-size:14px; line-height:1.45;
+  color:var(--text); border:1px solid rgba(216,162,74,.42);
+  background:linear-gradient(180deg, rgba(216,162,74,.13), rgba(216,162,74,.06));}
+.statusline[hidden]{display:none;}
+/* Several sources share the slot (net-worth sync, data auto-update): one line
+   each in a fixed order, separated by a hairline, no hierarchy between them. */
+.statusline .statusmsg{display:block;}
+.statusline .statusmsg + .statusmsg{margin-top:7px; padding-top:7px; border-top:1px solid rgba(216,162,74,.22);}
+
+/* ---------- Identity (multi-user routing, no login) ---------- */
+/* "Who am I" chip in the logo. Subtle, right-aligned. */
+.logo .whoami{display:inline-flex; align-items:center; gap:4px;
+  font-family:var(--sans); font-size:12px; letter-spacing:.02em; color:var(--muted);
+  background:var(--panel); border:1px solid var(--border); border-radius:7px;
+  padding:3px 7px; cursor:pointer; text-transform:capitalize;}
+.logo .whoami:hover{border-color:#3a4650; color:var(--text);}
+.logo .whoami .caret{font-size:10px; color:var(--faint);}
+.logo .whoami:focus-visible{outline:2px solid var(--chaos); outline-offset:2px;}
+
+/* R3 nav — FIXED grid, no flow wrapping: one column, one entry per row, so
+   every entry sits at the exact same position on every page. Row 1 is the
+   user switcher (its slot is reserved even while hidden, so the nav never
+   shifts when it appears). The active entry may differ in color/border ONLY —
+   same font, same padding, same box as the links. */
+.logo .navlinks{width:100%; margin-top:8px; display:grid; grid-template-columns:1fr; gap:6px;}
+.navlinks .whoami{justify-self:start;}
+.navlinks .whoami[hidden]{display:inline-flex; visibility:hidden;}
+.backlink{font-family:var(--sans); font-size:14px; color:var(--muted); text-decoration:none;
+  border:1px solid var(--border); border-radius:8px; padding:7px 14px; transition:.12s; white-space:nowrap;}
+/* Beats `.logo span` (which would uppercase/shrink the active <span> entry) —
+   identical typography and box metrics for active and inactive entries. */
+.navlinks .backlink{display:block; font-size:14px; letter-spacing:normal; text-transform:none;
+  color:var(--muted); line-height:1.5; text-align:left;}
+.backlink:hover{border-color:#3a4650; color:var(--text);}
+.backlink:focus-visible{outline:2px solid var(--chaos); outline-offset:2px;}
+.navlinks .backlink.on{color:var(--chaos); border-color:var(--chaos-deep); background:rgba(82,200,174,.08); cursor:default;}
+
+/* Identity gate overlay: requires a selection before connecting. */
+.idgate{position:fixed; inset:0; z-index:100; display:flex; align-items:center; justify-content:center;
+  background:rgba(6,9,12,.82); backdrop-filter:blur(3px); padding:20px;}
+.idgate[hidden]{display:none;}
+.idcard{background:linear-gradient(180deg,var(--panel),#0e141a); border:1px solid var(--border);
+  border-radius:14px; padding:30px 34px 34px; max-width:340px; width:100%; text-align:center;
+  box-shadow:0 20px 60px rgba(0,0,0,.5);}
+.idcard .idlogo{display:flex; justify-content:center; margin-bottom:16px;}
+.idcard .idlogo .sq{width:30px; height:30px; border-radius:8px;
+  background:linear-gradient(140deg,var(--chaos),var(--chaos-deep));
+  box-shadow:0 0 18px rgba(82,200,174,.4);}
+.idcard h2{font-size:20px; font-weight:650; letter-spacing:.02em; margin-bottom:6px;}
+.idcard p{font-size:13.5px; color:var(--muted); line-height:1.5; margin-bottom:20px;}
+.idbtns{display:flex; flex-wrap:wrap; gap:10px; justify-content:center;}
+.idbtns button{flex:1; min-width:110px; font-family:var(--sans); font-size:16px; font-weight:600;
+  letter-spacing:.02em; color:var(--text); text-transform:capitalize;
+  background:var(--panel-2); border:1px solid var(--border); border-radius:9px;
+  padding:12px 16px; cursor:pointer; transition:border-color .12s, background .12s, transform .06s;}
+.idbtns button:hover{border-color:var(--chaos); background:#1e2a30;}
+.idbtns button:active{transform:translateY(1px);}
+.idbtns button:focus-visible{outline:2px solid var(--chaos); outline-offset:2px;}

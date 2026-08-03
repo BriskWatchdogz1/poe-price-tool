@@ -1,0 +1,123 @@
+// Sell-side comparison for the reference rail: given an item's SEPARATED
+// Faustus rates (chaos market vs divine market, see faustus.mjs detail.sell /
+// faustus-store.mjs getSell), which currency pays the seller more right now —
+// and is that comparison even trustworthy?
+//
+//   revenue via chaos  = chaosPerItem
+//   revenue via divine = divinePerItem * chaosPerDivine
+//
+// `chaosPerDivine` MUST be the tool's single shared C:D source (the
+// currency-exchange divine rate, see chaosPerDivineFallback in
+// networth/faustus.mjs) — never a second, private ratio.
+//
+// These rates come from MATCHED trade volumes (what the hour actually filled),
+// not from asks or bids. The absolute numbers are therefore estimates — but
+// the chaos-vs-divine COMPARISON is sound, because both sides are estimated by
+// the exact same procedure and carry the same bias. Do not read more into the
+// per-side numbers than that.
+//
+// ---------------------------------------------------------------------------
+// The outlier case (mandatory, not optional): a side can pass the pricer's
+// quote-volume floor and still be far too thin to compare against — one lone
+// 10-divine trade "prices" the divine side and the rail would then claim a
+// +118 % edge that no real seller can collect. Same disease chooseBulkSlice in
+// engine.mts treats with BULK_EXTREME_SPLIT: when the numbers scream, follow
+// the evidence, not the price. Here the evidence is the digest's own
+// volume_traded, and the consequence is stricter: a side that is not attested
+// does not get compared at all (we show the attested side and drop the claim),
+// because a displayed percentage IS the product here — a wrong one is worse
+// than none.
+//
+// Attestation thresholds, measured on the live Allflame digest (2026-07-31,
+// 8h union, 187 items with BOTH a chaos and a divine market, C:D 174.4).
+// Sides whose estimate was demonstrably wrong (vs poe.ninja / the other,
+// liquid side) versus the thinnest sides whose estimate held up:
+//
+//   item                        thin side   volX   quote-turnover(→c)  claimed gap
+//   The Apothecary              chaos          1       1900c              +277 %  bogus
+//   The Demon                   chaos          1       1423c               +61 %  bogus
+//   Divine Justice              chaos          2        920c              +162 %  bogus
+//   Rogue's Marker              divine    715000       1918c              +384 %  bogus
+//   Tainted Exalted Orb         divine        21       1744c              +102 %  bogus
+//   Tattoo o.t. Ramako Shaman   divine        12       1744c               +53 %  bogus
+//   --- below: thin but consistent with the liquid side -------------------
+//   Corroded Fossil             divine       207       2441c              0.4 %
+//   Bestiary Scarab o.t. Herd   divine       396       1744c              2.4 %
+//   Outfoxed                    divine         3       1744c              5.6 %
+//
+// Two independent failure modes, two floors (a side must clear BOTH):
+//   - volX >= 10: single/double trades of the item itself say nothing
+//     (Apothecary/Demon/Divine Justice — 1-2 cards traded). 10 mirrors the
+//     divine quote floor QUOTE_VOL_MIN and cleared every bogus card side.
+//   - quote turnover >= 5000 chaos-equivalent: every bogus side above sat at
+//     <= 2441c (mostly exactly the 10-divine floor ~1744c — i.e. potentially
+//     ONE trade), while from 5000c upward no gap beyond 78 % was observed and
+//     from 30000c none beyond 20 %. 5000 sits in the empty band above the
+//     bogus outlier, ~2x its top.
+//   The thin-but-honest rows land below the floors too — they are suppressed
+//   as well, which only costs a "~even" badge nobody needed. Better silent
+//   than confidently wrong.
+// ---------------------------------------------------------------------------
+
+export const SELL_MIN_UNITS = 10 // items traded on that side (volX floor)
+export const SELL_MIN_QUOTE_TURNOVER_C = 5000 // quote turnover in chaos-equivalents
+
+// Is one side ({ perItem, volX, volQuote }) attested enough to take part in a
+// comparison? `chaosPerQuote` converts the quote turnover to chaos (1 for the
+// chaos side, C:D for the divine side).
+export function isAttested (side, chaosPerQuote) {
+  if (!side || typeof side.perItem !== 'number' || !isFinite(side.perItem) || side.perItem <= 0) return false
+  if (typeof chaosPerQuote !== 'number' || !isFinite(chaosPerQuote) || chaosPerQuote <= 0) return false
+  if ((side.volX ?? 0) < SELL_MIN_UNITS) return false
+  if ((side.volQuote ?? 0) * chaosPerQuote < SELL_MIN_QUOTE_TURNOVER_C) return false
+  return true
+}
+
+/**
+ * compareSellSides(sell, chaosPerDivine) -> {
+ *   viaChaos:  chaos revenue per item via the chaos market | null,
+ *   viaDivine: chaos revenue per item via the divine market (bridged) | null,
+ *   better:    'chaos' | 'divine' | null,  // null = no comparison claimed
+ *   edgePct:   >= 0, only when better is set (how much more the better side pays),
+ *   only:      'chaos' | 'divine' | null   // the single attested side, when
+ *                                          // exactly one is — show it, claim nothing
+ * } | null when nothing usable is left.
+ *
+ * `sell` is faustus-store's getSell() shape ({ chaos, divine }, either null).
+ * Without a usable chaosPerDivine the divine side cannot be bridged NOR
+ * attested — it is treated as absent (never compared at a bogus ratio).
+ */
+export function compareSellSides (sell, chaosPerDivine) {
+  if (!sell || typeof sell !== 'object') return null
+  const cd = (typeof chaosPerDivine === 'number' && isFinite(chaosPerDivine) && chaosPerDivine > 0)
+    ? chaosPerDivine : null
+
+  const c = sell.chaos && typeof sell.chaos.perItem === 'number' &&
+    isFinite(sell.chaos.perItem) && sell.chaos.perItem > 0 ? sell.chaos : null
+  const d = cd != null && sell.divine && typeof sell.divine.perItem === 'number' &&
+    isFinite(sell.divine.perItem) && sell.divine.perItem > 0 ? sell.divine : null
+
+  const viaChaos = c ? c.perItem : null
+  const viaDivine = d ? d.perItem * cd : null
+  if (viaChaos == null && viaDivine == null) return null
+
+  const cOk = c ? isAttested(c, 1) : false
+  const dOk = d ? isAttested(d, cd) : false
+
+  const out = { viaChaos, viaDivine, better: null, edgePct: null, only: null }
+  if (cOk && dOk) {
+    // Both sides carry real volume -> the comparison may be claimed.
+    if (viaChaos >= viaDivine) {
+      out.better = 'chaos'
+      out.edgePct = (viaChaos / viaDivine - 1) * 100
+    } else {
+      out.better = 'divine'
+      out.edgePct = (viaDivine / viaChaos - 1) * 100
+    }
+  } else if (cOk || dOk) {
+    // Exactly one attested side: show it, drop the comparison (a market that
+    // is missing entirely lands here too — same treatment by design).
+    out.only = cOk ? 'chaos' : 'divine'
+  }
+  return out
+}

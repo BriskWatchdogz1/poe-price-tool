@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Trade Console — Path of Exile</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div class="app">
+
+  <!-- LEFT RAIL -->
+  <aside class="rail">
+    <div class="logo">
+      <span class="sq"></span>
+      <div><b>Trade Console</b><span>Path of Exile</span></div>
+      <!-- Who am I? (multi-user routing, no login). Click -> switch. -->
+      <div class="navlinks">
+        <button class="whoami" id="whoami" type="button" title="Switch user" hidden>
+          <span id="whoamiName">—</span><span class="caret">▾</span>
+        </button>
+        <!-- R3 nav: all three destinations, fixed order; current page marked -->
+        <span class="backlink on" aria-current="page">Price Check</span>
+        <a class="backlink" href="/networth.html">Net Worth</a>
+        <a class="backlink" href="/history.html">History</a>
+      </div>
+    </div>
+
+    <!-- League selector — drives active league for trade + poe.ninja -->
+    <div class="leaguebar">
+      <label for="leagueSel">League</label>
+      <select id="leagueSel" aria-label="Active league"><option>Standard</option></select>
+    </div>
+
+    <!-- Chaos : Divine — driven by cd-ratio -->
+    <div class="cd">
+      <div class="cap">Chaos → Divine</div>
+      <div class="rate"><span class="v" id="cdValue">—</span><span class="u">chaos / div</span></div>
+      <div class="conv"><span class="d">1 Divine</span> = <span class="c" id="cdConv">—</span> Chaos</div>
+      <svg class="spark" viewBox="0 0 240 34" preserveAspectRatio="none" aria-hidden="true">
+        <defs><linearGradient id="sg" x1="0" x2="0" y1="0" y2="1">
+          <stop offset="0" stop-color="#e4bb52" stop-opacity=".28"/><stop offset="1" stop-color="#e4bb52" stop-opacity="0"/>
+        </linearGradient></defs>
+        <path id="cdArea" d="M0,24 L30,25 L60,22 L90,23 L120,19 L150,20 L180,16 L210,15 L240,11 L240,34 L0,34 Z" fill="url(#sg)"/>
+        <path id="cdLine" d="M0,24 L30,25 L60,22 L90,23 L120,19 L150,20 L180,16 L210,15 L240,11" fill="none" stroke="#e4bb52" stroke-width="1.5"/>
+        <circle id="cdDot" cx="240" cy="11" r="2.4" fill="#e4bb52"/>
+      </svg>
+      <div class="foot"><span>live ratio</span><span class="up" id="cdTrend">—</span></div>
+    </div>
+
+    <!-- Currency reference — live from poe.ninja (reference message): Currency +
+         Lifeforce (Harvest lifeforce) + top-5 Beasts, each with a mini sparkline. -->
+    <div class="ref" id="ref"></div>
+
+    <div class="push">Hover an item in-game and press <kbd>your hotkey</kbd> to price-check. Open a card to pick mods, then <kbd>Search</kbd>.</div>
+  </aside>
+
+  <!-- MAIN -->
+  <main class="main">
+    <div class="mhead">
+      <h1>Checked items</h1>
+      <span class="badge" id="badge">0 active</span>
+      <span class="note">searches run on demand only</span>
+      <span class="conn" id="conn"><span class="cdot"></span><span id="connlbl">connecting…</span></span>
+      <button class="clear" id="clear">Clear all</button>
+    </div>
+
+    <!-- M2: reserved global status line (operational states; filled by Shell.setStatus) -->
+    <div class="statusline" id="appStatus" role="status" hidden></div>
+
+    <!-- Shared trade-queue rate-limit / ban banner (rate-limit message). Hidden
+         until GGG hands the app a long Retry-After; unknown to older clients. -->
+    <div class="ratebanner" id="ratebanner" role="status" hidden>
+      <span class="i" aria-hidden="true">!</span>
+      <div class="tx"><b id="rbmsg"></b><span id="rbwait"></span></div>
+    </div>
+
+    <div class="grid" id="grid">
+      <div class="empty" id="empty">No items in the queue. Price-check something in-game.</div>
+    </div>
+  </main>
+</div>
+
+<!-- Identity gate: no login, just routing. Shown when there is no/an invalid
+     ppt_user cookie (or the server sends need-identity). -->
+<div class="idgate" id="idgate" hidden>
+  <div class="idcard">
+    <div class="idlogo"><span class="sq"></span></div>
+    <h2>Who are you?</h2>
+    <p>Used only for routing (your own cards &amp; league). No password.</p>
+    <div class="idbtns" id="idbtns"></div>
+  </div>
+</div>
+
+<script src="shell.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

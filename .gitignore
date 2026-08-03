@@ -1,0 +1,65 @@
+# Secrets — never into the repo
+.env
+.env.*
+config.toml
+*.secret
+
+# Node / Build
+node_modules/
+dist/
+*.log
+
+# Python (daemon bytecode cache)
+__pycache__/
+*.pyc
+
+# Editor / OS
+.DS_Store
+
+# Vendored renderer build artefacts
+renderer/node_modules/
+renderer/dist/
+renderer/public/data/**/*.index.bin
+
+# v2 engine build artefact (can be generated from backend/v2/build.mjs)
+backend/v2/engine.bundle.mjs
+
+# Runtime: stores + per-machine overrides (deploy: ./config:/config mount)
+config/
+docker-compose.override.yml
+
+# --- Local only, NOT in the public repo ---
+# Development/planning lives on locally but doesn't belong in a ship-ready tool.
+#
+# The TESTS used to be ignored here. They are tracked now: a fresh clone ran
+# `npm test` and got "# tests 0" with exit code 0 — green, and nothing checked.
+# The suite is the strongest evidence this project has that its pricing is
+# right, so it ships with it. The runtime image deletes them again (see the
+# find in the Dockerfile) — copying whole directories had pulled them in, and
+# the ones under frontend/ were reachable over HTTP.
+#
+# Dev reports / planning & design documents
+*-report.md
+docs/superpowers/
+docs/design-new-ui-and-multiuser.md
+docs/setup-and-operations.md
+docs/ui-overhaul.md
+# Dead v1 backend (replaced by backend/v2/) — incl. its tests, which npm test
+# does not run either (the script targets backend/v2 only)
+backend/config.js
+backend/proxy.test.js
+backend/server.test.js
+backend/proxy.js
+backend/server.js
+# Obsolete local backend autostart unit (backend now runs in Docker)
+systemd/
+
+# Third-party API docs (GGG / poe.ninja), kept locally for reference only
+docs/vendor-reference/
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+*~
+Thumbs.db

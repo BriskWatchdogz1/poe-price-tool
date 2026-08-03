@@ -1,0 +1,27 @@
+# Keep the build context small — only what the Dockerfile actually copies stays in.
+
+# Deps are freshly installed in the image (npm ci)
+node_modules
+renderer/node_modules
+renderer/dist
+
+# VCS / Editor / OS
+.git
+.gitignore
+.superpowers
+.DS_Store
+*.log
+
+# Not needed in the image
+docs
+test-items
+daemon
+systemd
+
+# Build artefacts — regenerated in the image
+backend/v2/*.bundle.mjs
+renderer/public/data/**/*.index.bin
+
+# Internal reports / notes
+**/*-report.md
+**/PROTOCOL.md

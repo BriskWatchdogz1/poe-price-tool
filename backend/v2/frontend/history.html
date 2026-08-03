@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>History — Path of Exile</title>
+  <link rel="stylesheet" href="styles.css">
+  <style>
+    /* ---------- History — page-local styling, reuses styles.css vars ----------
+       Same shell as every other page: rail on the left (brand/user/nav/league/
+       C:D), page content in .main, M2 status line under the title.
+
+       What this page is FOR, and what it deliberately is not: it answers "what
+       came in and what went out?". The curve carries the shape, the list
+       carries the reasons, and both cover the same window. Pure price moves
+       appear in neither — they were the noise that made the old panel useless. */
+
+    .main{padding:0 0 40px; display:flex; flex-direction:column;}
+    .mhead{position:static; padding-left:22px; padding-right:22px; margin-bottom:0;}
+    .statusline{margin:0 22px 12px;}
+
+    /* ---- toolbar: range segment (same slot/look as List|Grouped on Net Worth) ---- */
+    .hbar{display:flex; align-items:center; gap:14px; padding:6px 22px 14px; flex-wrap:wrap;}
+    .seg{display:inline-flex; border:1px solid var(--border); border-radius:8px; overflow:hidden;}
+    .seg button{font:inherit; font-size:13px; color:var(--muted); background:var(--panel-2);
+      border:0; padding:6px 14px; cursor:pointer;}
+    .seg button + button{border-left:1px solid var(--border);}
+    .seg button.on{background:rgba(82,200,174,.14); color:var(--chaos); font-weight:600;}
+    .hbar .spacer{flex:1;}
+    .hbar .sum{font-family:var(--mono); font-size:12.5px; color:var(--faint);}
+    .hbar .sum b{color:var(--text); font-weight:600;}
+
+    /* ---- chart ---- */
+    .chartbox{margin:0 22px 18px; background:var(--panel-2); border:1px solid var(--border);
+      border-radius:12px; padding:14px 14px 8px;}
+    .chartbox svg{display:block; width:100%; height:auto;}
+    .grid{stroke:var(--border); stroke-width:1; opacity:.55;}
+    .axlbl{fill:var(--faint); font-size:11px; font-family:var(--mono);}
+    .tline{fill:none; stroke:var(--chaos); stroke-width:2; stroke-linejoin:round; stroke-linecap:round;}
+    .tarea{fill:url(#hgrad);}
+    /* Event dots: the ONLY click targets on this chart. Everything between them
+       is just the curve — the old page made every recorded minute clickable. */
+    .edot{fill:var(--bg); stroke:var(--chaos); stroke-width:2; cursor:pointer;}
+    .edot.neg{stroke:var(--crit);}
+    .edot.sel{fill:var(--chaos); r:6;}
+    .edot.sel.neg{fill:var(--crit);}
+    .hover{stroke:var(--faint); stroke-width:1; stroke-dasharray:3 3; opacity:.7;}
+    .chartempty{padding:40px 0 44px; text-align:center; color:var(--faint); font-size:13.5px;}
+
+    /* ---- event list ---- */
+    .evhead{display:flex; align-items:baseline; gap:10px; padding:0 22px 8px;}
+    .evhead h2{margin:0; font-size:13px; letter-spacing:.09em; text-transform:uppercase; color:var(--muted);}
+    .evhead .note{font-size:12px; color:var(--faint);}
+    .events{margin:0 22px; display:flex; flex-direction:column; gap:8px;}
+    .ev{background:var(--panel-2); border:1px solid var(--border); border-radius:10px;
+      padding:10px 12px; cursor:default; scroll-margin-top:14px;}
+    .ev.sel{border-color:var(--chaos-deep); background:var(--panel);}
+    .evtop{display:flex; align-items:baseline; gap:10px; margin-bottom:6px;}
+    .evtime{font-family:var(--mono); font-size:12.5px; color:var(--muted);}
+    .evago{font-size:12px; color:var(--faint);}
+    .evsum{margin-left:auto; font-family:var(--mono); font-size:13.5px; font-weight:600;}
+    /* Own names: in styles.css, .up already belongs to the C:D trend in the rail. */
+    .gain{color:var(--chaos);} .loss{color:var(--crit);}
+    .evrow{display:flex; align-items:baseline; gap:10px; padding:2px 0; font-size:13.5px;}
+    .evrow .n{flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+    .evrow .q{font-family:var(--mono); font-size:12.5px; color:var(--muted); flex:none;}
+    .evrow .v{font-family:var(--mono); font-size:12.5px; flex:none; min-width:74px; text-align:right;}
+    .evnone{margin:0 22px; color:var(--faint); font-size:13.5px; line-height:1.6;}
+
+    /* ---- rail R6: what this window covers ---- */
+    .cov{margin-top:4px;}
+    .cov h3{margin:0 0 8px; font-size:12px; letter-spacing:.09em; text-transform:uppercase; color:var(--muted);}
+    .covrow{display:flex; justify-content:space-between; gap:8px; padding:3px 0; font-size:13px;}
+    .covrow span:last-child{font-family:var(--mono); color:var(--text);}
+    .covfld{display:flex; flex-direction:column; gap:5px; margin-top:12px; padding-top:10px;
+      border-top:1px dashed var(--border-soft); font-size:12px; color:var(--muted);}
+    .covfld select{width:100%;}
+    .covnote{margin-top:10px; font-size:11.5px; color:var(--faint); line-height:1.5;}
+    /* Falling stretch of the curve — the direction must read between the dots,
+       not only on them. */
+    .tline.dn{stroke:var(--crit);}
+  </style>
+</head>
+<body>
+<div class="app">
+  <!-- RAIL — identical slots on every page (see shell.js) -->
+  <aside class="rail">
+    <div class="logo">
+      <span class="sq"></span>
+      <div><b>Trade Console</b><span>Path of Exile</span></div>
+      <div class="navlinks">
+        <button class="whoami" id="whoami" type="button" title="Switch user" hidden>
+          <span id="whoamiName">—</span><span class="caret">▾</span>
+        </button>
+        <a class="backlink" href="/">Price Check</a>
+        <a class="backlink" href="/networth.html">Net Worth</a>
+        <span class="backlink on" aria-current="page">History</span>
+      </div>
+    </div>
+
+    <div class="leaguebar">
+      <label for="leagueSel">League</label>
+      <select id="leagueSel" aria-label="Active league"><option>Standard</option></select>
+    </div>
+
+    <div class="cd">
+      <div class="cap">Chaos → Divine</div>
+      <div class="rate"><span class="v" id="cdValue">—</span><span class="u">chaos / div</span></div>
+      <div class="conv"><span class="d">1 Divine</span> = <span class="c" id="cdConv">—</span> Chaos</div>
+      <svg class="spark" viewBox="0 0 240 34" preserveAspectRatio="none" aria-hidden="true">
+        <defs><linearGradient id="sg" x1="0" x2="0" y1="0" y2="1">
+          <stop offset="0" stop-color="#e4bb52" stop-opacity=".28"/><stop offset="1" stop-color="#e4bb52" stop-opacity="0"/>
+        </linearGradient></defs>
+        <path id="cdArea" d="M0,24 L240,11 L240,34 L0,34 Z" fill="url(#sg)"/>
+        <path id="cdLine" d="M0,24 L240,11" fill="none" stroke="#e4bb52" stroke-width="1.5"/>
+        <circle id="cdDot" cx="240" cy="11" r="2.4" fill="#e4bb52"/>
+      </svg>
+      <div class="foot"><span>live ratio</span><span class="up" id="cdTrend">—</span></div>
+    </div>
+
+    <!-- R6 page rail content: what the shown window actually covers. -->
+    <div class="railtabs cov" id="covBox" hidden>
+      <h3>This window</h3>
+      <div class="covrow"><span>Range</span><span id="covRange">—</span></div>
+      <div class="covrow"><span>Recorded</span><span id="covRec">—</span></div>
+      <div class="covrow"><span>Events</span><span id="covEv">—</span></div>
+      <div class="covrow"><span>Net change</span><span id="covNet">—</span></div>
+      <label class="fld covfld">Count as an event from
+        <select id="minSel">
+          <option value="0">everything recorded</option>
+          <option value="0.5">0.5 div</option>
+          <option value="1" selected>1 div</option>
+          <option value="3">3 div</option>
+          <option value="10">10 div</option>
+        </select>
+      </label>
+      <p class="covnote">Events are stock movements — what came in and what went
+        out. Price moves are in the curve, not in the list.</p>
+    </div>
+  </aside>
+
+  <!-- MAIN -->
+  <main class="main">
+    <div class="mhead">
+      <h1>History</h1>
+      <span class="conn" id="conn"><span class="cdot"></span><span id="connlbl">connecting…</span></span>
+    </div>
+    <div class="statusline" id="appStatus" role="status" hidden></div>
+
+    <div class="hbar">
+      <div class="seg" id="rangeSeg" role="group" aria-label="Time range">
+        <button type="button" data-r="1h">1h</button>
+        <button type="button" data-r="6h">6h</button>
+        <button type="button" data-r="24h" class="on">24h</button>
+        <button type="button" data-r="7d">7d</button>
+        <button type="button" data-r="14d">14d</button>
+      </div>
+      <span class="spacer"></span>
+      <span class="sum" id="headSum"></span>
+    </div>
+
+    <div class="chartbox">
+      <svg id="chart" viewBox="0 0 1000 260" preserveAspectRatio="none" role="img" aria-label="Net worth over time">
+        <defs><linearGradient id="hgrad" x1="0" x2="0" y1="0" y2="1">
+          <stop offset="0" stop-color="#52c8ae" stop-opacity=".22"/>
+          <stop offset="1" stop-color="#52c8ae" stop-opacity="0"/>
+        </linearGradient></defs>
+        <g id="chartBody"></g>
+      </svg>
+      <p class="chartempty" id="chartEmpty" hidden>Collecting data…</p>
+    </div>
+
+    <div class="evhead">
+      <h2>What moved</h2>
+      <span class="note" id="evNote"></span>
+    </div>
+    <div class="events" id="events"></div>
+    <p class="evnone" id="evNone" hidden></p>
+  </main>
+</div>
+
+<!-- Identity gate: mirrored from index.html (ppt_user cookie). -->
+<div class="idgate" id="idgate" hidden>
+  <div class="idcard">
+    <div class="idlogo"><span class="sq"></span></div>
+    <h2>Who are you?</h2>
+    <p>Used only for routing (your own league). No password.</p>
+    <div class="idbtns" id="idbtns"></div>
+  </div>
+</div>
+
+<script src="shell.js"></script>
+<script type="module" src="history.js"></script>
+</body>
+</html>

@@ -1,0 +1,40 @@
+# poe-price-daemon — configuration. Copy to
+#   ~/.config/poe-price-daemon/config.toml
+# and adjust. Nothing is hardcoded in the daemon.
+
+# --- Price check ---
+# The daemon polls the clipboard and prices every PoE item copied to it. It has
+# no key binding of its own: bind a key to Ctrl+Alt+C ("copy item with advanced
+# mod descriptions" in PoE) wherever you prefer — the game's keybind settings, a
+# desktop shortcut, or the software of a programmable input device. Then hover
+# an item, press the key, and it appears in the browser.
+#
+# A `key = "..."` entry is ignored; the daemon does not read one.
+
+# Backend address. Local: http://127.0.0.1:8788. Behind a reverse proxy with
+# enforced HTTPS, use the https URL.
+backend_url = "http://127.0.0.1:8788"
+
+# User namespace — must be in the backend's POE_USERS list.
+user = "player1"
+
+# Window class used to detect PoE (substring, case-insensitive) — used for
+# the CHAT MACROS focus gate below (price check itself is clipboard-driven
+# and needs no focus check). Find it (in the PoE window):
+#   xdotool getwindowfocus getwindowclassname
+poe_window_class = "steam_app_238960"
+
+# ydotool socket. Leave empty -> $XDG_RUNTIME_DIR/.ydotool_socket. Only used
+# by the chat macros below (ydotool key injection); price check needs no ydotool.
+# ydotool_socket = ""
+
+[macros]
+keyboard_layout = "us"     # "us" | "de" — so chat commands type correctly
+chat_open_delay_ms = 45
+keystroke_delay_ms = 12
+[macros.keys]              # key -> chat command (freely extendable; remove the section to disable)
+F5 = "/hideout"
+F6 = "/kingsmarch"
+F7 = "/delve"
+F8 = "/menagerie"
+F9 = "/monastery"

@@ -1,0 +1,425 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Net Worth — Path of Exile</title>
+  <link rel="stylesheet" href="styles.css">
+  <style>
+    /* ---------- Net Worth — page-local styling, reuses styles.css vars ----------
+       Shell is the global rail (styles.css): brand/user/nav/league/C:D on the
+       left, page content in .main. Page-specific here: the stash-tab picker as
+       the rail's R6 block, the totals summary band, and the filterable
+       sell view (collapsible category overview, list/grouped toggle, kind
+       chips, search, value threshold). */
+
+    /* .main pads 22px globally (styles.css); this page's sections bring their
+       own horizontal padding -> switch the main column to zero side padding. */
+    .main{padding:0 0 40px; display:flex; flex-direction:column;}
+    /* Header scrolls away like before the shell move; the filter toolbar below
+       is the sticky element on this page. */
+    .mhead{position:static; padding-left:22px; padding-right:22px; margin-bottom:0;}
+    .statusline{margin:0 22px 12px;}
+
+    /* ---- rail sync line (bottom of R6, below the tab list): plain text, no
+           dot — the conn pill next to the title is the ONLY live indicator.
+           Account + last-scan time hang on it as a title attribute. ---- */
+    .autosync{margin:10px 2px 0; font-family:var(--mono); font-size:11.5px; color:var(--faint); line-height:1.4;}
+    .autosync:empty{display:none;}
+    .errbox{margin:0 22px 14px; background:rgba(217,112,102,.08); border:1px solid #5a2f2c; border-radius:10px;
+      padding:12px 14px; color:#e69a93; font-size:14px;}
+    .noresult{padding:40px 22px; text-align:center; color:var(--faint); font-size:14px;}
+
+    /* ---- M4 summary band: totals left, link to the history page right ---- */
+    .summary{display:flex; align-items:center; gap:14px 18px; flex-wrap:wrap;
+      padding:10px 22px 14px; border-bottom:1px solid var(--border-soft);}
+    .totals{display:flex; align-items:baseline; gap:10px;}
+    .totals .div{font-family:var(--mono); font-size:25px; font-weight:600; color:var(--divine); letter-spacing:-.01em;}
+    .totals .div u{font-size:12px; color:var(--faint); text-decoration:none; margin-left:3px; letter-spacing:.1em; text-transform:uppercase;}
+    .totals .c{font-family:var(--mono); font-size:14.5px; color:var(--chaos);}
+    .tohistory{margin-left:auto; font-size:13px; color:var(--muted); text-decoration:none;
+      border:1px solid var(--border); border-radius:8px; padding:5px 12px;}
+    .tohistory:hover{color:var(--chaos); border-color:var(--chaos-deep);}
+
+    /* ---- R6 rail block: stash-tab picker (search, threshold, tab list) ---- */
+    .railtabs{display:flex; flex-direction:column; gap:6px; border-top:1px dashed var(--border-soft); padding-top:14px;}
+    .railtabs[hidden]{display:none;}
+    .railtabs h3{font-size:11px; letter-spacing:.18em; text-transform:uppercase; color:var(--faint); margin:2px 4px 6px;
+      display:flex; align-items:center; justify-content:space-between;}
+    .railtabs h3 .mini{font-family:var(--mono); letter-spacing:0; text-transform:none; color:var(--muted);}
+    /* Global filters (search + threshold) live at the top of the block —
+       they drive the whole page: rail tab values AND the main view. */
+    .sidefilters{display:flex; flex-direction:column; gap:8px; margin:0 0 14px; padding-bottom:12px;
+      border-bottom:1px dashed var(--border-soft);}
+    .sidefilters .search{width:100%; min-width:0;}
+    .sidefilters .sidefld{width:100%; flex-wrap:wrap; white-space:normal;}
+    .sidefilters .sidefld select{width:100%;}
+    .sideacts{display:flex; gap:6px; margin:0 2px 8px;}
+    .sideacts button{flex:1; font:inherit; font-size:12px; color:var(--muted); background:var(--panel-2);
+      border:1px solid var(--border); border-radius:6px; padding:4px 0; cursor:pointer;}
+    .sideacts button:hover{color:var(--text); border-color:var(--chaos-deep);}
+    /* Active tab-selection mode (all/none/valued) — same accent as kind chips. */
+    .sideacts button.on{background:rgba(82,200,174,.14); border-color:var(--chaos-deep); color:var(--chaos); font-weight:600;}
+    .sideacts button.on:hover{border-color:var(--chaos);}
+    .tabrow{display:flex; align-items:center; gap:7px; padding:5px 6px; border-radius:6px; cursor:pointer; user-select:none;}
+    .tabrow:hover{background:var(--panel);}
+    .tabrow:focus-visible{outline:2px solid var(--chaos-deep); outline-offset:-2px;}
+    .tabrow.dragging{opacity:.4;}
+    .tabrow .dragh{flex:none; cursor:grab; color:var(--faint); font-size:12px; letter-spacing:-2px;}
+    /* Tri-state mark, drawn by us (see TAB_STATE_MARK): checked / empty / X.
+       A native checkbox only offers two clickable states. */
+    .tabrow .tri{flex:none; width:14px; height:14px; border-radius:3px; border:1px solid var(--border);
+      display:flex; align-items:center; justify-content:center; font-size:10px; line-height:1;}
+    .tabrow.st-on .tri{background:var(--chaos); border-color:var(--chaos); color:var(--bg); font-weight:700;}
+    .tabrow.st-ignored .tri{border-style:dashed; color:var(--faint);}
+    .tabrow .tn{flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:13.5px;}
+    .tabrow:not(.st-on) .tn{color:var(--muted);}
+    .tabrow.st-ignored{opacity:.55;}
+    .tabrow.st-ignored .tn{text-decoration:line-through; text-decoration-color:var(--faint);}
+    .tabrow .tv{font-family:var(--mono); font-size:12.5px; color:var(--faint); flex:none;}
+    .tabrow.st-on .tv{color:var(--chaos);}
+    .resetorder{margin:8px 2px 0; font:inherit; font-size:11.5px; color:var(--faint); background:none;
+      border:1px dashed var(--border); border-radius:6px; padding:4px 0; cursor:pointer;}
+    .resetorder:hover{color:var(--muted); border-color:var(--chaos-deep);}
+    .sidetip{margin:8px 2px 0; font-size:11.5px; color:var(--faint); line-height:1.4;}
+
+    /* ---- main content ---- */
+    .overview{border-bottom:1px solid var(--border-soft); padding:14px 22px;}
+    .ovhead{display:flex; align-items:center; gap:10px; cursor:pointer;}
+    .ovhead h3{font-size:11px; letter-spacing:.18em; text-transform:uppercase; color:var(--faint); margin:0;}
+    .ovhead .chev{color:var(--faint); font-size:12px; transition:transform .15s;}
+    .overview.closed .chev{transform:rotate(-90deg);}
+    .overview.closed .bars{display:none;}
+    .bars{display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); gap:10px; margin-top:12px;}
+    .bar{background:var(--panel); border:1px solid var(--border-soft); border-radius:8px; padding:9px 11px;}
+    .bar .l{display:flex; justify-content:space-between; gap:8px; font-size:13px; color:var(--muted);}
+    .bar .l b{color:var(--text); font-family:var(--mono); font-weight:500; white-space:nowrap;}
+    .bar .l .pct{color:var(--faint);}
+    .bar .track{height:5px; border-radius:3px; background:var(--sunk); margin-top:7px; overflow:hidden;}
+    .bar .fill{height:100%; background:linear-gradient(90deg,var(--chaos-deep),var(--chaos));}
+
+    /* ---- toolbar (view/filter actions — sticky above the affected content) ---- */
+    .toolbar{position:sticky; top:0; z-index:10; background:var(--bg); border-bottom:1px solid var(--border);
+      padding:12px 22px; display:flex; flex-wrap:wrap; align-items:center; gap:10px 14px;}
+    .seg{display:inline-flex; border:1px solid var(--border); border-radius:8px; overflow:hidden; flex:none;}
+    .seg button{font:inherit; font-size:13px; color:var(--muted); background:transparent; border:0; padding:6px 13px; cursor:pointer;}
+    .seg button.on{background:var(--panel-2); color:var(--text);}
+    .seg button+button{border-left:1px solid var(--border);}
+    .chips{display:flex; flex-wrap:wrap; gap:6px;}
+    .chip{font:inherit; font-size:12.5px; color:var(--muted); background:var(--panel); border:1px solid var(--border);
+      border-radius:20px; padding:4px 11px; cursor:pointer; white-space:nowrap;}
+    .chip:hover{color:var(--text);}
+    .chip.on{background:rgba(82,200,174,.12); border-color:var(--chaos-deep); color:var(--chaos);}
+    /* An action, not a filter: set apart on the left, square instead of pill
+       shaped, so the button does not read as another category chip. */
+    .actbtn{font:inherit; font-size:12.5px; color:var(--chaos); background:var(--panel-2);
+      border:1px solid var(--chaos-deep); border-radius:7px; padding:4px 11px; cursor:pointer; white-space:nowrap;
+      display:inline-flex; align-items:center; gap:6px; margin-left:14px; position:relative;}
+    .actbtn::before{content:''; position:absolute; left:-8px; top:2px; bottom:2px; width:1px; background:var(--border);}
+    .actbtn:hover{background:rgba(82,200,174,.12);}
+    .hl .actbtn::before{display:none;}
+    .actbtn.on{background:rgba(82,200,174,.18); color:var(--text);}
+    .search{display:flex; align-items:center; gap:6px; background:var(--sunk); border:1px solid var(--border); border-radius:8px;
+      padding:5px 9px; min-width:150px;}
+    .search input{background:transparent; border:0; color:var(--text); font:inherit; font-size:13.5px; width:100%; outline:none;}
+    .search svg{flex:none; color:var(--faint);}
+    .fld{display:flex; align-items:center; gap:7px; font-size:12px; color:var(--faint); letter-spacing:.02em; white-space:nowrap;}
+    .fld select{font:inherit; font-size:13px; color:var(--text); background:var(--panel-2); border:1px solid var(--border);
+      border-radius:7px; padding:5px 8px; cursor:pointer;}
+
+    .stripe{padding:7px 22px; font-size:12.5px; color:var(--faint); font-family:var(--mono);
+      border-bottom:1px solid var(--border-soft); display:flex; gap:16px; flex-wrap:wrap;}
+    .stripe b{color:var(--chaos); font-weight:500;}
+
+    /* ---- table (list view) ---- */
+    .wrap{overflow-x:auto; padding:2px 22px 40px;}
+    .wrap table{width:100%; border-collapse:collapse;}
+    .wrap thead th{text-align:left; font-size:11px; letter-spacing:.1em; text-transform:uppercase; color:var(--faint);
+      font-weight:500; padding:10px 10px; border-bottom:1px solid var(--border); cursor:pointer; user-select:none;}
+    .wrap thead th.r{text-align:right;}
+    .wrap thead th .ar{color:var(--chaos); margin-left:4px; font-size:10px;}
+    .wrap tbody td{padding:8px 10px; border-bottom:1px solid var(--border-soft); vertical-align:middle;}
+    .wrap tbody tr:hover td{background:var(--panel);}
+    .wrap td.r{text-align:right; font-family:var(--mono); font-variant-numeric:tabular-nums;}
+    .iname{display:flex; align-items:center; gap:8px;}
+    .kb{font-size:10.5px; letter-spacing:.06em; text-transform:uppercase; padding:2px 6px; border-radius:4px; flex:none;
+      border:1px solid var(--border); color:var(--muted); background:var(--panel-2);}
+    .kb.unique{color:#c9915a; border-color:#5a3f28; background:rgba(201,145,90,.08);}
+    .kb.gem{color:#5ec6c6; border-color:#2c5a5a; background:rgba(94,198,198,.08);}
+    .kb.stackable{color:var(--chaos); border-color:var(--chaos-deep); background:rgba(82,200,174,.06);}
+    .kb.beast{color:#b48ad6; border-color:#4a3a5a; background:rgba(180,138,214,.08);}
+    .kb.divcard{color:#7fa9d9; border-color:#33506e; background:rgba(127,169,217,.08);}
+    .kb.incubator{color:var(--warn); border-color:#5a4a28; background:rgba(216,162,74,.08);}
+    .kb.vial{color:var(--good); border-color:#2c4a30; background:rgba(103,189,122,.08);}
+    .kb.corpse{color:var(--crit); border-color:#5a2f2c; background:rgba(217,112,102,.08);}
+    .tabcell{color:var(--muted); font-size:13px;}
+    .val{color:var(--text);} .val.div{color:var(--divine);} .val .u{color:var(--faint); font-size:11.5px;}
+    .empty{padding:34px; text-align:center; color:var(--faint);}
+
+    /* open-in-trade link */
+    .tradebtn{flex:none; display:inline-flex; align-items:center; justify-content:center; width:20px; height:20px;
+      color:var(--faint); background:none; border:1px solid transparent; border-radius:5px; padding:0; cursor:pointer;
+      text-decoration:none; transition:color .12s, border-color .12s, background .12s;}
+    .tradebtn:hover{color:var(--chaos); border-color:var(--chaos-deep); background:rgba(82,200,174,.08);}
+    .tradebtn:focus-visible{outline:2px solid var(--chaos); outline-offset:1px;}
+
+    /* ---- grouped view ---- */
+    .grp{border:1px solid var(--border-soft); border-radius:9px; margin:12px 0; overflow:hidden; background:var(--panel);}
+    .grph{display:flex; align-items:center; gap:11px; padding:11px 14px; cursor:pointer; background:var(--panel-2);}
+    .grph .chev{color:var(--faint); font-size:12px; transition:transform .15s;}
+    .grp.closed .chev{transform:rotate(-90deg);}
+    .grp.closed .grpbody{display:none;}
+    .grph .gtitle{font-size:14.5px; font-weight:600; letter-spacing:.01em;}
+    .grph .gcount{font-size:12.5px; color:var(--faint); font-family:var(--mono);}
+    .grph .gval{margin-left:auto; font-family:var(--mono); font-size:15px; color:var(--divine);}
+    .grpbody table{border-top:1px solid var(--border-soft);}
+    .grpbody tbody tr:hover td{background:var(--panel-2);}
+
+    /* ---- Stash-Highlight ---- */
+    .hl{margin:0 22px 10px; padding:10px 12px; border:1px solid var(--border); border-radius:9px;
+      background:var(--panel-2); display:grid; gap:8px;}
+    .hl[hidden]{display:none;}
+    .hl .row{display:flex; align-items:center; gap:10px; flex-wrap:wrap;}
+    .hl input[type=text]{flex:1 1 320px; min-width:0; font-family:var(--mono); font-size:13.5px; color:var(--chaos);
+      background:var(--bg); border:1px solid var(--border); border-radius:7px; padding:7px 9px;}
+    .hl input[type=number]{width:64px; font:inherit; font-size:13px; color:var(--text); background:var(--bg);
+      border:1px solid var(--border); border-radius:7px; padding:5px 7px;}
+    .hl .meta{font-family:var(--mono); font-size:12px; color:var(--faint);}
+    .hl .warnline{font-size:12px; color:var(--warn);}
+    .hl .warnline b{font-weight:500;}
+
+    /* ---- unpriced / history ---- */
+    .unpriced{margin:6px 22px 34px; font-size:13px; color:var(--muted);}
+    .unpriced summary{cursor:pointer; color:var(--warn); font-size:12.5px; padding:4px 0;}
+    .unpriced li{font-family:var(--mono); font-size:12px; padding:2px 0; list-style:none;}
+    .historysec{margin:0 22px 34px; padding-top:14px; border-top:1px solid var(--border-soft);}
+    .historysec h3.sect{font-size:12px; letter-spacing:.14em; text-transform:uppercase; color:var(--faint); margin:0 0 8px;}
+    .historysec li{font-family:var(--mono); font-size:12.5px; color:var(--muted); padding:3px 0; list-style:none;}
+
+    /* ---- sync-settings dialog (M1 action + clickable status line open it) ---- */
+    .statusline{cursor:pointer;}
+    .setgate{position:fixed; inset:0; z-index:90; display:flex; align-items:center; justify-content:center;
+      background:rgba(4,7,9,.72); padding:16px;}
+    .setgate[hidden]{display:none;}
+    .setcard{width:min(440px,100%); background:linear-gradient(180deg,var(--panel),#0e141a);
+      border:1px solid var(--border); border-radius:14px; padding:22px 24px;
+      box-shadow:0 24px 60px rgba(0,0,0,.6);}
+    .setcard h2{font-size:18px; font-weight:650; letter-spacing:.02em; margin:0 0 4px;}
+    .setcard .setstate{font-family:var(--mono); font-size:12.5px; color:var(--muted); margin:0 0 16px; line-height:1.45;}
+    .setcard .setstate.warn{color:var(--warn);}
+    .setcard label{display:block; font-size:12px; letter-spacing:.06em; text-transform:uppercase;
+      color:var(--faint); margin:0 0 12px;}
+    .setcard label input{display:block; width:100%; margin-top:5px; font-family:var(--mono); font-size:13.5px;
+      color:var(--text); background:var(--sunk); border:1px solid var(--border); border-radius:8px; padding:8px 10px;}
+    .setcard label input:focus-visible{outline:2px solid var(--chaos); outline-offset:1px;}
+    .setcard .sethint{font-size:12px; color:var(--warn); margin:-6px 0 12px; line-height:1.45;}
+    .setcard .seterr{font-size:12.5px; color:#e69a93; margin:0 0 12px; line-height:1.45;}
+    .setcard .sethint[hidden],.setcard .seterr[hidden]{display:none;}
+    .setbtns{display:flex; justify-content:flex-end; gap:10px; margin-top:4px;}
+    .setbtns button{font:inherit; font-size:13.5px; border-radius:8px; padding:7px 16px; cursor:pointer;
+      background:transparent; border:1px solid var(--border); color:var(--muted);}
+    .setbtns button:hover{border-color:#3a4650; color:var(--text);}
+    .setbtns button.primary{background:rgba(82,200,174,.14); border-color:var(--chaos-deep); color:var(--chaos); font-weight:600;}
+    .setbtns button.primary:hover{border-color:var(--chaos);}
+    .setbtns button:disabled{opacity:.55; cursor:default;}
+    .setcard .setnote{font-size:11.5px; color:var(--faint); margin:14px 0 0; line-height:1.5;}
+
+    @media (max-width:820px){
+      .railtabs{flex:1 1 100%; border-top:0;}
+      .toolbar{position:static;}
+    }
+    @media (max-width:600px){
+      .mhead,.statusline,.summary,.overview,.toolbar,.stripe,.wrap,.unpriced,.historysec{padding-left:14px; padding-right:14px;}
+      .statusline{margin-left:0; margin-right:0;}
+    }
+  </style>
+</head>
+<body>
+
+<div class="app">
+
+  <!-- LEFT RAIL — global shell (R1 brand, R2 user, R3 nav, R4 league, R5 C:D) -->
+  <aside class="rail">
+    <div class="logo">
+      <span class="sq"></span>
+      <div><b>Trade Console</b><span>Path of Exile</span></div>
+      <div class="navlinks">
+        <button class="whoami" id="whoami" type="button" title="Switch user" hidden>
+          <span id="whoamiName">—</span><span class="caret">▾</span>
+        </button>
+        <a class="backlink" href="/">Price Check</a>
+        <span class="backlink on" aria-current="page">Net Worth</span>
+        <a class="backlink" href="/history.html">History</a>
+      </div>
+    </div>
+
+    <!-- League selector — same global slot as on Price Check -->
+    <div class="leaguebar">
+      <label for="leagueSel">League</label>
+      <select id="leagueSel" aria-label="Active league"><option>Standard</option></select>
+    </div>
+
+    <!-- Chaos : Divine — driven by cd-ratio (broadcast to every page) -->
+    <div class="cd">
+      <div class="cap">Chaos → Divine</div>
+      <div class="rate"><span class="v" id="cdValue">—</span><span class="u">chaos / div</span></div>
+      <div class="conv"><span class="d">1 Divine</span> = <span class="c" id="cdConv">—</span> Chaos</div>
+      <svg class="spark" viewBox="0 0 240 34" preserveAspectRatio="none" aria-hidden="true">
+        <defs><linearGradient id="sg" x1="0" x2="0" y1="0" y2="1">
+          <stop offset="0" stop-color="#e4bb52" stop-opacity=".28"/><stop offset="1" stop-color="#e4bb52" stop-opacity="0"/>
+        </linearGradient></defs>
+        <path id="cdArea" d="M0,24 L30,25 L60,22 L90,23 L120,19 L150,20 L180,16 L210,15 L240,11 L240,34 L0,34 Z" fill="url(#sg)"/>
+        <path id="cdLine" d="M0,24 L30,25 L60,22 L90,23 L120,19 L150,20 L180,16 L210,15 L240,11" fill="none" stroke="#e4bb52" stroke-width="1.5"/>
+        <circle id="cdDot" cx="240" cy="11" r="2.4" fill="#e4bb52"/>
+      </svg>
+      <div class="foot"><span>live ratio</span><span class="up" id="cdTrend">—</span></div>
+    </div>
+
+    <!-- R6 page rail content: stash-tab selection, drag-to-reorder, order kept
+         in localStorage. Hidden until the first snapshot arrives. -->
+    <div class="railtabs" id="sideBox" hidden>
+      <!-- Global filters: search + value threshold. Threshold drives BOTH the
+           rail tab values below AND the main list/grouped view. -->
+      <div class="sidefilters">
+        <label class="search">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+          <input id="q" placeholder="Search item…" autocomplete="off">
+        </label>
+        <label class="fld sidefld">Hide items worth less than
+          <select id="threshSel">
+            <option value="0">Off</option>
+            <option value="1" selected>1c</option>
+            <option value="3">3c</option>
+            <option value="5">5c</option>
+            <option value="10">10c</option>
+            <option value="25">25c</option>
+            <option value="50">50c</option>
+            <option value="100">100c</option>
+            <option value="div">1 div</option>
+          </select>
+        </label>
+      </div>
+
+      <h3>Stash tabs <span class="mini" id="sideCount"></span></h3>
+      <div class="sideacts">
+        <button id="selAll" type="button">All</button>
+        <button id="selNone" type="button">None</button>
+        <button id="selValued" type="button" title="Select only tabs that contain priced items above the threshold">Only w/ value</button>
+      </div>
+      <div id="tabList"></div>
+      <button id="resetOrder" class="resetorder" type="button" hidden>Reset order</button>
+      <!-- Sync freshness — plain text ("8/18 tabs fresh · oldest synced 15 min
+           ago"); account, league + last scan live in its title attribute. -->
+      <div class="autosync" id="autosync" title="A background refresher syncs one stash tab at a time, staying under GGG's rate limit."></div>
+    </div>
+  </aside>
+
+  <!-- MAIN -->
+  <main class="main">
+    <div class="mhead">
+      <h1>Net Worth</h1>
+      <span class="conn" id="conn"><span class="cdot"></span><span id="connlbl">connecting…</span></span>
+      <!-- M1 whole-page action slot (far right, see the layout slots in styles.css): sync
+           credentials for the CURRENT user — accountName + POESESSID. -->
+      <button class="clear" id="settingsBtn" type="button">Sync settings</button>
+    </div>
+
+    <!-- M2: reserved global status line (operational states; filled by Shell.setStatus).
+         On this page it is clickable and opens the sync-settings dialog — every
+         state it can show here ("expired", "no credentials") is fixed there. -->
+    <div class="statusline" id="appStatus" role="status" hidden></div>
+
+    <!-- M4 summary band: the totals. The value-over-time view lives on its own
+         page now (history.html) — a sparkline next to the numbers had no axes,
+         no scale, and made every recorded minute a click target. -->
+    <section class="summary">
+      <div class="totals"><span class="div" id="totalDiv">—</span><span class="c" id="totalChaos">—</span></div>
+      <a class="tohistory" href="/history.html">History →</a>
+    </section>
+
+    <div class="errbox" id="errBox" hidden></div>
+
+    <div class="noresult" id="noResult">Building your snapshot in the background — this fills in automatically.</div>
+
+    <div id="shell" hidden>
+      <section class="overview" id="overview">
+        <div class="ovhead" id="ovToggle"><span class="chev">▾</span><h3>Overview — by category</h3></div>
+        <div class="bars" id="bars"></div>
+      </section>
+
+      <div class="toolbar">
+        <div class="seg" id="viewSeg">
+          <button type="button" data-v="list">List</button>
+          <button type="button" data-v="grouped" class="on">Grouped</button>
+        </div>
+        <div class="chips" id="kindChips"></div>
+        <button type="button" class="actbtn" id="hlToggle" title="Turns the visible selection into a search string for the in-game stash search field"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>Stash Highlight</button>
+      </div>
+
+      <div class="stripe"><span id="stat"></span><span id="statHidden"></span></div>
+
+      <section class="hl" id="hlBox" hidden>
+        <div class="row">
+          <input type="text" id="hlText" readonly spellcheck="false" aria-label="Search string for the stash search field">
+          <button type="button" class="actbtn" id="hlCopy" style="margin-left:0">Copy</button>
+          <label class="fld">max <input type="number" id="hlMax" min="10" max="2000" step="10" value="250"> chars</label>
+        </div>
+        <div class="meta" id="hlMeta"></div>
+        <div class="warnline" id="hlWarn" hidden></div>
+      </section>
+
+      <div class="wrap" id="wrap"></div>
+
+      <details class="unpriced" id="unpricedBox" hidden>
+        <summary id="unpricedSummary"></summary>
+        <ul id="unpricedList"></ul>
+      </details>
+    </div>
+
+    <section class="historysec" id="historyBox" hidden>
+      <h3 class="sect">History</h3>
+      <ul class="history" id="historyList"></ul>
+    </section>
+  </main>
+</div>
+
+<!-- Sync-settings dialog: accountName + POESESSID for the CURRENT user.
+     The POESESSID field is always empty — the stored value is never delivered
+     to the browser in any form. Empty submit = keep the stored cookie. -->
+<div class="setgate" id="setGate" hidden>
+  <div class="setcard" role="dialog" aria-modal="true" aria-labelledby="setTitle">
+    <h2 id="setTitle">Sync settings</h2>
+    <p class="setstate" id="setState">Loading…</p>
+    <label>Account name
+      <input id="setAccount" type="text" autocomplete="off" spellcheck="false" placeholder="Name#1234">
+    </label>
+    <label>POESESSID
+      <input id="setSessid" type="password" autocomplete="off" spellcheck="false"
+             placeholder="leave empty to keep the stored one">
+    </label>
+    <p class="sethint" id="setHint" hidden></p>
+    <p class="seterr" id="setErr" hidden></p>
+    <div class="setbtns">
+      <button id="setCancel" type="button">Cancel</button>
+      <button id="setSave" type="button" class="primary">Save</button>
+    </div>
+    <p class="setnote">The stored POESESSID is never shown here — not even masked.
+      To renew it, paste a new one; leaving the field empty keeps the stored value.
+      Saving takes effect on the next background sync tick, no restart needed.</p>
+  </div>
+</div>
+
+<!-- Identity gate: mirrored from index.html (ppt_user cookie). -->
+<div class="idgate" id="idgate" hidden>
+  <div class="idcard">
+    <div class="idlogo"><span class="sq"></span></div>
+    <h2>Who are you?</h2>
+    <p>Used only for routing (your own league). No password.</p>
+    <div class="idbtns" id="idbtns"></div>
+  </div>
+</div>
+
+<script src="shell.js"></script>
+<script type="module" src="networth.js"></script>
+</body>
+</html>

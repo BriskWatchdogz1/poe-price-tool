@@ -1,0 +1,53 @@
+# poe-price-tool v2 — deploy (LAN-only).
+#
+# Reachable directly via host IP + port 8788, or behind a reverse proxy.
+# IMPORTANT: The tool uses WebSockets (/events) -> enable "Websockets Support"
+# on the reverse proxy, otherwise the browser tab won't connect.
+# No auth (budget variant) -> expose ONLY on the LAN, NOT to the internet.
+
+services:
+  poe-price-tool:
+    build: .
+    image: poe-price-tool:latest
+    container_name: poe-price-tool
+    restart: unless-stopped
+    ports:
+      - "8788:8788"
+    environment:
+      # All optional — sensible defaults live in the server (server.mjs).
+      # To change one, uncomment the respective line. (PORT stays set so that
+      # `environment:` remains a valid list — don't comment out everything,
+      # otherwise: "environment must be a mapping".)
+      - PORT=8788                   # Server port (must match the port mapping above)
+      # - POE_LEAGUE=Standard       # Starting league (every user can switch it in the browser)
+      # - POE_USERS=player1,player2 # fixed user list (no login, routing only)
+      # - POE_APP_NAME=YourName     # landing-page header/title brand name (default: Trade Console)
+      # - POE_MAX_LISTINGS=10       # Trade listings per search (hard cap <=10)
+      # - POE_CD_RATIO=215          # Chaos:Divine fallback when poe.ninja is unreachable
+      # - POE_CD_REFRESH_MS=900000  # C:D refresh interval (min. 15min = 900000)
+      # - POE_NETWORTH_CONFIG=/config/networth-users.json  # per-user accountName+POESESSID (NEVER in the repo)
+      # - POE_NETWORTH_STORE=/config/networth-store.json   # snapshot store (value-over-time history)
+      # - POE_NETWORTH_AUTOSYNC=0   # background auto-refresher for the net-worth store; =0 disables it (on by default)
+      # - POE_NETWORTH_SYNC_INTERVAL_MS=30000  # delay between auto-refresher ticks (one tab/tick)
+      # - POE_NETWORTH_LIST_TTL_MS=900000      # how long the cached stash-tab list is considered fresh
+      # - POE_NETWORTH_COOLDOWN_MS=600000      # backoff after a 429 before retrying a user
+      # - POE_NETWORTH_DEBUG=1      # one log line per scanned stash tab (raw/priced/unpriced/skipped) — diagnosis only
+      # - POE_FAUSTUS_STORE=/config/faustus-store.json  # path of the Faustus name->chaos store
+      # - POE_FAUSTUS_DISABLED=1    # Disable the Faustus background refresher (falls back to poe.ninja)
+      # - POE_FAUSTUS_UNION_HOURS=8 # completed hourly Faustus digests to union before deriving prices
+      # - POE_FAUSTUS_REFRESH_MS=3600000   # Faustus refresh interval (data itself only changes hourly)
+      # - POE_FAUSTUS_TTL_MS=172800000     # max staleness (~48h) before falling through to poe.ninja
+      # - POE_REFERENCE_HISTORY=/config/reference-history.ndjson  # rolling price series behind the left rail's sparklines (7 days)
+      # - POE_CORPSE_STORE=/config/corpse-store.json  # path of the itemised-corpse price store
+      # - POE_CORPSE_DISABLED=1     # Disable the corpse background pricer (corpses stay unpriced)
+      # - POE_CORPSE_TTL_MS=21600000       # how long a cached corpse price/null stays fresh (~6h)
+      # - POE_CORPSE_BUDGET_PER_HOUR=25    # max distinct corpse names queried on the Trade API/hour
+      # - POE_CORPSE_INTERVAL_MS=120000    # delay between corpse pricer ticks (one name/tick)
+      # - POE_MAX_ITEMS_PER_ROOM=50        # server-side item-card cap per room (oldest evicted first)
+      # - POE_MAX_REQUEUE_ON_RECONNECT=10  # max items re-queued for a room on WS reconnect
+      # - POE_DATA_REFRESH_MS=86400000     # data auto-update interval (APT data, base-names; conditional requests, ~daily)
+      # - POE_DATA_REFRESH_DISABLED=1      # disable the data auto-update (a valid persisted snapshot is still preferred at boot)
+      # - POE_DATA_REFRESH_DIR=/config/data-refresh  # where adopted data snapshots + update state persist
+    volumes:
+      # Persistent per-user config (POESESSID, stores, history).
+      - ./config:/config
