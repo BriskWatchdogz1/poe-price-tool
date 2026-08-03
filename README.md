@@ -262,7 +262,10 @@ npm test
 
 Both build steps are required before the first `npm test`: the engine bundle and
 the `.index.bin` search indices are generated artifacts and are not checked in.
-The suite is ~586 tests and needs no network for the bulk of it.
+The suite is ~595 tests and needs no network for the bulk of it.
+
+Repository layout, the module map and the conventions that apply when changing
+things: **[CONTRIBUTING.md](CONTRIBUTING.md)**.
 
 ## For admins
 

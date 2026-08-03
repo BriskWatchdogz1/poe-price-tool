@@ -1,4 +1,9 @@
-# poe-price-tool — Project Notes
+# Contributing
+
+How this repository is laid out and what to keep in mind when changing it. It
+started as the working notes an AI assistant was given (see Credits in the
+README) — the content is the same either way: where things live, how to run it
+locally, and the rules that keep it honest.
 
 ## Where things live
 
@@ -62,7 +67,7 @@ POE_NETWORTH_STORE=./config/networth-store.json \
 node backend/v2/server.mjs
 ```
 
-**Local runs and tests must never crawl or price live** — disable every
+**Local runs and tests must never crawl or price live.** Disable every
 background job (`*_DISABLED=1`) and point stores at a local, gitignored
 `./config/` rather than the real `/config` volume. `backend/v2/mock-server.mjs`
 is a frontend dev server that stubs the external APIs; the test suite does not use it.
@@ -89,6 +94,10 @@ test files again (see the `find` in the Dockerfile).
   bundler, no framework build step.
 - No secrets in the repo, ever. Credentials (POESESSID, account names) live
   only in the gitignored `/config` volume at runtime, never hardcoded or
-  committed. Scan any new script/doc for hardcoded secrets before committing.
+  committed. Scan any new script or doc for hardcoded secrets before committing.
 - Keep documentation changes in the right place: user-facing → `README.md`,
-  operator-facing → `docs/admin.md`. Avoid duplicating the same fact in both.
+  operator-facing → `docs/admin.md`, valuation behaviour → `docs/pricing-logic.md`,
+  the WebSocket contract → `backend/v2/frontend/PROTOCOL.md`. Avoid duplicating
+  the same fact in two of them, and check a claim against the code before
+  writing it down — stale documentation is worse than none, because someone
+  will act on it.
