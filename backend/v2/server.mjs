@@ -929,6 +929,39 @@ function applySelection (preset, selectedMods) {
   }
 }
 
+// The selection a manual `search` ran with, normalized down to what the card
+// needs to render it again: the ticked mod texts with their chosen roll bounds
+// (an omitted bound = handle at its stop, exactly as the FE sends it) plus the
+// corruption toggle. Stored on the record next to the price it produced, and
+// echoed back as `item-added.selection` (see itemAddedFor / PROTOCOL.md).
+//
+// Why it has to be kept at all: `rec.addedMsg` is frozen at POST time and
+// carries the DEFAULT ticks. Replaying it on a reconnect re-rendered the picker
+// at those defaults while the price block still showed the result of the user's
+// own (different) search — a listing count standing next to a selection that
+// never produced it, with no way to tell what was actually searched.
+function selectionOf (job) {
+  return {
+    corrupted: ['yes', 'no'].includes(job.corrupted) ? job.corrupted : 'any',
+    mods: (job.selectedMods || []).filter(m => m && m.text != null).map(m => {
+      const out = { text: m.text }
+      if (typeof m.min === 'number') out.min = m.min
+      if (typeof m.max === 'number') out.max = m.max
+      return out
+    })
+  }
+}
+
+// The card message for a record in its current state: the parsed item (fixed at
+// POST time) + the status + the selection that produced the price, if the user
+// ever ran one. Every place that re-sends a card goes through here so the two
+// can't drift apart again.
+function itemAddedFor (rec, priceStatus, extra) {
+  const msg = { ...rec.addedMsg, priceStatus }
+  if (rec.selection) msg.selection = rec.selection
+  return extra ? Object.assign(msg, extra) : msg
+}
+
 // Set the corruption filter per item (APT misc filter). createTradeRequest sends
 // `misc_filters.filters.corrupted.option` ONLY when value===false OR exact===true
 // (see pathofexile-trade.ts). From that:
@@ -1336,11 +1369,17 @@ async function pump () {
       // preset.stats is empty anyway (no-op loop), so this is harmless there
       // and correct for stat-searched items.
       if (job.kind === 'priority') {
+        // Remember it HERE, in the same breath as the preset mutation below —
+        // not when the job was enqueued. Between click and dispatch the card
+        // still shows the PREVIOUS search's price, so a reconnect in that window
+        // has to replay the previous selection with it; rec.selection and
+        // rec.preset must always describe the same search.
+        rec.selection = selectionOf(job)
         applySelection(rec.preset, job.selectedMods)
         applyCorrupted(rec.preset, job.corrupted) // any/yes/no from the search payload
       }
       rec.status = 'searching'
-      broadcast(job.user, { ...rec.addedMsg, priceStatus: 'searching' })
+      broadcast(job.user, itemAddedFor(rec, 'searching'))
 
       // poe.ninja bulk routing (NINJA_BULK_CLASSES, see above): these item
       // classes have no exchange tradeTag (bulkPriceItem can't price them
@@ -1456,7 +1495,7 @@ async function pump () {
       if (rec && rec.alive) {
         const st = bannered ? 'rate-limited' : 'queued'
         rec.status = st
-        broadcast(job.user, { ...rec.addedMsg, priceStatus: st, retryAfterSec: seconds })
+        broadcast(job.user, itemAddedFor(rec, st, { retryAfterSec: seconds }))
         // Clamp (see MAX_TIMER_MS) so a huge Retry-After can't collapse to a 1ms
         // busy-requeue; .unref() so a pending multi-hour retry never blocks a
         // clean process exit (symmetry with scheduleBanResume's timer).
@@ -1465,7 +1504,7 @@ async function pump () {
       }
     } else {
       console.error(`[server] price job ${job.id} (${job.user}) failed:`, msg)
-      if (rec && rec.alive) { rec.status = 'error'; broadcast(job.user, { ...rec.addedMsg, priceStatus: 'error' }) }
+      if (rec && rec.alive) { rec.status = 'error'; broadcast(job.user, itemAddedFor(rec, 'error')) }
     }
   } finally {
     working = false
@@ -2246,7 +2285,7 @@ const server = createServer(async (req, res) => {
         dup.ts = now
         // The card already exists in the browser; re-assert its current state
         // (harmless if already shown) rather than adding a duplicate.
-        broadcast(user, { ...dupRec.addedMsg, priceStatus: PRICE_STATUS[dupRec.status] || 'queued' })
+        broadcast(user, itemAddedFor(dupRec, PRICE_STATUS[dupRec.status] || 'queued'))
         if (dupRec.lastPrice) broadcast(user, dupRec.lastPrice)
         if (dupRec.ninja) broadcast(user, { type: 'ninja-ref', id: dupRec.id, ...dupRec.ninja })
         res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ id: dup.id, user, deduped: true }))
@@ -2255,7 +2294,9 @@ const server = createServer(async (req, res) => {
 
       const id = makeId(item)
       const addedMsg = buildItemAdded(id, item, preset)
-      room.items.set(id, { id, item, presets, preset, addedMsg, alive: true, status: 'queued', lastPrice: null })
+      // selection stays null until the user runs a manual search: the card is
+      // showing the auto search, which IS the default selection in addedMsg.
+      room.items.set(id, { id, item, presets, preset, addedMsg, alive: true, status: 'queued', lastPrice: null, selection: null })
       room.recentPosts.set(fp, { id, ts: now })
       enforceItemCap(user, room)             // cap the room -> evict oldest over MAX_ITEMS_PER_ROOM (never the just-added one)
       broadcast(user, addedMsg)              // immediately queued to the browser (only that room)
@@ -2320,7 +2361,9 @@ wss.on('connection', (ws, req) => {
     if (!rec.alive) continue
     if (hasValidPrice(rec)) {
       // Valid last price -> replay the card as done + send the price afterwards.
-      send(ws, { ...rec.addedMsg, priceStatus: 'done' })
+      // itemAddedFor carries the selection that price came from, so the picker
+      // comes back the way the user left it instead of at the item defaults.
+      send(ws, itemAddedFor(rec, 'done'))
       send(ws, rec.lastPrice)
     } else {
       // No valid last price (0c symptom): replay the card as queued and, for the
@@ -2329,7 +2372,7 @@ wss.on('connection', (ws, req) => {
       const alreadyQueued = jobs.some(j => j.user === user && j.id === rec.id) ||
         (working && currentJob && currentJob.user === user && currentJob.id === rec.id)
       rec.status = 'queued'
-      send(ws, { ...rec.addedMsg, priceStatus: 'queued' })
+      send(ws, itemAddedFor(rec, 'queued'))
       if (!alreadyQueued && requeueSet.has(rec.id)) enqueue({ user, id: rec.id, kind: 'auto' })
     }
     // Replay the F3 reference AFTER the card (frontend needs the item first).
@@ -2542,4 +2585,4 @@ if (DATA_REFRESH_DISABLED) {
 // HTTP/WS requests. The existing price path remains untouched by this —
 // these exports are purely additive (no existing function changed).
 // ---------------------------------------------------------------------------
-export { server, enqueue, enqueueBackground, pump, jobs, bgJobs, users, dataRefresher, LEAGUE, leaguesToRefresh, positiveEnvInt, networthStore, networthHistory, networthRefresher, referenceHistory, refreshReference, faustusStore, faustusRefresher, corpseStore, corpsePricer, corpseTradeClient, rateLimitMsg, noteRateLimit, clearRateLimit, rateLimitSeconds, maxLinkGroup, LINKS_MOD_TEXT, modsOf, buildItemAdded, applySelection, toNinjaPriceResult, toPriceResult, withExchangeMain, faustusChaosFor, faustusRangeFor }
+export { server, enqueue, enqueueBackground, pump, jobs, bgJobs, users, dataRefresher, LEAGUE, leaguesToRefresh, positiveEnvInt, networthStore, networthHistory, networthRefresher, referenceHistory, refreshReference, faustusStore, faustusRefresher, corpseStore, corpsePricer, corpseTradeClient, rateLimitMsg, noteRateLimit, clearRateLimit, rateLimitSeconds, maxLinkGroup, LINKS_MOD_TEXT, modsOf, buildItemAdded, applySelection, selectionOf, itemAddedFor, toNinjaPriceResult, toPriceResult, withExchangeMain, faustusChaosFor, faustusRangeFor }

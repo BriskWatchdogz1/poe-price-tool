@@ -82,7 +82,11 @@ the user's in-progress mod edits — only the price/status block is refreshed.
       "value": 36,                 // optional; current roll + slider start; bolded inline in the text
       "selected": true             // pre-ticked in the mod picker
     }
-  ]
+  ],
+  "selection": {                   // optional; see below
+    "corrupted": "no",
+    "mods": [ { "text": "+36 to Dexterity", "min": 36 } ]
+  }
 }
 ```
 
@@ -90,6 +94,23 @@ Rendering notes:
 - `rarity` drives the top-border colour + name colour (`unique/rare/magic/currency/gem/normal/divination`). `unique` cards render full-width.
 - `mods` are grouped in the picker by `kind` in the order implicit → fractured → prefix → suffix → explicit → crafted, each with a heading.
 - A mod with `valueRange` gets a range slider (start = `value`); without it, a plain checkbox.
+
+**`selection`** (optional) — the selection the card's CURRENT price was searched
+with: the server's echo of the last `search` payload for this `id`, in exactly
+that shape (`corrupted` plus the ticked `mods` with their optional `min`/`max`,
+an omitted bound meaning "handle at its stop"). Present only once the user has
+run a manual search; the initial automatic search *is* the default selection
+that `mods[].selected` already describes, so nothing is echoed for it.
+
+`mods` keeps carrying the item's DEFAULTS either way — `selection` is applied on
+top of them, and only when a card is rendered from scratch (first appearance or
+the reconnect replay). A re-send onto a card that is already on screen still
+touches nothing but the price/status block, so in-progress mod edits survive.
+Without this field a reload re-rendered the picker at the defaults while the
+price block kept the user's own, differently-filtered result — a listing count
+next to a selection that never produced it. The reload applies the selection
+only; it never re-runs the search (that would spend trade-API budget on a page
+refresh).
 
 ### `item-removed` — server dropped a card (backend → frontend)
 ```json
@@ -445,6 +466,10 @@ Each ticked mod with a slider carries a **dual range** (two handles: min + max):
 The backend writes both into the stat filter (`filter.value.min` /
 `filter.value.max`); an omitted bound leaves that side unconstrained. A mod with
 neither bound present is required but its roll is unconstrained.
+
+The backend also keeps this payload with the card and hands it back as
+`item-added.selection`, so a reconnect can re-render the picker the way the user
+left it next to the price it produced.
 
 ### `set-league` — switch the active league
 ```json

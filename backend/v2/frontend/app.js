@@ -412,6 +412,11 @@ function upsertItem (data) {
     // handles (min = item roll, max = hi).
     const fresh = elFor(data.id)
     if (fresh) fresh.querySelectorAll('.dual').forEach(d => updateDual(d, null))
+    // Only on a FRESH card (first render / reconnect replay): put the picker
+    // back into the state the shown price was searched with. An existing card
+    // never gets this — it may carry in-progress edits the user hasn't searched
+    // yet, and those must not be overwritten by an item-added re-send.
+    if (fresh && item.selection) applyStoredSelection(fresh, item.selection)
   } else {
     // preserve expanded state; refresh price block + status only to avoid clobbering
     // the user's in-progress mod edits.
@@ -739,6 +744,40 @@ function resetCard (card) {
     }
   })
   syncCard(card)
+}
+
+// Re-apply the selection a card's CURRENT price was searched with
+// (`item-added.selection`, the server's echo of the last `search` payload — see
+// PROTOCOL.md). Without it a reload re-rendered the picker at the item defaults
+// while the price block still showed the user's own, differently-filtered
+// result: "Match mods 4" standing next to a 3-mod hit count.
+//
+// The inverse of collectSelected: a listed mod is ticked, an absent one is not,
+// and a missing min/max means that handle sat at its stop. Rows that are NOT
+// part of the search keep their default handles — their sliders had no say in
+// this price, so moving them would only invent a state the user never chose.
+// Only the values are touched, never the defaults (data-defsel/data-startmin),
+// so "↺ Reset" still means "back to what the item itself says".
+function applyStoredSelection (card, sel) {
+  const wanted = new Map((sel.mods || []).map(m => [m.text, m]))
+  card.querySelectorAll('.mrow').forEach(row => {
+    const chk = row.querySelector('.chk')
+    if (!chk) return                        // read-only row (not searchable) — never part of a search
+    const m = wanted.get(row.dataset.text)
+    chk.checked = !!m
+    const dual = row.querySelector('.dual')
+    if (!dual || !m) return
+    const lo = Number(dual.dataset.lo), hi = Number(dual.dataset.hi)
+    dual.querySelector('.slmin').value = typeof m.min === 'number' ? m.min : lo
+    dual.querySelector('.slmax').value = typeof m.max === 'number' ? m.max : hi
+    updateDual(dual, null)
+  })
+  const tog = card.querySelector('.ctog')
+  if (tog && sel.corrupted) {
+    tog.dataset.val = sel.corrupted
+    tog.querySelectorAll('button').forEach(b => b.classList.toggle('on', b.dataset.c === sel.corrupted))
+  }
+  syncCard(card)                            // mod count in the bar + editor footer
 }
 
 function collectSelected (card) {
