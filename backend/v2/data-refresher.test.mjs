@@ -40,14 +40,6 @@ const APT_BODY = v => ({
   'app_i18n.json': '{"please_wait":"Please wait"}'
 })
 
-function seedFixture (themeCount = 4) {
-  const themes = {}
-  for (let i = 1; i <= themeCount; i++) {
-    themes[String(i)] = { name: `Theme ${i}`, tag: `tag_${i}`, notables: [{ name: `N${i}`, trade_stat: `explicit.stat_${i}` }] }
-  }
-  return { schema_version: 1, generated_at: new Date().toISOString(), size: 'Large', themes, coverage: { themes: themeCount, notables_total: themeCount } }
-}
-
 function baseNamesFixture (n = 10) {
   const out = {}
   for (let i = 0; i < n; i++) out[`Metadata/Items/Currency/Fixture${i}`] = `Fixture Orb ${i}`
@@ -62,7 +54,7 @@ function baseItemsFixture (n = 10) {
   return out
 }
 
-// A vendored (baked-in) layout in a tmp dir: public/data/en + seed + base-names.
+// A vendored (baked-in) layout in a tmp dir: public/data/en + base-names.
 async function makeVendored (root) {
   const pub = path.join(root, 'vendored/public')
   await mkdir(path.join(pub, 'data/en'), { recursive: true })
@@ -70,11 +62,9 @@ async function makeVendored (root) {
   for (const f of FILES) await writeFile(path.join(pub, 'data/en', f), body[f])
   await writeFile(path.join(pub, 'data/item-drop.json'), '[]')
   await writeFile(path.join(pub, 'data/patrons.json'), '[]')
-  const clusterSeedPath = path.join(root, 'vendored/cluster-seed.json')
-  await writeFile(clusterSeedPath, JSON.stringify(seedFixture(4)))
   const baseNamesPath = path.join(root, 'vendored/base-names.json')
   await writeFile(baseNamesPath, JSON.stringify(baseNamesFixture(10)))
-  return { publicDir: pub, clusterSeedPath, baseNamesPath }
+  return { publicDir: pub, baseNamesPath }
 }
 
 // --- fetch double ------------------------------------------------------------
@@ -377,18 +367,6 @@ test('base-names: an implausibly shrunken map is rejected, old map stays', async
   assert.equal(r.baseNamesPath(), vendored.baseNamesPath)
   assert.ok(warnings.some(w => w.includes('REJECTED')))
 })
-
-// --- cluster seed --------------------------------------------------------------
-
-const seedRoutes = () => new Map([
-  [SEED_URLS.clusterJewels, { status: 200, body: '{"j":1}', etag: '"cj"' }],
-  [SEED_URLS.clusterJewelNotables, { status: 200, body: '[]', etag: '"cn"' }],
-  [SEED_URLS.mods, { status: 200, body: '{}', etag: '"m"' }],
-  [SEED_URLS.pobClusterJewels, { status: 200, body: '-- lua', etag: '"p"' }]
-])
-
-
-
 
 // --- observability: one line per check + freshness state ---------------------
 // The point of the brief: silence must no longer be ambiguous. Every check

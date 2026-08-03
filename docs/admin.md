@@ -563,8 +563,10 @@ cookie). Selectable ranges are 1h, 6h, 24h, 7d and 14d.
 - **`networth-history.ndjson`** (`POE_NETWORTH_HISTORY`) — the series itself,
   one JSON object per line, append-only. Each point carries the total in chaos,
   the C:D rate **of that moment** (so an old point is never re-derived with
-  today's rate), a per-tab breakdown keyed by stash-tab index, and the biggest
-  item movers since the previous point.
+  today's rate), and the biggest item movers since the previous point. Lines
+  recorded before mid-2026 also hold a per-tab chaos breakdown; nothing reads it
+  any more, it is no longer written, and such lines are still read normally
+  until retention drops them.
 - **`networth-history-items.json`** — a sidecar holding only the **newest**
   per-item breakdown per user. It exists so a container restart does not tear a
   hole into the series: without it the first point after every deploy would
@@ -572,7 +574,7 @@ cookie). Selectable ranges are 1h, 6h, 24h, 7d and 14d.
   separately.
 
 Neither file contains an account name or a POESESSID — only the local routing
-name from `POE_USERS`, item names, and tab indexes.
+name from `POE_USERS` and item names.
 
 **How often a point is recorded.** The auto-refresher offers one after every
 synced tab (i.e. roughly every 30s per user), but the history module throttles

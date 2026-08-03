@@ -113,11 +113,28 @@ didn't happen to price in the current window.
   is 10 now: measured across a league's 74 divine-quoted markets in one hour the
   median volume was 5, so a floor of 2 admitted single trades — which is how one
   lone "2 divine for 30 regal" priced a Regal Orb at 5.67c.
-- **A thin chaos market does not outrank a liquid divine one.** The item's own
-  chaos market normally wins. It stops winning when it is **not attested** while
-  the divine side is — attested meaning at least 10 traded units AND 5000 chaos
-  of turnover on that side, the same bar the sell-side comparison uses. The
-  bridged price still has to pass the envelope below.
+- **A worse-evidenced chaos market does not outrank a better-evidenced divine
+  one.** The item's own chaos market normally wins. It stops winning when the
+  divine market traded at least **3× as many units** of the item *and* is itself
+  **attested** — attested meaning at least 10 traded units AND 5000 chaos of
+  turnover on that side, the same bar the sell-side comparison uses. The bridged
+  price still has to pass the envelope below.
+
+  The comparison is *relative*. It used to be an absolute bar ("the chaos side
+  traded fewer than 10 units"), which never asked which of the two sides was the
+  better evidenced one. Measured over 102 anchor hours of digests (72.9k priced
+  lines with a poe.ninja reference; the table is over the 2238 lines on which
+  the variants disagree at all):
+
+  | gate | median | mean | >50 % off | >100 % off | fires |
+  |---|---|---|---|---|---|
+  | no branch at all | 22.3 % | 24.8 % | 135 | 0 | 0 |
+  | absolute, chaos < 10 units | 13.2 % | 16.0 % | 12 | 2 | 1402 |
+  | **relative, divine ≥ 3× chaos** | **12.6 %** | **15.3 %** | **3** | **0** | 1750 |
+
+  The factor 3 is a measured plateau, not a guess: every value from 2.25 to 6
+  keeps the >100 % count at zero, below 2.25 those lines come back, and the
+  >50 % count bottoms out exactly at 3.
 
   Live case: *The Progeny of Lunaris* had ONE chaos trade (1132c) beside a
   divine market of 40 cards steady at 12–13 div, and the single trade set the
@@ -132,12 +149,30 @@ didn't happen to price in the current window.
   keeps cheap cards out, where the coarse "1 div : N cards" quantisation makes
   the divine quote the worse number.
 
-  Known limits, measured over 102 hours of digests: the unit gate is absolute,
-  so it never asks whether the divine side is *better* evidenced than the chaos
-  side. A small but near-perfect chaos market can still lose (Desecrated Virtue
-  bridges to 524c against ~240c in 2 of those 102 hours), and a card whose chaos
-  market clears the gate while underquoting stays underquoted. Both are known
-  and bounded — the branch cut errors above 100 % from 7 lines to 2.
+  Going relative fixed the case the absolute bar got backwards: *Desecrated
+  Virtue* has a small chaos market (6 traded units) that is nevertheless
+  near-perfect, spanning 220.0..221.0c, and the absolute gate threw it away for
+  being small — 524c and 495c against a real ~240c. Its divine side carried 13
+  and 12 units in those two hours, better evidenced than 6 but not 3× better, so
+  the card now keeps its own price and both hours land at 8 % (item worst case
+  118 % → 40 %). The wins of the absolute gate are unchanged: *The Progeny of
+  Lunaris* stays at an item median of 7.5 % against 38.1 % without the branch,
+  *The Apothecary* at 10.5 % against 26.5 %, and *The Immortal* improves further
+  from 17.5 % to 11.6 %.
+
+  Known limit, measured over the same 102 hours: *One Last Score* stays wrong.
+  Its chaos market under-quotes in 91 of the 102 hours (median 131c, low 62c,
+  against a real ~192c); item median 36.7 % → 34.6 %, worst case unchanged at
+  67.5 %. Most of that is
+  out of this rule's reach — in 38 of the 102 hours the card has no usable divine
+  market at all (mean error 31 %), and nothing can bridge what does not exist. Of
+  the 64 hours that do have one, the rule fires in 10 (mean error 23 %) and the
+  chaos market keeps its underquote in the other 54 (mean error 32 %). A lower
+  factor would catch more of those and cost *over*-quoted lines elsewhere
+  (Tainted Exalted Orb 155c against 83c, Luminous Trove 183c against 110c) — the
+  worse direction for a net-worth number, so the trade was declined. What remains
+  wrong at factor 3 is one-sided and mild: three lines above 50 % in 102 hours,
+  at most 64 % off, and all but one *under*-quoted.
 - **Idle-hour placeholders are ignored.** GGG publishes entries with all ratios
   and volumes at zero for a pair that did not trade that hour. In the union walk
   such an entry used to shadow the real, older entry for the same pair — the
@@ -151,6 +186,33 @@ didn't happen to price in the current window.
   envelope, so the bridge additionally requires more than one traded unit on the
   item's side; "10 divine of turnover" can be a single trade (one card sold for
   10 divine, while the card really goes for 1 chaos).
+
+  On the *takeover* path above (the item has a chaos price, the divine side is
+  better evidenced) the envelope is the range **all hours of the union window
+  together** spanned, and a degenerate one is ignored. It used to be the newest
+  informative hour alone, and that made it worthless exactly there: in 926 of
+  1402 firings `min === max`, i.e. the "range" was a single chaos trade and the
+  accepted band `[p/4, p×4]` a 16× hole. Worse, it was the very trade the gate
+  had just called under-evidenced, vetoing its own replacement — and all 8
+  rejections it made over 102 hours were wrong, each keeping a chaos price
+  72–89 % off and discarding a bridge 4–27 % off (The Fiend kept 121c where the
+  bridge said 1059c and the real price was 1107c; Omen of Fortune 500c against
+  ~2450c bridged and 3093c real). Unioning the walked hours gives it a real
+  range wherever one exists: 1474 of 1750 firings are now checked against a
+  genuine multi-hour band, and in the remaining 276 even eight hours collapse to
+  a single point, where the check abstains rather than veto on one trade. Worth
+  mean 15.1 % → 13.8 % and 10 → 2 lines above 50 % on the disagreeing lines, and
+  it drops the wrong rejections to zero.
+
+  The 4× tolerance stays. Tightening it was measured and is worse in both the
+  old and the new shape, because a bridged price legitimately sits *above* the
+  chaos market — over the 2036 rows the rule fires on, bridged/chaos has a median
+  of 1.20 (p10 1.01, p90 1.89). With the multi-hour envelope, tolerance 3 gives
+  4 lines above 50 % and tolerance 2 gives 11, against 2 at tolerance 4.
+  The purely bridged path (no chaos price at all) keeps the **single-hour**
+  envelope: over the same 102 hours widening it, tightening it, or removing it
+  produced byte-identical output, so there is no measurement that would justify
+  weakening the guard that caught the Regal Orb case.
 - **Spread guard.** If the two implied rates (from `lowest_ratio` and
   `highest_ratio`) differ by more than 4×, the hour is rejected as
   outlier-skewed (a single troll trade shouldn't set the price).

@@ -218,6 +218,8 @@ test('a cheap but liquid chaos market keeps the price', async () => {
   // trades a steady 220-275c but would need ~22 sales an hour to clear it, and
   // got bridged through a coarse divine market to 524c against a real 230c.
   // 6 units at ~220c: few in turnover, plenty in units -> chaos must stay.
+  // Still the guard under the RELATIVE gate: 13 divine units against 12 chaos
+  // units is not 3x better evidenced, so the bridge must not take over either.
   const X = 'Metadata/Items/DivinationCards/DivinationCardCheap'
   const m = await dualPricer([
     CD100,
@@ -226,6 +228,95 @@ test('a cheap but liquid chaos market keeps the price', async () => {
   ]).detailByName()
   const d = m.get('Cheap Card')
   assert.ok(approx(d.chaos, 2646 / 12, 1e-9), `chaos market must keep it, got ${d.chaos}`)
+})
+
+test('the gate is RELATIVE: a chaos market above the old unit floor can still lose', async () => {
+  // The One Last Score class, and the reason the absolute "chaos < 10 units"
+  // gate was replaced: a chaos market can clear any absolute floor and still be
+  // the worse-evidenced side. 30 chaos units against 100 divine units is 3.3x,
+  // so the divine side takes it. The old absolute gate never fired here at all.
+  const X = 'Metadata/Items/DivinationCards/DivinationCardThin'
+  const m = await dualPricer([
+    CD100,
+    // 30 units, range 150..160c -> volume-weighted 4650/30 = 155c.
+    mk([X, CHAOS], { [X]: 1, [CHAOS]: 150 }, { [X]: 1, [CHAOS]: 160 }, { [X]: 30, [CHAOS]: 4650 }),
+    // 100 units, 190 divine turnover -> attested, 1.9 div = 190c per card.
+    mk([X, DIVINE], { [X]: 10, [DIVINE]: 19 }, { [X]: 10, [DIVINE]: 19 }, { [X]: 100, [DIVINE]: 190 })
+  ]).detailByName()
+  assert.ok(approx(m.get('Thin Card').chaos, 190, 1e-9),
+    `the better-evidenced divine side must win, got ${m.get('Thin Card').chaos}`)
+})
+
+test('the gate is RELATIVE: a small chaos market survives a not-much-better divine one', async () => {
+  // The Desecrated Virtue case the absolute gate got wrong: 6 chaos units is
+  // below the old 10-unit floor, so the bridge used to take over and produced
+  // 524c against a real ~240c. The divine side carries 15 units — attested, but
+  // only 2.5x the chaos units, i.e. not 3x -> the chaos market keeps the price.
+  const X = 'Metadata/Items/DivinationCards/DivinationCardCheap'
+  const m = await dualPricer([
+    CD100,
+    mk([X, CHAOS], { [X]: 1, [CHAOS]: 220 }, { [X]: 1, [CHAOS]: 221 }, { [X]: 6, [CHAOS]: 1320 }),
+    // 15 units, 60 divine turnover -> attested, and would bridge to 400c.
+    mk([X, DIVINE], { [X]: 1, [DIVINE]: 4 }, { [X]: 1, [DIVINE]: 4 }, { [X]: 15, [DIVINE]: 60 })
+  ]).detailByName()
+  assert.ok(approx(m.get('Cheap Card').chaos, 220, 1e-9),
+    `a small but near-perfect chaos market must keep it, got ${m.get('Cheap Card').chaos}`)
+})
+
+test('a single-trade chaos envelope does not veto the bridge (The Fiend case)', async () => {
+  // The envelope used to be built from the newest informative hour alone, and
+  // in 926 of 1402 firings that was a single chaos trade — min === max. It then
+  // vetoed the very bridge that was replacing it: The Fiend kept 121c (89% off)
+  // while the bridge would have said 1059c against a real 1107c. A degenerate
+  // envelope is no evidence, so it is ignored; the bridge goes through.
+  const X = 'Metadata/Items/DivinationCards/DivinationCardThin'
+  const m = await dualPricer([
+    CD100,
+    // ONE chaos trade at 121c -> envelope would be the point 121..121, whose
+    // 4x band [30.25, 484] excludes the 1000c bridge.
+    mk([X, CHAOS], { [X]: 1, [CHAOS]: 121 }, { [X]: 1, [CHAOS]: 121 }, { [X]: 1, [CHAOS]: 121 }),
+    mk([X, DIVINE], { [X]: 1, [DIVINE]: 10 }, { [X]: 1, [DIVINE]: 10 }, { [X]: 30, [DIVINE]: 300 })
+  ]).detailByName()
+  assert.ok(approx(m.get('Thin Card').chaos, 1000, 1e-9),
+    `a point envelope must not veto its own replacement, got ${m.get('Thin Card').chaos}`)
+})
+
+test('the plausibility envelope spans the whole union window, not just the newest hour', async () => {
+  // The envelope for the bridge-takeover is the chaos range ALL walked hours
+  // together spanned. Newest hour alone says 100..110c, whose 4x band
+  // [25, 440] would reject the 3000c bridge; an older hour in the same window
+  // shows the market ranging up to 900c, so the union band [25, 3600] accepts
+  // it. The price itself still comes from the newest hour's market.
+  const X = 'Metadata/Items/Currency/CurrencyDual'
+  const names = { byId: new Map([[CHAOS, 'Chaos Orb'], [DIVINE, 'Divine Orb'], [X, 'Dual Item']]) }
+  const newest = [
+    CD100,
+    mk([X, CHAOS], { [X]: 1, [CHAOS]: 100 }, { [X]: 1, [CHAOS]: 110 }, { [X]: 10, [CHAOS]: 1050 }),
+    mk([X, DIVINE], { [X]: 1, [DIVINE]: 30 }, { [X]: 1, [DIVINE]: 30 }, { [X]: 60, [DIVINE]: 1800 })
+  ]
+  const older = [mk([X, CHAOS], { [X]: 1, [CHAOS]: 100 }, { [X]: 1, [CHAOS]: 900 }, { [X]: 5, [CHAOS]: 2000 })]
+  const build = feedOlder => createFaustusPricer({
+    league: 'Standard',
+    deps: {
+      now: () => NOW,
+      baseNames: names,
+      fetchHour: async id => {
+        if (id === HOUR_NEW) return { next_change_id: id + 1, markets: newest }
+        if (id === HOUR_OLD) return { next_change_id: id + 1, markets: feedOlder }
+        return null
+      }
+    }
+  }).chaosByName()
+
+  const withHistory = await build(older)
+  assert.ok(approx(withHistory.get('Dual Item'), 3000, 1e-9),
+    `the union envelope must accept the bridge, got ${withHistory.get('Dual Item')}`)
+  // Without that older hour the window only ever saw 100..110c, and the same
+  // bridge is out of band -> the chaos market keeps it. This is the control:
+  // the envelope is still doing work, it is just no longer a single point.
+  const withoutHistory = await build([])
+  assert.ok(approx(withoutHistory.get('Dual Item'), 105, 1e-9),
+    `out-of-band bridge must be rejected, got ${withoutHistory.get('Dual Item')}`)
 })
 
 test('dual-traded items keep the divine bridge (lifeforce case)', async () => {

@@ -8,7 +8,9 @@
 // (backend/v2/data-refresher.mjs) imports buildBaseNames and URLS so its
 // conditional requests run against exactly these sources.
 //
-// Usage: node backend/v2/base-names-gen.mjs [--check]
+// Usage: node backend/v2/base-names-gen.mjs
+// No arguments — the run always rewrites base-names.json and then reports
+// Faustus coverage (which priced exchange ids still have no name) on stdout.
 
 import { writeFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'

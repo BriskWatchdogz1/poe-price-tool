@@ -274,7 +274,15 @@ export function createDataRefresher ({
     return null
   }
 
+  // --- boot (writability, state, adopting what /config already holds) --------
 
+  // Light boot-time check of a persisted APT snapshot dir: is every file the
+  // engine needs there and non-empty? A snapshot can be half-written — the
+  // container was killed mid-update, or the volume ran full — and adopting such
+  // a dir fails much later and much less obviously, at the first lookup that
+  // misses. Cheap enough to run on every boot (a handful of stat() calls) and
+  // deliberately NOT a content check: validation of what a file says is the
+  // update path's job, this only answers "is the set complete?".
   async function aptDirComplete (versionDir) {
     const needed = [
       ...APT_FILES.map(f => path.join(versionDir, 'data/en', f)),
@@ -291,6 +299,12 @@ export function createDataRefresher ({
     } catch { return false }
   }
 
+  // Boot, in three steps: probe whether `dir` is writable at all (a local run
+  // without a /config volume simply keeps the baked-in data instead of throwing
+  // every tick), load the persisted state, and then prefer what /config already
+  // holds over the baked-in copies — otherwise every deploy would throw away
+  // the updates the previous container fetched. Nothing here reaches the
+  // network; the first real check is scheduled afterwards.
   async function init () {
     try {
       await mkdir(APT_DIR, { recursive: true })

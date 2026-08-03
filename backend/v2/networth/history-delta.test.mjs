@@ -67,10 +67,10 @@ test('the first point has no delta, the second one does', async () => {
   const c = clock()
   const h = createNetworthHistory(await tmpFile(), { now: c.now })
   await h.load()
-  await h.append('player1', { totalChaos: 100, cdRatio: 200, tabs: {}, items: items(['Chaos Orb', 100, 100]) })
+  await h.append('player1', { totalChaos: 100, cdRatio: 200, items: items(['Chaos Orb', 100, 100]) })
   assert.equal(h.points[0].d, undefined)
   c.advance(60_000)
-  await h.append('player1', { totalChaos: 300, cdRatio: 200, tabs: {}, items: items(['Chaos Orb', 100, 100], ['Divine Orb', 1, 200]) })
+  await h.append('player1', { totalChaos: 300, cdRatio: 200, items: items(['Chaos Orb', 100, 100], ['Divine Orb', 1, 200]) })
   assert.ok(h.points[1].d)
   assert.deepEqual(h.points[1].d.i[0], ['Divine Orb', 1, 200, 0])
 })
@@ -79,11 +79,11 @@ test('without items[] no delta is written (an old caller stays intact)', async (
   const c = clock()
   const h = createNetworthHistory(await tmpFile(), { now: c.now })
   await h.load()
-  await h.append('player1', { totalChaos: 100, cdRatio: 200, tabs: {}, items: items(['A', 1, 100]) })
+  await h.append('player1', { totalChaos: 100, cdRatio: 200, items: items(['A', 1, 100]) })
   c.advance(60_000)
-  await h.append('player1', { totalChaos: 150, cdRatio: 200, tabs: {} })       // without items
+  await h.append('player1', { totalChaos: 150, cdRatio: 200 })       // without items
   c.advance(60_000)
-  await h.append('player1', { totalChaos: 200, cdRatio: 200, tabs: {}, items: items(['A', 2, 200]) })
+  await h.append('player1', { totalChaos: 200, cdRatio: 200, items: items(['A', 2, 200]) })
   assert.equal(h.points[1].d, undefined)
   assert.equal(h.points[2].d, undefined, 'no invented delta after a gap')
 })
@@ -93,9 +93,9 @@ test('lines stay readable and the delta survives a restart load', async () => {
   const file = await tmpFile()
   const h = createNetworthHistory(file, { now: c.now })
   await h.load()
-  await h.append('player1', { totalChaos: 100, cdRatio: 200, tabs: { A: 100 }, items: items(['A', 1, 100]) })
+  await h.append('player1', { totalChaos: 100, cdRatio: 200, items: items(['A', 1, 100]) })
   c.advance(60_000)
-  await h.append('player1', { totalChaos: 260, cdRatio: 200, tabs: { A: 260 }, items: items(['A', 2, 260]) })
+  await h.append('player1', { totalChaos: 260, cdRatio: 200, items: items(['A', 2, 260]) })
   const raw = await readFile(file, 'utf8')
   const lines = raw.trim().split('\n').map(l => JSON.parse(l))
   assert.equal(lines[0].d, undefined)
@@ -117,7 +117,7 @@ async function seeded () {
   const at = []
   for (let i = 0; i < 5; i++) {
     await h.append('player1', {
-      totalChaos: qty * 200, cdRatio: 200, tabs: {}, items: items(['Divine Orb', qty, qty * 200])
+      totalChaos: qty * 200, cdRatio: 200, items: items(['Divine Orb', qty, qty * 200])
     })
     at.push(h.points[h.points.length - 1].at)
     qty++
@@ -155,7 +155,7 @@ test('detail() without delta data says so honestly instead of coming back empty'
   const c = clock()
   const h = createNetworthHistory(await tmpFile(), { now: c.now })
   await h.load()
-  await h.append('player1', { totalChaos: 100, cdRatio: 200, tabs: {} }) // old line without items
+  await h.append('player1', { totalChaos: 100, cdRatio: 200 }) // old line without items
   const p = h.points[0]
   const d = h.detail('player1', p.at - 1, p.at)
   assert.equal(d.detail, false)
@@ -167,11 +167,11 @@ test('detail() with partially missing deltas flags partial + unexplained', async
   const c = clock()
   const h = createNetworthHistory(await tmpFile(), { now: c.now })
   await h.load()
-  await h.append('player1', { totalChaos: 0, cdRatio: 200, tabs: {}, items: items(['A', 0, 0]) })
+  await h.append('player1', { totalChaos: 0, cdRatio: 200, items: items(['A', 0, 0]) })
   c.advance(60_000)
-  await h.append('player1', { totalChaos: 100, cdRatio: 200, tabs: {}, items: items(['A', 1, 100]) })
+  await h.append('player1', { totalChaos: 100, cdRatio: 200, items: items(['A', 1, 100]) })
   c.advance(60_000)
-  await h.append('player1', { totalChaos: 300, cdRatio: 200, tabs: {} }) // gap: no delta
+  await h.append('player1', { totalChaos: 300, cdRatio: 200 }) // gap: no delta
   const from = h.points[0].at
   const to = h.points[2].at
   const d = h.detail('player1', from, to)
@@ -207,7 +207,7 @@ test('downsampling: the intervals of the drawn points cover the curve with no ga
   let qty = 0
   for (let i = 0; i < 120; i++) {
     await h.append('player1', {
-      totalChaos: qty * 7, cdRatio: 200, tabs: {}, items: items(['Chaos Orb', qty, qty * 7])
+      totalChaos: qty * 7, cdRatio: 200, items: items(['Chaos Orb', qty, qty * 7])
     })
     qty += (i % 3) + 1
     c.advance(60_000)

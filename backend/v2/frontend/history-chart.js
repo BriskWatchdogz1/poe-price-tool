@@ -49,7 +49,7 @@ export function valueBounds (values) {
 /**
  * chartGeometry(points, events, opts) — everything the renderer needs.
  *
- * points: [[at, chaos, cd, ...], ...] ascending, as served by /networth-trend
+ * points: [[at, chaos, cd], ...] ascending, as served by /networth-trend
  * events: [{ at, c, v }, ...] as served by /networth-events
  *
  * Returns { line, area, xOf, yOf, from, to, min, max, valueTicks, timeTicks,

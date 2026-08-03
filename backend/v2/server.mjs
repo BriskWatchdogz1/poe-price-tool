@@ -351,15 +351,11 @@ function networthSnapshot (user) {
 function recordNetworthHistory (user) {
   const snap = networthSnapshot(user)
   if (!snap) return
-  // Keyed by the stash tab INDEX, not the name: unnamed tabs all carry the same
-  // name and would collapse into one entry (and the sidebar filters by index).
-  const tabs = {}
-  for (const t of (snap.tabs || [])) if (Number.isFinite(Number(t?.index))) tabs[Number(t.index)] = t.chaos
   // items travel along so the history can diff them against the previous point
   // (quantity vs price movers behind a jump). Only name/qty/chaos are read from
   // them; nothing account-identifying goes near the file.
   networthHistory.append(user, {
-    totalChaos: snap.totalChaos, cdRatio: snap.cdRatio, tabs, items: snap.items || []
+    totalChaos: snap.totalChaos, cdRatio: snap.cdRatio, items: snap.items || []
   })
     .catch(e => console.warn(`[networth-history] append failed: ${e?.message || e}`))
 }
@@ -1163,23 +1159,13 @@ const broadcastQueue = () => broadcastAll(queueStatusMsg())
 const RATE_LIMIT_BANNER_MIN_SEC = positiveEnvInt(process.env.POE_RATE_LIMIT_BANNER_MIN_SEC, 60)
 let rateLimit = null // { retryAfterSec, until, message } | null
 
-// a real 12h ban here: ~12 deploys in one day, one blind probe each. Persisting
-// `until` means a restart resumes the gate instead of probing.
+// The gate is written to disk, not just held in memory, because APT's
+// RateLimiter knows nothing across a restart: it comes up empty and the first
+// job fires a blind request straight into the open ban, which GGG can answer by
+// extending it. Deploys are exactly when that happens — with a real 12h ban
+// here, ~12 deploys in one day means ~12 blind probes. Persisting `until` means
+// a restart resumes the gate instead of probing.
 const RATE_LIMIT_STATE = process.env.POE_RATE_LIMIT_STATE || '/config/rate-limit.json'
-
-let lastForegroundAt = 0
-
-// Free slots in the TIGHTEST trade-search window right now. APT's limiters are
-// synced from GGG's own x-rate-limit-* headers on every response, so this is
-// GGG's view, not a guess. Infinity before the first response (nothing learned
-// yet) -> a background job is not blocked on a cold start.
-function searchQuotaHeadroom () {
-  const limiters = engine.RATE_LIMIT_RULES?.SEARCH
-  if (!limiters) return Infinity
-  let min = Infinity
-  for (const l of limiters) min = Math.min(min, l.available)
-  return min
-}
 
 // Persist / restore the gate across restarts (see RATE_LIMIT_STATE). Best
 // effort throughout: a missing, unreadable or corrupt file simply means "no
@@ -1332,9 +1318,6 @@ async function pump () {
   if (!job) return
   working = true
   currentPriority = job.kind === 'priority'
-  // Foreground = a human is price-checking right now.
-  // while after this (see isUserActive in the createHarvester wiring).
-  if (!job.run) lastForegroundAt = Date.now()
   currentJob = job
   broadcastQueue()
 
@@ -2093,12 +2076,12 @@ const server = createServer(async (req, res) => {
     return
   }
 
-  // Net-worth trend series for the header chart. Deliberately a GET and NOT
-  // part of the WebSocket snapshot: that payload goes out on every tab sync
+  // Net-worth trend series for the History page chart. Deliberately a GET and
+  // NOT part of the WebSocket snapshot: that payload goes out on every tab sync
   // (~30s) and would then carry the whole 24h series each time. The chart needs
   // it once per page load plus a slow poll, so it gets its own endpoint —
-  // downsampled server-side (<=180 points), per-tab values positional against a
-  // shared name dictionary. Identity via the same ppt_user cookie as /events.
+  // downsampled server-side (<=180 points), one positional [at, chaos, cd]
+  // triple per point. Identity via the same ppt_user cookie as /events.
   if (req.method === 'GET' && path === '/networth-trend') {
     const user = parseCookies(req.headers.cookie).ppt_user
     if (!user || !users.has(user)) {
@@ -2420,14 +2403,13 @@ await refreshCdRatio(LEAGUE)
 await refreshReference(LEAGUE) // warm up the reference rail once (exchange cache is already warm)
 
 // ---------------------------------------------------------------------------
-// ---------------------------------------------------------------------------
 // Net-Worth background refresher: syncs ONE stash tab per interval (default
 // 30s) per user into the per-tab store — quiet and continuous, staying far
 // under GGG's rate limit instead of the manual full scan's ~115-request burst
 // (which is what tripped the 429). Only started when creds exist + the store is
-// writable + it isn't disabled. One
-// tab sync broadcasts the refreshed snapshot into the user's room -> an open
-// page nudges live. The POESESSID cookie never touches a log/broadcast/store.
+// writable + it isn't disabled. One tab sync broadcasts the refreshed snapshot
+// into the user's room -> an open page nudges live. The POESESSID cookie never
+// touches a log/broadcast/store.
 // ---------------------------------------------------------------------------
 let networthRefresher = null
 const networthBootCreds = await loadNetworthUsers({ defaultUser: USERS[0] }).catch(() => ({}))
@@ -2497,12 +2479,12 @@ if (process.env.POE_STASH_PROBE) {
 }
 
 // The distinct set of leagues to refresh each tick: every league with CONNECTED
-// clients, PLUS the configured league(s) unconditionally. The headless
-// background pricers (corpse pricer, Faustus divine bridge) read cdMsgFor(LEAGUE)
-// / cdMsgFor(CRAWLER_LEAGUE) passively — with no tab open, a clients-only set
-// would never refresh those, freezing the divine normalisation on the boot
-// value (bad at league start, when divine moves fast). So the configured
-// league(s) are always in the set, independent of connected clients.
+// clients, PLUS the configured league unconditionally. The headless background
+// pricers (corpse pricer, Faustus divine bridge) read cdMsgFor(LEAGUE)
+// passively — with no tab open, a clients-only set would never refresh it,
+// freezing the divine normalisation on the boot value (bad at league start,
+// when divine moves fast). So the configured league is always in the set,
+// independent of connected clients.
 function leaguesToRefresh () {
   const set = new Set()
   for (const room of users.values()) if (room.clients.size) set.add(room.league)

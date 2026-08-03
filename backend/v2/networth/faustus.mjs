@@ -13,7 +13,7 @@
 // officially documented; the midpoint derivation below is empirically verified
 // and pinned by faustus.test.mjs — see rateXperQuote.
 import { loadBaseNames } from './base-names.mjs'
-import { isAttested, SELL_MIN_UNITS } from '../sell-side.mjs'
+import { isAttested } from '../sell-side.mjs'
 
 const FAUSTUS_BASE = 'https://web.poecdn.com/api/currency-exchange'
 const FAUSTUS_UA = 'poe-price-tool/0.1'
@@ -38,6 +38,10 @@ const SPREAD_LIMIT = 4 // hi/lo are hourly EXTREMES, not percentiles; wide sprea
 // enough that a genuinely dual-traded item passes, tight enough that Regal
 // Orb's 5.67c against an observed 0.2..1.0c range does not.
 const BRIDGE_TOLERANCE = 4
+// How much better evidenced the divine side has to be before it takes the price
+// away from the item's OWN chaos market: divine units >= this x chaos units.
+// See the long note in buildDetailById for the measurement behind the 3.
+const BRIDGE_UNIT_RATIO = 3
 const DEFAULT_UNION_HOURS = 8 // walk back this many completed hours, most-recent market wins; overridable via deps.unionHours (Task 3: POE_FAUSTUS_UNION_HOURS)
 // Slack for the union walk: the newest completed hour may not be published yet
 // (undocumented delay) and GGG-deleted history leaves holes — allow that many
@@ -212,9 +216,17 @@ export function createFaustusPricer ({ league, deps = {} } = {}) {
   // the pair looks unpriceable and — worse — loses its plausibility envelope in
   // buildChaosById, which then lets a lone divine trade set the price. A pair
   // that ONLY ever has placeholders keeps one (it stays unpriced as before).
+  //
+  // Second return value `chaosEnvById`: for every X with a chaos market, the
+  // chaos-per-X range that the walked hours TOGETHER spanned. Unlike byPair this
+  // accumulates over ALL hours, not just the winning one — see the envelope
+  // discussion in buildDetailById for why one hour is not enough. Placeholder
+  // entries contribute nothing on their own (rawRateRange returns null for
+  // all-zero ratios), so no idle hour can widen the range.
   async function fetchUnion () {
     let id = lastHour(now())
     const byPair = new Map()
+    const chaosEnvById = new Map() // xId -> { min, max } in chaos per X
     const usable = new Set() // pairKeys whose stored entry is informative
     let collected = 0
     let guard = 0
@@ -226,6 +238,16 @@ export function createFaustusPricer ({ league, deps = {} } = {}) {
       for (const m of digest.markets) {
         if (league != null && m.league !== league) continue
         if (!Array.isArray(m.market_pair) || m.market_pair.length !== 2) continue
+        const ci = m.market_pair.indexOf(CHAOS)
+        if (ci !== -1) {
+          const x = m.market_pair[1 - ci]
+          const r = rawRateRange(m, x, CHAOS)
+          if (r) {
+            const cur = chaosEnvById.get(x)
+            if (!cur) chaosEnvById.set(x, { min: r.min, max: r.max })
+            else { cur.min = Math.min(cur.min, r.min); cur.max = Math.max(cur.max, r.max) }
+          }
+        }
         const key = pairKeyOf(m)
         if (usable.has(key)) continue // newest-first walk -> newest usable wins
         const ok = isInformativeMarket(m)
@@ -235,7 +257,7 @@ export function createFaustusPricer ({ league, deps = {} } = {}) {
       collected++
       id -= 3600
     }
-    return byPair
+    return { byPair, chaosEnvById }
   }
 
   // From the unioned markets, build metadata-id -> { chaos, min?, max?, sell? }.
@@ -243,7 +265,7 @@ export function createFaustusPricer ({ league, deps = {} } = {}) {
   // WITHOUT the volume/spread guards — the guards decide whether we price at
   // all, not how wide the market was). Omitted when there is no usable range,
   // never guessed.
-  async function buildDetailById (byPair) {
+  async function buildDetailById (byPair, chaosEnvById = new Map()) {
     // id -> Map(counterpartId -> market)
     const marketOf = new Map()
     const allIds = new Set()
@@ -353,44 +375,108 @@ export function createFaustusPricer ({ league, deps = {} } = {}) {
       // the envelope below never runs, because the bridge is only reached when
       // the chaos market produced nothing at all.
       //
-      // So: hand the price to the bridge when the chaos side traded too FEW
-      // UNITS while the divine side is properly attested.
+      // So: hand the price to the bridge when the divine side is RELATIVELY
+      // better evidenced than the chaos side — divine units >= 3x chaos units —
+      // and is itself properly attested.
       //
-      // The unit count is the criterion, deliberately not full isAttested() on
-      // the chaos side. isAttested also demands 5000c of turnover, and that bar
-      // is price-dependent: it fails cheap-but-liquid markets simply for being
-      // cheap. Measured over 102 anchor hours (76k priced lines, poe.ninja as
-      // reference): the turnover bar produced 7 lines above 100% error, the unit
-      // gate produces 2.
+      // The comparison is relative on purpose. It used to be the absolute bar
+      // "chaos side traded fewer than 10 units", which never asked whether the
+      // divine side was the better-evidenced one, and that cost in both
+      // directions. Measured over 102 anchor hours (2026-07-29..08-03 digests,
+      // 72.9k priced lines with a poe.ninja reference, 2238 lines on which the
+      // variants disagree at all):
       //
-      // What the unit gate does NOT fix, so nobody rediscovers it the hard way:
-      //   - Desecrated Virtue still bridges to 524c against a real ~240c in 2 of
-      //     those 102 hours. Its chaos market had 6 units there — below the gate
-      //     — while spanning a near-perfect 220.0..221.0. The gate discards a
-      //     good market for being small.
-      //   - One Last Score comes out WORSE than under the turnover bar (item
-      //     median 31% -> 37%): its chaos market clears the gate with 10-37
-      //     units but underquotes, while the divine side carries 2-4x the units.
-      //     The gate is absolute — it never asks whether the divine side is
-      //     better evidenced than the chaos side. Making it relative is the
-      //     obvious fix and is unmeasured.
-      // Attesting the divine side at an honest price was measured as well: it
-      // removes both >100% lines but costs two others just as badly (Divine
-      // Justice 22-26% -> 66%). Not taken — that is a trade, not a win.
+      //   gate                       median  mean   >50%  >100%  fired
+      //   no branch at all           22.3%   24.8%   135      0      0
+      //   absolute, chaos < 10 units 13.2%   16.0%    12      2   1402
+      //   relative, div >= 3x chaos  12.6%   15.3%     3      0   1750
+      //
+      // Better on every metric, and the two >100% lines it removes are real:
+      // Desecrated Virtue used to bridge to 524c and 495c against a real ~240c
+      // because its chaos market had only 6 units — while spanning a
+      // near-perfect 220.0..221.0. In those two hours the divine side carried 13
+      // and 12 units against those 6, i.e. 2.17x and 2.00x — better evidenced,
+      // but not 3x better, so the relative gate leaves that market alone and
+      // both hours land at 8% (item worst case 118% -> 40%).
+      // The absolute gate's wins survive unchanged: The Progeny of Lunaris
+      // stays at an item median of 7.5% against 38.1% without the branch, The
+      // Apothecary at 10.5% against 26.5%, and The Immortal improves further,
+      // 17.5% -> 11.6%.
+      //
+      // The factor 3 is a measured plateau, not a guess. Sweeping it over the
+      // same hours: every value from 2.25 to 6 keeps >100% at zero, below 2.25
+      // the >100% lines come back (2.0 -> 2 lines, 1.5 -> 3), and the >50% count
+      // bottoms out exactly at 3 (7 at 2.25, 5 at 2.5, 3 at 3, 5 at 4, 10 at 6).
+      // 3 also sits in the middle of the safe band rather than on its edge. What
+      // remains wrong at 3 is one-sided and mild: the three >50% lines are two
+      // Choking Guilt hours and one Luminous Trove, at most 64% and all but one
+      // UNDER-quoting — while the values below 2.75 start over-quoting instead
+      // (Tainted Exalted Orb 155c vs 83c, Luminous Trove 183c vs 110c), which is
+      // the worse direction for a net-worth number.
+      //
+      // What this still does NOT fix, so nobody rediscovers it the hard way:
+      // One Last Score, whose chaos market underquotes in 91 of the 102 hours
+      // (median 131c, low 62c, against a real ~192c). Item median 36.7% ->
+      // 34.6%, worst case unchanged at 67.5%. Most of that is out of this gate's
+      // reach: in 38 of the 102 hours the card has NO usable divine market at
+      // all (mean error 31%), and nothing here can bridge what does not exist.
+      // Of the 64 hours that do have one, the gate fires in 10 (mean error 23%)
+      // and the chaos market keeps its underquote in the other 54 (mean error
+      // 32%) — its divine side carries 10-48 units against 5-62 on the chaos
+      // side, so the ratio straddles 3 rather than sitting cleanly above it. A
+      // lower factor would catch more of those 54 and cost the over-quoting
+      // lines above. Not taken — that is a trade, not a win.
+      //
+      // Attesting the divine side at an honest price was measured too: it
+      // removes the >100% lines but costs two others just as badly (Divine
+      // Justice 22-26% -> 66%). Also not taken.
       //
       // On the DIVINE side the full attestation stays, and it is load-bearing:
       // without it the coarse "1 div : N items" quantisation takes over and
       // Breach Scarab of the Marshal (really 1.26c) prices at 184c off a single
       // 1-divine trade.
+      //
+      // THE ENVELOPE HERE SPANS THE WHOLE UNION WINDOW, NOT ONE HOUR, and a
+      // degenerate one is ignored. It used to be the newest informative hour
+      // only, and that made it worthless on exactly this path: in 926 of 1402
+      // firings min === max, i.e. the "range" was a single chaos trade, so the
+      // accepted band [p/4, p*4] was a 16x hole. Worse, it was the very trade
+      // the gate had just declared under-evidenced, vetoing its own replacement
+      // — and it did fire: all 8 rejections over the 102 hours were WRONG, each
+      // keeping a chaos price 72-89% off ninja and discarding a bridge 4-27%
+      // off (The Fiend 121c kept vs 1059c bridged vs 1107c real; Omen of Fortune
+      // 500c vs ~2450c vs 3093c; also The Demon, Fire Of Unknown Origin).
+      // Unioning the walked hours turns it into a real range where one exists:
+      // 1474 of the 1750 firings are now checked against a genuine multi-hour
+      // band, and in the remaining 276 even eight hours collapse to a single
+      // point — there the check abstains instead of vetoing on one trade.
+      // Measured on the disagreeing lines that is worth mean 15.1% -> 13.8% and
+      // 10 -> 2 lines above 50%, and it drops the wrong rejections to 0.
+      //
+      // BRIDGE_TOLERANCE stays 4 here, measured: with the multi-hour envelope,
+      // 3 gives 4 lines >50% and 2 gives 11, against 2 at tolerance 4. A bridged
+      // price legitimately sits ABOVE the chaos market — over the 2036 rows the
+      // gate fires on, bridged/chaos has a median of 1.20 (p10 1.01, p90 1.89) —
+      // so a tighter band cuts good prices, not bad ones.
       if (chaos != null && dm && sell.chaos && sell.divine && chaosPerDivine != null &&
-          sell.chaos.volX < SELL_MIN_UNITS && isAttested(sell.divine, chaosPerDivine)) {
-        const env = cm ? rawRateRange(cm, x, CHAOS) : null
+          sell.divine.volX >= BRIDGE_UNIT_RATIO * sell.chaos.volX &&
+          isAttested(sell.divine, chaosPerDivine)) {
+        const spanned = chaosEnvById.get(x)
+        const env = (spanned && spanned.min < spanned.max) ? spanned : null
         const bridgedChaos = sell.divine.perItem * chaosPerDivine
         const plausible = !env ||
           (bridgedChaos >= env.min / BRIDGE_TOLERANCE && bridgedChaos <= env.max * BRIDGE_TOLERANCE)
         if (plausible) { chaos = bridgedChaos; bridged = true }
       }
 
+      // The purely bridged path (X has no usable chaos price at all) keeps the
+      // SINGLE-HOUR envelope on purpose. Over the same 102 anchor hours this
+      // envelope never changed a single priced line — widening it to the union
+      // window, tightening the tolerance to 1.5, or removing it outright all
+      // produced byte-identical output, so there is no measurement that would
+      // justify touching it. It is the guard that caught the Regal Orb case
+      // (5.67c for a 0.35c currency), which is pinned by the tests but does not
+      // occur in these hours; an unmeasured widening would only weaken it.
       if (chaos == null && chaosPerDivine != null && dm) {
         const env = cm ? rawRateRange(cm, x, CHAOS) : null
         const volX = dm.volume_traded?.[x] ?? 0
@@ -440,8 +526,8 @@ export function createFaustusPricer ({ league, deps = {} } = {}) {
   async function buildDetailByName () {
     if (!baseNames) baseNames = await loadBaseNames()
     const byId = baseNames.byId
-    const byPair = await fetchUnion()
-    const detailById = await buildDetailById(byPair)
+    const { byPair, chaosEnvById } = await fetchUnion()
+    const detailById = await buildDetailById(byPair, chaosEnvById)
 
     const byName = new Map()
     const unmappedPrefixes = new Set()

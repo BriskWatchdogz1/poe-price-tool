@@ -35,6 +35,10 @@
   net-worth valuation (one cache, keyed by league).
 - `shims/`, `engine.mts`, `engine.bundle.mjs` — the headless APT engine glue
   (Node adaptations only; no APT source is changed — see `renderer/`).
+- `engine-cli.mjs` — dev-only debug CLI against the built bundle:
+  `node backend/v2/engine-cli.mjs <item.txt> [--league <name>] [--parse-only]`.
+  Nothing imports it and the runtime image does not ship it. Use `--parse-only`
+  for offline work — the default path hits the live trade API.
 - `frontend/` — the static UI plus
   [`PROTOCOL.md`](backend/v2/frontend/PROTOCOL.md), the WS `/events` message
   contract. Read it before touching anything that sends or receives a WS

@@ -1,4 +1,4 @@
-// Net-worth history — the time series behind the header trend chart.
+// Net-worth history — the time series behind the History page's trend chart.
 //
 // WHY A SEPARATE FILE (and not networth-store.json):
 // the per-tab store is rewritten IN FULL on every single setTab, i.e. every
@@ -8,13 +8,13 @@
 //
 // Line shape (/config/networth-history.ndjson):
 //   {"u":"<user>","at":<epoch ms>,"c":<total chaos>,"cd":<chaos per divine>,
-//    "t":{"<tab index>":<chaos>},"d":{...item delta, see below}}
+//    "d":{...item delta, see below}}
 //
-//   t is keyed by the stash tab INDEX (GGG's `i`), the same identity the
-//   frontend filters by. It used to be keyed by the tab NAME, which merged all
-//   unnamed tabs into one entry; lines in that old format may still sit in the
-//   file until retention drops them and are handled in the frontend
-//   (scopeSeries: a legacy point counts unfiltered). No migration of old lines.
+//   OLD LINES MAY CARRY MORE. Until the header sparkline was removed, every
+//   line also held `t`, a per-tab chaos breakdown — 42% of the line for a field
+//   nothing read once that chart was gone. It is no longer written; recorded
+//   lines that still have it are read normally (unknown fields are ignored, not
+//   a reason to skip a point) and age out with retention. No migration.
 //
 //   d is OPTIONAL — lines written before this field existed simply have none.
 //   Every read path treats a missing d as "no detail recorded", never as an
@@ -24,12 +24,10 @@
 //
 //   cd is stored PER POINT on purpose: reconstructing the divine value of an
 //   old point with today's ratio would fake movement that never happened.
-//   t (per-tab breakdown) lets the chart follow the sidebar's tab selection.
-//   Tabs below TAB_MIN_CHAOS are omitted — noise that would double the file.
 //
 // PRIVACY: only the local routing name (`u`, same key the store already uses)
-// and tab indexes (already in the store) are written. No accountName, and the
-// POESESSID cookie never comes near this module.
+// is written. No accountName, and the POESESSID cookie never comes near this
+// module.
 //
 // ROBUSTNESS: a missing, empty, truncated or corrupt file NEVER throws — this
 // is a rebuildable convenience series, not a backup. Unparsable lines are
@@ -45,7 +43,6 @@ export const DEFAULT_MIN_INTERVAL_MS = 60_000            // at most one point pe
 // is ~21600 lines per user; the file stays a few MB and every read path answers
 // from the in-memory mirror, so the size costs nothing at query time.
 export const DEFAULT_RETENTION_MS = 15 * 24 * 60 * 60 * 1000
-const TAB_MIN_CHAOS = 1                                  // omit sub-1c tabs from the breakdown
 const DEFAULT_MAX_POINTS = 180                           // downsample cap per series response
 
 // ---- item deltas ("what caused this jump?") --------------------------------
@@ -204,19 +201,13 @@ export function createNetworthHistory (filePath, {
 
     // Appends ONE point unless the last one for this user is younger than
     // minIntervalMs. Returns true when a point was actually recorded.
-    async append (user, { totalChaos, cdRatio, tabs, items } = {}) {
+    async append (user, { totalChaos, cdRatio, items } = {}) {
       if (!user || typeof totalChaos !== 'number' || !Number.isFinite(totalChaos)) return false
       const at = now()
       const last = hist.lastAt(user)
       if (last != null && (at - last) < minIntervalMs) return false
 
-      // `tabs` comes in keyed by stash tab index (see server.mjs).
-      const t = {}
-      for (const [key, chaos] of Object.entries(tabs || {})) {
-        const v = Number(chaos)
-        if (Number.isFinite(v) && v >= TAB_MIN_CHAOS) t[key] = round1(v)
-      }
-      const point = { u: user, at, c: round1(totalChaos), cd: Number(cdRatio) > 0 ? Number(cdRatio) : 0, t }
+      const point = { u: user, at, c: round1(totalChaos), cd: Number(cdRatio) > 0 ? Number(cdRatio) : 0 }
 
       // Item delta against the previous point of THIS user. Needs both the
       // previous item breakdown (memory) and the previous point (for the
@@ -292,13 +283,16 @@ export function createNetworthHistory (filePath, {
       }
     },
 
-    // Wire format for the chart. Per-tab values become POSITIONAL arrays over a
-    // shared key dictionary (tab indexes as strings; legacy lines may still
-    // contribute names) — with ~40 non-empty tabs that is roughly a third of the
-    // repeated-key JSON, which matters because the frontend re-polls it.
+    // Wire format for the chart — positional per point, because the frontend
+    // re-polls this and repeated keys would be most of the payload:
     //
-    //   { range, tabs: [key...], points: [[at, chaos, cd, [tabChaos...]]],
-    //     coverageMs, retentionMs, total }
+    //   { range, points: [[at, chaos, cd]], coverageMs, retentionMs, total }
+    //
+    // A fourth column used to carry the per-tab breakdown of `t` for the header
+    // sparkline. That chart is gone and no reader was left, so neither the
+    // column nor the key dictionary it indexed into is served any more; points
+    // recorded with `t` simply contribute their first three values like every
+    // other point.
     //
     // coverageMs = how much history exists AT ALL for this user (independent of
     // the requested window), so the frontend can say "collecting data…" instead
@@ -308,21 +302,8 @@ export function createNetworthHistory (filePath, {
       const coverageMs = mine.length >= 2 ? (mine[mine.length - 1].at - mine[0].at) : 0
       const from = at - (Number(windowMs) > 0 ? Number(windowMs) : DEFAULT_RETENTION_MS)
       const win = mine.filter(p => p.at >= from)
-
-      const keys = []
-      const idx = new Map()
-      for (const p of win) {
-        for (const key of Object.keys(p.t || {})) {
-          if (!idx.has(key)) { idx.set(key, keys.length); keys.push(key) }
-        }
-      }
-      const sampled = downsample(win, max)
-      const out = sampled.map(p => {
-        const vals = new Array(keys.length).fill(0)
-        for (const [key, v] of Object.entries(p.t || {})) vals[idx.get(key)] = v
-        return [p.at, p.c, p.cd, vals]
-      })
-      return { range, tabs: keys, points: out, coverageMs, retentionMs, total: win.length }
+      const out = downsample(win, max).map(p => [p.at, p.c, p.cd])
+      return { range, points: out, coverageMs, retentionMs, total: win.length }
     },
 
     // Stock movements over a window — the history page's own wire format.

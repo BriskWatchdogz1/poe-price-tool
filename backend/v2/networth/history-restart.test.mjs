@@ -31,7 +31,7 @@ test('restart: the first point afterwards carries a breakdown', async () => {
 
   const h1 = await boot(file, c)
   assert.equal(await h1.append('player1', {
-    totalChaos: 1200, cdRatio: 200, tabs: { 1: 1200 },
+    totalChaos: 1200, cdRatio: 200,
     items: items(['Divine Orb', 10, 1200])
   }), true)
 
@@ -39,7 +39,7 @@ test('restart: the first point afterwards carries a breakdown', async () => {
   c.advance(60_000)
   const h2 = await boot(file, c)
   assert.equal(await h2.append('player1', {
-    totalChaos: 1560, cdRatio: 200, tabs: { 1: 1560 },
+    totalChaos: 1560, cdRatio: 200,
     items: items(['Divine Orb', 13, 1560])
   }), true)
 
@@ -60,10 +60,10 @@ test('the point line stays unchanged — the listing lives next to it', async ()
   const dir = await tmpDir()
   const file = join(dir, 'networth-history.ndjson')
   const h = await boot(file, c)
-  await h.append('player1', { totalChaos: 1200, cdRatio: 200, tabs: { 1: 1200 }, items: items(['Divine Orb', 10, 1200]) })
+  await h.append('player1', { totalChaos: 1200, cdRatio: 200, items: items(['Divine Orb', 10, 1200]) })
 
   const line = JSON.parse((await readFile(file, 'utf8')).trim())
-  assert.equal(Object.keys(line).sort().join(','), 'at,c,cd,t,u', 'no new field in the NDJSON line')
+  assert.equal(Object.keys(line).sort().join(','), 'at,c,cd,u', 'no new field in the NDJSON line')
 
   const side = JSON.parse(await readFile(defaultItemsPath(file), 'utf8'))
   assert.equal(side.v, 1)
@@ -94,10 +94,10 @@ test('legacy lines without the new field stay readable', async () => {
   // Without a sidecar file there is no listing for the last point -> the next
   // point still has none, but the one after that does again.
   c.advance(60_000)
-  await h.append('player1', { totalChaos: 1200, cdRatio: 200, tabs: { 1: 1200 }, items: items(['Chaos Orb', 200, 200]) })
+  await h.append('player1', { totalChaos: 1200, cdRatio: 200, items: items(['Chaos Orb', 200, 200]) })
   assert.equal(h.points[2].d, undefined, 'first point after legacy data has no delta')
   c.advance(60_000)
-  await h.append('player1', { totalChaos: 1300, cdRatio: 200, tabs: { 1: 1300 }, items: items(['Chaos Orb', 300, 300]) })
+  await h.append('player1', { totalChaos: 1300, cdRatio: 200, items: items(['Chaos Orb', 300, 300]) })
   assert.ok(h.points[3].d, 'with a delta again afterwards')
 })
 
@@ -105,7 +105,7 @@ test('very first point: the panel reports missing comparison data (start=true)',
   const c = clock()
   const file = join(await tmpDir(), 'networth-history.ndjson')
   const h = await boot(file, c)
-  await h.append('player1', { totalChaos: 1200, cdRatio: 200, tabs: { 1: 1200 }, items: items(['Divine Orb', 10, 1200]) })
+  await h.append('player1', { totalChaos: 1200, cdRatio: 200, items: items(['Divine Orb', 10, 1200]) })
 
   const at = h.lastAt('player1')
   const det = h.detail('player1', at - 1, at)
@@ -119,9 +119,9 @@ test('"nothing changed" stays distinguishable from the empty case', async () => 
   const file = join(await tmpDir(), 'networth-history.ndjson')
   const h = await boot(file, c)
   const rows = items(['Divine Orb', 10, 1200])
-  await h.append('player1', { totalChaos: 1200, cdRatio: 200, tabs: { 1: 1200 }, items: rows })
+  await h.append('player1', { totalChaos: 1200, cdRatio: 200, items: rows })
   c.advance(60_000)
-  await h.append('player1', { totalChaos: 1200, cdRatio: 200, tabs: { 1: 1200 }, items: rows })
+  await h.append('player1', { totalChaos: 1200, cdRatio: 200, items: rows })
 
   const [a, b] = h.points
   const det = h.detail('player1', a.at, b.at)
@@ -136,7 +136,7 @@ test('a sidecar file without a matching anchor is discarded instead of misattrib
   const dir = await tmpDir()
   const file = join(dir, 'networth-history.ndjson')
   const h1 = await boot(file, c)
-  await h1.append('player1', { totalChaos: 1200, cdRatio: 200, tabs: { 1: 1200 }, items: items(['Divine Orb', 10, 1200]) })
+  await h1.append('player1', { totalChaos: 1200, cdRatio: 200, items: items(['Divine Orb', 10, 1200]) })
 
   // Bend the sidecar timestamp by hand (half-written state, the point append
   // failed, retention ate the anchor …).
@@ -147,7 +147,7 @@ test('a sidecar file without a matching anchor is discarded instead of misattrib
 
   c.advance(60_000)
   const h2 = await boot(file, c)
-  await h2.append('player1', { totalChaos: 9999, cdRatio: 200, tabs: { 1: 9999 }, items: items(['Divine Orb', 80, 9999]) })
+  await h2.append('player1', { totalChaos: 9999, cdRatio: 200, items: items(['Divine Orb', 80, 9999]) })
   assert.equal(h2.points[1].d, undefined, 'rather no delta at all than a misattributed one')
 })
 
@@ -156,13 +156,13 @@ test('broken sidecar file = empty instead of a crash', async () => {
   const dir = await tmpDir()
   const file = join(dir, 'networth-history.ndjson')
   const h1 = await boot(file, c)
-  await h1.append('player1', { totalChaos: 1200, cdRatio: 200, tabs: { 1: 1200 }, items: items(['Divine Orb', 10, 1200]) })
+  await h1.append('player1', { totalChaos: 1200, cdRatio: 200, items: items(['Divine Orb', 10, 1200]) })
   await writeFile(defaultItemsPath(file), '{"v":1,"u":{"player1":{"at":', 'utf8') // truncated
 
   c.advance(60_000)
   const h2 = await boot(file, c)
   assert.equal(h2.points.length, 1, 'the series is undamaged')
-  assert.equal(await h2.append('player1', { totalChaos: 1300, cdRatio: 200, tabs: { 1: 1300 }, items: items(['Divine Orb', 11, 1300]) }), true)
+  assert.equal(await h2.append('player1', { totalChaos: 1300, cdRatio: 200, items: items(['Divine Orb', 11, 1300]) }), true)
   assert.equal(h2.points[1].d, undefined)
 })
 
@@ -185,11 +185,11 @@ test('unwritable /config: silently disabled, the series keeps running', async ()
   const h = createNetworthHistory(file, { now: c.now })
   await h.load()
   h.writable = false // what server.mjs sets when /config cannot be created
-  assert.equal(await h.append('player1', { totalChaos: 1200, cdRatio: 200, tabs: { 1: 1200 }, items: items(['Divine Orb', 10, 1200]) }), true)
+  assert.equal(await h.append('player1', { totalChaos: 1200, cdRatio: 200, items: items(['Divine Orb', 10, 1200]) }), true)
   await assert.rejects(stat(defaultItemsPath(file)), 'no sidecar file written')
   // In memory the comparison still runs.
   c.advance(60_000)
-  await h.append('player1', { totalChaos: 1560, cdRatio: 200, tabs: { 1: 1560 }, items: items(['Divine Orb', 13, 1560]) })
+  await h.append('player1', { totalChaos: 1560, cdRatio: 200, items: items(['Divine Orb', 13, 1560]) })
   assert.ok(h.points[1].d)
 })
 
@@ -198,11 +198,11 @@ test('a sidecar write error does not take the history down with it', async () =>
   const dir = await tmpDir()
   const file = join(dir, 'networth-history.ndjson')
   const h = await boot(file, c)
-  await h.append('player1', { totalChaos: 1200, cdRatio: 200, tabs: { 1: 1200 }, items: items(['Divine Orb', 10, 1200]) })
+  await h.append('player1', { totalChaos: 1200, cdRatio: 200, items: items(['Divine Orb', 10, 1200]) })
   await chmod(dir, 0o555) // directory sealed: no tmp file can be created any more
   try {
     c.advance(60_000)
-    assert.equal(await h.append('player1', { totalChaos: 1300, cdRatio: 200, tabs: { 1: 1300 }, items: items(['Divine Orb', 11, 1300]) }), true)
+    assert.equal(await h.append('player1', { totalChaos: 1300, cdRatio: 200, items: items(['Divine Orb', 11, 1300]) }), true)
     assert.equal(h.points.length, 2)
   } finally {
     await chmod(dir, 0o755)
