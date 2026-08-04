@@ -566,32 +566,13 @@ function applyNinjaRef (msg) {
 // and flips it for the quantity-per-chaos lifeforce rows). The series is the
 // server's OWN history in the row's display unit, so a row with less than two
 // recorded points simply has no line yet. Empty section -> omitted.
-// Sell-side hint badge (server field `sell`, optional): which currency pays a
-// SELLER more right now — chaos or divine — and by how much. `better` +
-// `edgePct` = a claimed comparison (both markets carry real volume); `only` =
-// just one side is backed by enough trades, so the badge names it WITHOUT a
-// percentage (a number from a thin market would be a lie, see sell-side.mjs).
-// Details (both rates, C:D, data age) live in the badge's tooltip.
-function sellBadge (s) {
-  if (!s || (!s.better && !s.only)) return ''
-  const fmtC = v => (typeof v === 'number' && isFinite(v)) ? `${v >= 100 ? Math.round(v) : v.toPrecision(3)} c/ea` : '?'
-  const at = s.updatedAt ? new Date(s.updatedAt) : null
-  const stamp = at ? ` · Faustus ${String(at.getHours()).padStart(2, '0')}:${String(at.getMinutes()).padStart(2, '0')}` : ''
-  const rates = `sell vs chaos ${fmtC(s.viaChaos)} · sell vs divine ${fmtC(s.viaDivine)} (C:D ${s.cd})`
-  if (s.better) {
-    const pct = Math.round(s.edgePct)
-    if (pct < 1) { // both sides pay the same within rounding — say so, claim no winner
-      return `<span class="sellhint e" title="${esc(`Selling pays about the same vs chaos and vs divine: ${rates}${stamp}`)}">c ≈ div</span>`
-    }
-    const cls = s.better === 'chaos' ? 'c' : 'd'
-    const label = s.better === 'chaos' ? 'c' : 'div'
-    return `<span class="sellhint ${cls}" title="${esc(`Selling vs ${s.better} pays ~${pct}% more: ${rates}${stamp}`)}">${label} +${pct}%</span>`
-  }
-  const cls = s.only === 'chaos' ? 'c' : 'd'
-  const label = s.only === 'chaos' ? 'c' : 'div'
-  const other = s.only === 'chaos' ? 'divine' : 'chaos'
-  return `<span class="sellhint ${cls}" title="${esc(`Only the ${s.only} market has enough trades to price a sale (${rates}) — the ${other} side is too thin or missing, so no comparison is claimed${stamp}`)}">${label}</span>`
-}
+// The chaos-vs-divine sell-side comparison is NOT rendered. It runs entirely on
+// the server, where it decides which market a row is quoted against — that
+// decision is already visible as the row's unit ("5,343 / div" means sell it for
+// divine). A badge next to it would only restate the unit, and when the two
+// disagreed it read as a contradiction. The `sell` object still travels in the
+// message (see PROTOCOL.md) as the row's provenance: both rates, the C:D used
+// and the age of the Faustus data.
 
 // ---- Where a rail row's number comes from ----------------------------------
 // Two feeds on two clocks: poe.ninja (the reference fetch, >=15 min, stamped
@@ -649,7 +630,7 @@ function refSection (title, rows, sources) {
     // Man's Sulphur" shows as "Dead …"), so it carries its full name as a
     // tooltip — a truncated row must stay identifiable without guessing.
     return `<div class="rrow"><span class="n" title="${esc(r.name)}">${esc(r.name)}</span>`
-      + `<span class="rv">${sellBadge(r.sell)}`
+      + `<span class="rv">`
       + `<span class="p${m.cls}" title="${esc(m.title)}">${esc(r.display)}</span>`
       + `${sparkSvg(r.sparkline, !!r.invert)}</span></div>`
   }).join('')

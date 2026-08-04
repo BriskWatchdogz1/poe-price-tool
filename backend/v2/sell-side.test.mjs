@@ -6,7 +6,10 @@ import assert from 'node:assert/strict'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { compareSellSides, isAttested, SELL_MIN_UNITS, SELL_MIN_QUOTE_TURNOVER_C } from './sell-side.mjs'
+import {
+  compareSellSides, isAttested, SELL_MIN_UNITS, SELL_MIN_QUOTE_TURNOVER_C,
+  CHAOS_TAKEOVER_PCT, CHAOS_HOLD_PCT
+} from './sell-side.mjs'
 import { createFaustusPricer } from './networth/faustus.mjs'
 import { createFaustusStore } from './networth/faustus-store.mjs'
 
@@ -64,6 +67,78 @@ test('divine can win too (Exalted-shaped): higher bridged revenue -> divine', ()
   }, CD)
   assert.equal(r.better, 'divine')
   assert.ok(approx(r.edgePct, 1.26, 0.05), `edge ${r.edgePct}`)
+})
+
+// ---------------------------------------------------------------------------
+// compareSellSides — divine bias with hysteresis (CHAOS_TAKEOVER_PCT /
+// CHAOS_HOLD_PCT). Both sides attested throughout; only the two chaos-side
+// revenues and `prevBetter` vary. `sellFor(viaChaos, viaDivine)` builds a
+// both-sides-attested `sell` shape from two already-bridged chaos-equivalent
+// revenues, so the edge percentages below are exact, not approximated.
+// ---------------------------------------------------------------------------
+const sellFor = (viaChaos, viaDivine) => ({
+  chaos: { perItem: viaChaos, ...fat },
+  divine: { perItem: viaDivine / CD, ...fatDiv }
+})
+
+test('deadband: chaos pays a bit more but not enough to take over -> divine recommended, no percentage', () => {
+  // chaos edge = 2%, below the 5% takeover bar, no previous verdict.
+  const r = compareSellSides(sellFor(102, 100), CD)
+  assert.equal(r.better, 'divine')
+  assert.equal(r.edgePct, null, 'no honest percentage exists here — chaos, not divine, pays more')
+  assert.ok(approx(r.viaChaos, 102, 1e-6))
+  assert.ok(approx(r.viaDivine, 100, 1e-6))
+})
+
+test('deadband also covers an exact tie: chaosEdge 0% -> divine, no percentage', () => {
+  const r = compareSellSides(sellFor(100, 100), CD)
+  assert.equal(r.better, 'divine')
+  assert.equal(r.edgePct, null)
+})
+
+test(`takeover: chaos edge right at CHAOS_TAKEOVER_PCT (${CHAOS_TAKEOVER_PCT}%) -> chaos wins with that edge`, () => {
+  const viaDivine = 100
+  const viaChaos = viaDivine * (1 + CHAOS_TAKEOVER_PCT / 100)
+  const r = compareSellSides(sellFor(viaChaos, viaDivine), CD)
+  assert.equal(r.better, 'chaos')
+  assert.ok(approx(r.edgePct, CHAOS_TAKEOVER_PCT, 1e-6))
+})
+
+test('just under the takeover bar (no previous verdict) -> still divine, deadband', () => {
+  const viaDivine = 100
+  const viaChaos = viaDivine * (1 + (CHAOS_TAKEOVER_PCT - 0.5) / 100)
+  const r = compareSellSides(sellFor(viaChaos, viaDivine), CD)
+  assert.equal(r.better, 'divine')
+  assert.equal(r.edgePct, null)
+})
+
+test(`hold: chaos already recommended (prevBetter 'chaos') keeps winning at an edge of only ${CHAOS_HOLD_PCT}%`, () => {
+  const viaDivine = 100
+  const viaChaos = viaDivine * (1 + CHAOS_HOLD_PCT / 100)
+  // Below the takeover bar — a fresh (no prevBetter) comparison would go divine.
+  const fresh = compareSellSides(sellFor(viaChaos, viaDivine), CD)
+  assert.equal(fresh.better, 'divine')
+  // With chaos already holding the recommendation, the smaller hold bar applies.
+  const held = compareSellSides(sellFor(viaChaos, viaDivine), CD, 'chaos')
+  assert.equal(held.better, 'chaos')
+  assert.ok(approx(held.edgePct, CHAOS_HOLD_PCT, 1e-6))
+})
+
+test('hold releases once the edge drops below CHAOS_HOLD_PCT, back to the deadband', () => {
+  const viaDivine = 100
+  const viaChaos = viaDivine * (1 + (CHAOS_HOLD_PCT - 0.5) / 100)
+  const r = compareSellSides(sellFor(viaChaos, viaDivine), CD, 'chaos')
+  assert.equal(r.better, 'divine')
+  assert.equal(r.edgePct, null, 'chaos still pays marginally more, so no percentage is printed')
+})
+
+test('prevBetter is only consulted on the both-attested path: an `only` result ignores it entirely', () => {
+  const r = compareSellSides({
+    chaos: { perItem: 0.04, ...fat },
+    divine: null
+  }, CD, 'divine')
+  assert.equal(r.better, null)
+  assert.equal(r.only, 'chaos')
 })
 
 // ---------------------------------------------------------------------------

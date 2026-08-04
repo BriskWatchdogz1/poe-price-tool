@@ -80,7 +80,7 @@ test('without solid Faustus data the row claims nothing', async () => {
   assert.ok(sulphur, 'sulphur row exists')
   for (const r of [sulphur, ...msg.lifeforce]) {
     assert.equal(r.display, '—', `${r.name}: no number rather than a wrong one`)
-    assert.equal('sell' in r, false, `${r.name}: no badge`)
+    assert.equal('sell' in r, false, `${r.name}: no sell field`)
     assert.deepEqual(r.sparkline, [], `${r.name}: no line`)
   }
   // These rows do NOT land in the history either (no chaos value).

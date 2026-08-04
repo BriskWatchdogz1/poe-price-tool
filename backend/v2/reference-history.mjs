@@ -14,12 +14,13 @@
 //    "v":{"<row key>":<chaos per ONE unit>}}
 //
 //   v holds the CANONICAL chaos value per unit, never the formatted display
-//   number. The rail switches units on thresholds (lifeforce flips between "N / c"
-//   and "N / div" at LIFEFORCE_PER_CHAOS_MIN, beasts between "N c" and "N div" at
-//   1 divine). Storing the display number would put a jump into the series at
-//   every such flip that was never a market move. From chaos value + the `cd`
-//   of that moment, TODAY's display number can be recomputed for EVERY old
-//   point, so the drawn line stays internally consistent.
+//   number. The rail switches units (lifeforce/Sulphur flip between "N / c"
+//   and "N / div" following the sell-side recommendation — see perPieceDisplay
+//   in server.mjs; beasts between "N c" and "N div" at 1 divine). Storing the
+//   display number would put a jump into the series at every such flip that
+//   was never a market move. From chaos value + the `cd` of that moment,
+//   TODAY's display number can be recomputed for EVERY old point, so the
+//   drawn line stays internally consistent.
 //
 //   cd is stored per point for the same reason it is in networth/history.mjs:
 //   re-deriving an old divine value with today's ratio would fake movement.

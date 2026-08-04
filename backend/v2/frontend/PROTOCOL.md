@@ -202,7 +202,7 @@ poe.ninja's `stash/current/item/overview`. Renders a small reference price + min
     { "name": "Dead Man's Sulphur", "display": "174 / div", "sparkline": [...], "invert": true, "src": "faustus" }
   ],
   "lifeforce": [
-    { "name": "Vivid Lifeforce", "display": "1571 / div", "sparkline": [...], "invert": true, "src": "faustus" },
+    { "name": "Vivid Lifeforce", "display": "1,571 / div", "sparkline": [...], "invert": true, "src": "faustus" },
     { "name": "Wild Lifeforce",  "display": "11 / c",     "sparkline": [...], "invert": true, "src": "faustus" },
     { "name": "Primal Lifeforce","display": "—",          "sparkline": [],    "invert": true }
   ],
@@ -238,23 +238,37 @@ Feeds the left rail's three reference sections. Each row renders **name** (left)
   single shared "updated HH:MM". A source appears in that footer only if at
   least one row actually uses it.
   Note on Mirror: `src` is `"ninja"` although the row also carries a Faustus
-  `sell` badge — `src` describes the number, the badge carries its own stamp in
-  its own tooltip.
+  `sell` object — `src` describes the DISPLAYED number, which for Mirror is
+  poe.ninja's; `sell` is separate provenance with its own timestamp
+  (`sell.updatedAt`) and does not change what `src` reports.
 - **refreshedAt** — epoch ms of the poe.ninja fetch behind this message, baked
   in server-side so a cache hit keeps the real time instead of "now". It stamps
   the `src: "ninja"` rows only.
-- **sell** (optional, currency + lifeforce rows only) — the sell-side hint: which
-  currency pays a SELLER of this item more right now. Derived from the
-  SEPARATED Faustus per-market rates (X↔Chaos vs X↔Divine, matched-trade
-  volumes — see `backend/v2/sell-side.mjs`) bridged at `cd`, the tool's single
-  shared C:D. Shape:
+- **sell** (optional, currency + lifeforce rows only) — informational
+  provenance for the row's sell-side comparison: which currency pays a
+  SELLER of this item more right now. The client does not render this object
+  (no badge — the shipped UI does not display it directly); what it actually
+  does is decide the row's UNIT, via `better`/`only` — see the `display`/
+  `sparkline` note under **lifeforce** below. Derived from the SEPARATED
+  Faustus per-market rates (X↔Chaos vs X↔Divine, matched-trade volumes — see
+  `backend/v2/sell-side.mjs`) bridged at `cd`, the tool's single shared C:D.
+  Shape:
   `{ "better": "chaos"|"divine"|null, "only": "chaos"|"divine"|null,
      "edgePct": 6.2|null, "viaChaos": 0.03841|null, "viaDivine": 0.03616|null,
      "cd": 172, "updatedAt": 1721745600000 }`
   - `better` + `edgePct` — a claimed comparison: both markets carry enough
-    matched volume; the badge shows e.g. `c +6%`.
+    matched volume. The decision is biased toward divine with hysteresis
+    (`CHAOS_TAKEOVER_PCT`/`CHAOS_HOLD_PCT` in `sell-side.mjs`, defaults 5%/2%):
+    chaos must beat divine by the takeover margin to become `better`, and once
+    it is, it keeps the recommendation until its edge drops below the (smaller)
+    hold margin.
+  - `better === "divine"` with `edgePct: null` — the deadband: chaos pays the
+    same or marginally more but did not clear its takeover/hold bar, so
+    divine is recommended anyway as the currency worth holding. No percentage
+    is reported (reporting one would claim an advantage divine does not
+    have).
   - `only` — exactly one side is attested (the other is too thin or missing):
-    the badge names that side WITHOUT a percentage, no comparison is claimed.
+    that side is named, WITHOUT a percentage, and no comparison is claimed.
   - Field absent — no attested side, Faustus store stale/foreign-league, or
     Faustus disabled. Mirror then renders exactly as before (its number is
     poe.ninja's); the lifeforce/Sulphur rows lose their number too (`"—"`), because
@@ -269,10 +283,13 @@ Field/derivation notes:
   lifeforce rows below (Faustus sell side).
 - **lifeforce** (and Dead Man's Sulphur) — **sell side, not market middle.** `priceC` is the
   chaos a seller collects per piece on the better market, read from the row's own `sell`
-  object (`better` side, or the single attested `only` side) — so number, badge and
-  sparkline all come from ONE source. Auto unit: `perChaos = 1/priceC`,
-  `perDiv = ratio/priceC`; if `perChaos ≥ LIFEFORCE_PER_CHAOS_MIN` (server const, default 5) →
-  `"N / c"`, else → `"N / div"` (much-per-chaos → per c; scarce-per-chaos → per div).
+  object (`better` side, or the single attested `only` side) — so number and
+  sparkline both come from ONE source. The UNIT FOLLOWS THE RECOMMENDATION (`sell.better`
+  or `sell.only`), not a scarcity threshold — one statement per row, which market to sell
+  on and the rate on that market: side `"chaos"` → `1/priceC` pieces per chaos, `"N / c"`;
+  side `"divine"` → `ratio/priceC` pieces per divine, `"N / div"`. Bridged divine-side
+  numbers are routinely five digits, so both units group thousands with commas
+  (`"31,208 / div"`).
   No attested side (stale/foreign-league/disabled Faustus, or both markets too thin) →
   `display` is `"—"`, no `sell` field, `sparkline` `[]`. The row claims nothing; it never
   falls back to poe.ninja's market value, because the section is headed "Selling".

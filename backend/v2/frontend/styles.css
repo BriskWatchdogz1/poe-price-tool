@@ -52,20 +52,16 @@ body{background:var(--bg); color:var(--text); font-family:var(--sans); font-size
 .ref .rrow .n{color:var(--muted); min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
 .ref .rrow .rv{display:flex; align-items:center; gap:8px; flex:none;}
 .ref .rrow .p{font-family:var(--mono); font-variant-numeric:tabular-nums; color:var(--text);}
-/* Sell-side hint: which currency pays a SELLER more right now (details in the
-   tooltip). Colour = the recommended currency (teal chaos / gold divine),
-   muted when both pay the same. */
-.ref .rrow .sellhint{font-family:var(--mono); font-size:10.5px; line-height:1.5; flex:none;
-  padding:0 4px; border:1px solid var(--border-soft); border-radius:4px; cursor:help; white-space:nowrap;}
-.ref .rrow .sellhint.c{color:var(--chaos);}
-.ref .rrow .sellhint.d{color:var(--divine);}
-.ref .rrow .sellhint.e{color:var(--muted);}
+/* No sell-side badge: the chaos-vs-divine recommendation is already the row's
+   unit ("5,343 / div" means sell it for divine), so a badge could only restate
+   it — and when the two disagreed it read as a contradiction. */
 /* Source marker: which feed the number comes from. It must cost ZERO width —
    at 270 px the row names already ellipsize — so it rides on the number itself:
    Faustus (sell side) dotted-underlined, poe.ninja plain, a row without a value
-   neither. No colour: the two accents next to it already mean "chaos" and
-   "divine" on the badge. Every number names its source in full in its tooltip;
-   the footer legend (.rstamp) sets each source name in its own style. */
+   neither. No colour: the row's own unit ("/ c" vs "/ div") already spells out
+   chaos or divine, so a second colour cue would be redundant. Every number
+   names its source in full in its tooltip; the footer legend (.rstamp) sets
+   each source name in its own style. */
 .ref .rrow .p{cursor:help;}
 .ref .src-faustus{text-decoration:underline dotted; text-decoration-color:var(--faint);
   text-underline-offset:3px; text-decoration-thickness:1px;}

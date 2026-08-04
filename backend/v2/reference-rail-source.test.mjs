@@ -78,8 +78,9 @@ test('mixed section: Mirror is poe.ninja, Sulphur right below it is Faustus', as
   // Same section, two sources — the case a single footer stamp got wrong.
   assert.equal(rows['Mirror of Kalandra'].src, 'ninja')
   assert.equal(rows["Dead Man's Sulphur"].src, 'faustus')
-  // The Mirror badge is Faustus-derived, but the NUMBER is poe.ninja's: `src`
-  // describes the number, the badge carries its own stamp in its tooltip.
+  // Mirror's `sell` object is Faustus-derived, but the NUMBER is poe.ninja's:
+  // `src` describes the number only — `sell` is separate provenance with its
+  // own timestamp (`sell.updatedAt`).
   assert.equal(rows['Mirror of Kalandra'].sell.only, 'divine')
 
   for (const n of ['Vivid Lifeforce', 'Wild Lifeforce', 'Primal Lifeforce']) {
@@ -120,7 +121,6 @@ const railRender = await (async () => {
   const body = src.slice(from, to)
   const factory = new Function(`
     const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]))
-    const sellBadge = () => ''
     const sparkSvg = () => ''
     ${body}
     return { refSources, refSection, refFooter }

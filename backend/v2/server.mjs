@@ -1571,10 +1571,6 @@ async function refreshCdRatio (league) {
 // trend and the item card's ninja reference, which have a single known unit.
 // ---------------------------------------------------------------------------
 
-// "Scarce" threshold (tunable): from this many pieces PER CHAOS upward we show
-// "N / c", below it we convert to divine and show "N / div".
-const LIFEFORCE_PER_CHAOS_MIN = 5
-
 // Rows whose number IS the sell side (see sellRow below). `faustusName` is the
 // RePoE/base-names name the Faustus store keys its rates by; `name` is what the
 // rail prints. No poe.ninja exchange id here on purpose — these rows are priced
@@ -1588,7 +1584,7 @@ const LIFEFORCE_ROWS = [
 
 // Dead Man's Sulphur (Metadata/Items/Currency/CurrencyDeepwater) sits in the
 // CURRENCY section but is a Faustus-traded fungible exactly like the lifeforce
-// rows -> same derivation, same badge, same display shape.
+// rows -> same derivation, same `sell` shape, same display shape.
 const SULPHUR_ROW = { name: "Dead Man's Sulphur", faustusName: "Dead Man's Sulphur" }
 
 // What a row without usable Faustus data prints instead of a number. NOT a
@@ -1609,13 +1605,29 @@ const NO_SELL_DATA = '—'
 // The attestation policy (thin side -> show the reliable side, claim NO
 // comparison) lives in sell-side.mjs. Returns the protocol `sell` object or
 // null (row then renders exactly as before).
+//
+// `railBetterByRow` remembers the last CLAIMED verdict ('chaos' | 'divine')
+// per row, keyed by league + faustus name, so compareSellSides' hysteresis
+// (CHAOS_HOLD_PCT vs CHAOS_TAKEOVER_PCT) has something to hold against. This
+// is in-memory only and deliberately not persisted: after a restart the first
+// comparison for a row always uses the takeover threshold, which is fine —
+// hysteresis only needs to survive between consecutive hourly Faustus
+// refreshes, not a process restart. Only updated when a comparison is
+// actually claimed (`better` set); an `only` result or a null result (thin
+// data, disabled Faustus, ...) leaves the remembered side untouched, so one
+// thin hour can't reset the hold.
+const railBetterByRow = new Map()
+
 function railSellFor (faustusName, league, ratio) {
   if (FAUSTUS_DISABLED || !faustusName) return null
   if (typeof faustusStore?.getSell !== 'function') return null
   if (typeof faustusStore.league === 'function' && faustusStore.league() !== league) return null
   if (typeof faustusStore.isFresh === 'function' && !faustusStore.isFresh(FAUSTUS_TTL_MS)) return null
-  const cmp = compareSellSides(faustusStore.getSell(faustusName), ratio)
+  const rowKey = `${league}::${faustusName}`
+  const prevBetter = railBetterByRow.get(rowKey) ?? null
+  const cmp = compareSellSides(faustusStore.getSell(faustusName), ratio, prevBetter)
   if (!cmp || (!cmp.better && !cmp.only)) return null
+  if (cmp.better) railBetterByRow.set(rowKey, cmp.better)
   const sig4 = v => (typeof v === 'number' && isFinite(v)) ? Number(v.toPrecision(4)) : null
   const sell = {
     better: cmp.better, // 'chaos' | 'divine' | null (null -> no comparison claimed)
@@ -1629,29 +1641,47 @@ function railSellFor (faustusName, league, ratio) {
   return sell
 }
 
-// Auto c/d unit for a per-piece chaos value. priceC = chaos per 1 piece,
-// ratio = current C:D. perChaos = pieces per 1 chaos, perDiv = pieces per 1
-// divine. abundant-per-chaos -> show per c; scarce-per-chaos -> show per div.
+// Group thousands with commas — bridged divine-side numbers are routinely
+// five digits (31208 pieces per divine) and unreadable without it.
+//
+// Rounding to a whole piece used to be safe for a second reason that is now
+// gone: the old scarcity threshold guaranteed at least 5 pieces per chaos
+// before a row was ever quoted in chaos. The unit follows the recommendation
+// now, so a row whose recommended side yields well under one piece per unit
+// reaches this — where Math.round prints "0", or "1" for anything from 0.5 to
+// 1.5, i.e. it destroys the very number the row exists to show. Only that
+// range needs decimals; from 10 up a whole piece is what a seller counts and
+// the extra digits would just be noise.
+function grouped (n) {
+  if (typeof n !== 'number' || !isFinite(n) || n <= 0) return '0'
+  const v = n >= 10 ? Math.round(n) : Number(n.toPrecision(3))
+  return v.toLocaleString('en-US')
+}
+
+// Unit for a per-piece chaos value FOLLOWS THE RECOMMENDATION (`side`, the
+// sellRow's `sell.better || sell.only`), not a scarcity threshold: one
+// statement per row — which market to sell on, and the rate on that market.
+// priceC = chaos per 1 piece, ratio = current C:D.
+//   side 'chaos'  -> pieces per 1 chaos  (1/priceC),   unit 'perC',  "N / c"
+//   side 'divine' -> pieces per 1 divine (ratio/priceC), unit 'perDiv', "N / div"
 // Returns the unit alongside the string: the rail's sparkline has to be drawn
 // in the SAME unit, and the history stores the canonical chaos value, not this
-// number (see reference-history.mjs — the threshold flip is not a market move).
-function perPieceDisplay (priceC, ratio) {
-  const perChaos = 1 / priceC
-  const perDiv = ratio / priceC
-  return perChaos >= LIFEFORCE_PER_CHAOS_MIN
-    ? { display: `${Math.round(perChaos)} / c`, unit: 'perC' }
-    : { display: `${Math.round(perDiv)} / div`, unit: 'perDiv' }
+// number (see reference-history.mjs).
+function perPieceDisplay (priceC, ratio, side) {
+  return side === 'divine'
+    ? { display: `${grouped(ratio / priceC)} / div`, unit: 'perDiv' }
+    : { display: `${grouped(1 / priceC)} / c`, unit: 'perC' }
 }
 
 // The chaos a seller actually collects per piece, taken from the very `sell`
-// object the badge is rendered from — the better side when a comparison is
+// object the row's unit is chosen from — the better side when a comparison is
 // claimed, the single attested side when only one is. null when the row has
 // nothing trustworthy (railSellFor already returns null then).
 //
-// THE POINT OF THIS FUNCTION: number, badge AND sparkline of these rows all
-// read the same value here. They used to disagree (number = poe.ninja's market
-// middle, badge = Faustus sell side), which is exactly the mix-up the "Selling"
-// heading must not reintroduce.
+// THE POINT OF THIS FUNCTION: number AND sparkline of these rows both read
+// the same value here. They used to disagree (number = poe.ninja's market
+// middle, the sell-side hint = Faustus sell side), which is exactly the
+// mix-up the "Selling" heading must not reintroduce.
 function sellRevenuePerItem (sell) {
   if (!sell) return null
   const pick = side => {
@@ -1684,7 +1714,10 @@ function sellRow (row, league, ratio) {
   // row prints "—", because a row without a number has no source to claim (see
   // the src note in refreshReference).
   if (chaos == null) return { ...base, display: NO_SELL_DATA, chaos: null, unit: null, sell: null }
-  const d = perPieceDisplay(chaos, ratio)
+  // sell is non-null here (chaos came from sellRevenuePerItem(sell), which
+  // requires sell.better or sell.only to produce a value) — the recommended
+  // side is exactly what perPieceDisplay quotes the row's unit against.
+  const d = perPieceDisplay(chaos, ratio, sell.better || sell.only)
   return { ...base, display: d.display, chaos, unit: d.unit, sell, src: 'faustus' }
 }
 
@@ -1730,14 +1763,14 @@ async function refreshReference (league) {
     const currency = []
     const mir = byId('mirror')
     if (mir && typeof mir.primaryValue === 'number' && mir.primaryValue > 0) {
-      // src 'ninja': the NUMBER is poe.ninja's exchange price. The badge next to
-      // it is still Faustus-derived and carries its own stamp in its tooltip —
-      // that is the badge's claim, not the row's number.
+      // src 'ninja': the NUMBER is poe.ninja's exchange price. The row's `sell`
+      // field is still Faustus-derived and carries its own stamp
+      // (`sell.updatedAt`) — that is separate provenance, not the row's number.
       currency.push({ name: 'Mirror of Kalandra', display: `${Math.round(mir.primaryValue / ratio)} div`, key: 'c:mirror', chaos: mir.primaryValue, unit: 'div', invert: false, src: 'ninja', sell: railSellFor('Mirror of Kalandra', league, ratio) })
     }
     currency.push(sellRow(SULPHUR_ROW, league, ratio))
 
-    // Lifeforce (harvest lifeforce): number, badge and sparkline all from the
+    // Lifeforce (harvest lifeforce): number and sparkline both from the
     // Faustus sell side — see sellRow. Auto c/d unit as before.
     const lifeforce = LIFEFORCE_ROWS.map(j => sellRow(j, league, ratio))
 

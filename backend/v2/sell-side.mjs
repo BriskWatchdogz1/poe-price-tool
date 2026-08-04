@@ -55,12 +55,21 @@
 //     from 30000c none beyond 20 %. 5000 sits in the empty band above the
 //     bogus outlier, ~2x its top.
 //   The thin-but-honest rows land below the floors too — they are suppressed
-//   as well, which only costs a "~even" badge nobody needed. Better silent
+//   as well, which only costs an "~even" claim nobody needed. Better silent
 //   than confidently wrong.
 // ---------------------------------------------------------------------------
 
 export const SELL_MIN_UNITS = 10 // items traded on that side (volX floor)
 export const SELL_MIN_QUOTE_TURNOVER_C = 5000 // quote turnover in chaos-equivalents
+
+// Divine bias with hysteresis (both-sides-attested path only): the owner
+// prefers to hold divine, and a symmetric "whoever pays more wins" rule makes
+// the DISPLAYED UNIT (perPieceDisplay in server.mjs follows `better`) flip
+// back and forth whenever the two markets sit within noise of each other.
+// Chaos has to clear a bar to take the recommendation away from divine, and a
+// lower bar to keep it once it already holds it — see compareSellSides below.
+export const CHAOS_TAKEOVER_PCT = 5 // chaos must beat divine by this much to take over
+export const CHAOS_HOLD_PCT = 2 // once chaos is recommended, it holds until its edge drops below this
 
 // Is one side ({ perItem, volX, volQuote }) attested enough to take part in a
 // comparison? `chaosPerQuote` converts the quote turnover to chaos (1 for the
@@ -74,11 +83,11 @@ export function isAttested (side, chaosPerQuote) {
 }
 
 /**
- * compareSellSides(sell, chaosPerDivine) -> {
+ * compareSellSides(sell, chaosPerDivine, prevBetter = null) -> {
  *   viaChaos:  chaos revenue per item via the chaos market | null,
  *   viaDivine: chaos revenue per item via the divine market (bridged) | null,
  *   better:    'chaos' | 'divine' | null,  // null = no comparison claimed
- *   edgePct:   >= 0, only when better is set (how much more the better side pays),
+ *   edgePct:   the honest edge, or null — see below,
  *   only:      'chaos' | 'divine' | null   // the single attested side, when
  *                                          // exactly one is — show it, claim nothing
  * } | null when nothing usable is left.
@@ -86,8 +95,19 @@ export function isAttested (side, chaosPerQuote) {
  * `sell` is faustus-store's getSell() shape ({ chaos, divine }, either null).
  * Without a usable chaosPerDivine the divine side cannot be bridged NOR
  * attested — it is treated as absent (never compared at a bogus ratio).
+ *
+ * `prevBetter` is the caller's remembered verdict for THIS row from the
+ * previous comparison ('chaos' | 'divine' | null) — see CHAOS_HOLD_PCT above.
+ * It only affects the both-sides-attested path; the `only` path is unaffected
+ * by, and never updates, the remembered side (see railSellFor in server.mjs).
+ *
+ * `edgePct` is deliberately not just "how far apart the two sides are": when
+ * `better === 'divine'` because chaos failed to take over (not because divine
+ * actually pays more), printing a percentage would claim an advantage divine
+ * does not have. That case reports `edgePct: null` — callers get the
+ * recommended side and nothing else.
  */
-export function compareSellSides (sell, chaosPerDivine) {
+export function compareSellSides (sell, chaosPerDivine, prevBetter = null) {
   if (!sell || typeof sell !== 'object') return null
   const cd = (typeof chaosPerDivine === 'number' && isFinite(chaosPerDivine) && chaosPerDivine > 0)
     ? chaosPerDivine : null
@@ -106,13 +126,21 @@ export function compareSellSides (sell, chaosPerDivine) {
 
   const out = { viaChaos, viaDivine, better: null, edgePct: null, only: null }
   if (cOk && dOk) {
-    // Both sides carry real volume -> the comparison may be claimed.
-    if (viaChaos >= viaDivine) {
+    // Both sides carry real volume -> the comparison may be claimed. Biased
+    // toward divine, with hysteresis: chaos needs a bigger edge to take the
+    // recommendation away from divine (CHAOS_TAKEOVER_PCT) than to keep it
+    // once it already has it (CHAOS_HOLD_PCT) — see the constants above.
+    const chaosEdge = (viaChaos / viaDivine - 1) * 100
+    const threshold = prevBetter === 'chaos' ? CHAOS_HOLD_PCT : CHAOS_TAKEOVER_PCT
+    if (chaosEdge >= threshold) {
       out.better = 'chaos'
-      out.edgePct = (viaChaos / viaDivine - 1) * 100
+      out.edgePct = chaosEdge
     } else {
       out.better = 'divine'
-      out.edgePct = (viaDivine / viaChaos - 1) * 100
+      // Divine only gets a printed edge when it genuinely pays more. Inside
+      // the deadband (chaos pays the same or more, just not enough to take
+      // over) there is no honest number to show — see the note above.
+      out.edgePct = viaDivine > viaChaos ? (viaDivine / viaChaos - 1) * 100 : null
     }
   } else if (cOk || dOk) {
     // Exactly one attested side: show it, drop the comparison (a market that

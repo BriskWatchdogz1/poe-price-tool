@@ -1,5 +1,5 @@
 // Rail wiring of the sell side: for the lifeforce rows and Dead Man's Sulphur the
-// DISPLAYED number, the badge and the sparkline all come from the same Faustus
+// DISPLAYED number and the sparkline both come from the same Faustus
 // derivation (the "Selling" heading has to be true). Mirror keeps poe.ninja's
 // number, Exalted is gone entirely, and staleness costs the number instead of
 // producing a market middle. poe.ninja and the Faustus CDN are both
@@ -67,7 +67,8 @@ const SELL = {
     chaos: { perItem: 0.02943, ...fat },
     divine: { perItem: 0.02711 / RATIO, ...fatDiv }
   },
-  // Sulphur: both attested, chaos ~7.1% ahead. Under 5 pieces per chaos -> "/ div".
+  // Sulphur: both attested, chaos ~7.1% ahead (>= the takeover bar) -> unit
+  // follows chaos ("/ c"), even though that is a sub-1 quantity per piece.
   "Dead Man's Sulphur": {
     chaos: { perItem: 1.5, ...fat },
     divine: { perItem: 1.4 / RATIO, ...fatDiv }
@@ -132,20 +133,45 @@ test('the displayed number IS the sell side, not poe.ninja', async () => {
   assert.equal(rows['Mirror of Kalandra'].display, '500 div')
 })
 
-test("Dead Man's Sulphur sits in CURRENCY with number + badge, Exalted is gone", async () => {
+test("Dead Man's Sulphur sits in CURRENCY with a sell object backing its number, Exalted is gone", async () => {
   const msg = await mod.refreshReference('RailFresh')
   const sulphur = msg.currency.find(r => r.name === "Dead Man's Sulphur")
   assert.ok(sulphur, 'Sulphur is a currency row')
-  // 1.5 c per piece -> under 5 pieces per chaos -> printed per divine.
-  assert.equal(sulphur.display, `${Math.round(RATIO / 1.5)} / div`)
-  assert.equal(sulphur.invert, true)
+  // The unit follows the RECOMMENDATION, not a scarcity threshold: chaos pays
+  // ~7.1% more here (>= the 5% takeover bar) -> chaos wins -> printed per chaos.
+  // That yields a sub-1 quantity (1/1.5 = 0.667 pieces per chaos), and the
+  // display keeps three significant digits there: rounding to a whole piece
+  // would print "1" for a rate that is not 1 — destroying the one number the
+  // row exists to show.
   assert.equal(sulphur.sell.better, 'chaos')
+  assert.equal(sulphur.display, '0.667 / c')
+  assert.equal(sulphur.invert, true)
   assert.equal(sulphur.sell.edgePct, 7.1)
   assert.equal(sulphur.sell.viaChaos, 1.5)
   assert.equal(sulphur.sell.viaDivine, 1.4)
 
   const names = [...msg.currency, ...msg.lifeforce, ...msg.beasts].map(r => r.name)
   assert.equal(names.includes('Exalted Orb'), false)
+})
+
+test('deadband end-to-end: chaos pays a bit more but not enough to take over -> divine recommended, no percentage, unit follows divine', async () => {
+  // Fresh league (no remembered verdict): chaos edge = 2%, under the 5%
+  // takeover bar -> compareSellSides recommends divine anyway, edgePct null.
+  const league = 'RailDeadband'
+  await mod.faustusStore.setPrices(league, {}, Date.now(), null, {
+    'Vivid Crystallised Lifeforce': {
+      chaos: { perItem: 0.0102, ...fat },
+      divine: { perItem: 0.01 / RATIO, ...fatDiv }
+    }
+  })
+  const msg = await mod.refreshReference(league)
+  const vivid = msg.lifeforce.find(r => r.name === 'Vivid Lifeforce')
+  assert.equal(vivid.sell.better, 'divine')
+  assert.equal(vivid.sell.edgePct, null)
+  // Unit AND number follow the recommendation (divine, bridged rate 0.01),
+  // not the chaos-side rate (0.0102) — and five-digit results are comma-grouped.
+  assert.equal(vivid.display, `${Math.round(RATIO / 0.01).toLocaleString('en-US')} / div`)
+  assert.equal(vivid.display, '20,000 / div')
 })
 
 test('currency rows join in uniformly; beasts never carry sell', async () => {
@@ -186,17 +212,26 @@ test('number and sparkline come from the SAME source (old poe.ninja points ignor
   const msg = await mod.refreshReference(league)
   const rows = Object.fromEntries([...msg.currency, ...msg.lifeforce].map(r => [r.name, r]))
 
+  // Mirrors `grouped()` in server.mjs: whole pieces from 10 up, three
+  // significant digits below — so this stays an assertion about the VALUE and
+  // its unit, not about how many digits the display happens to print.
+  const asDisplayed = n => n >= 10 ? Math.round(n) : Number(n.toPrecision(3))
+  const printed = row => Number(row.display.split(' ')[0].replace(/,/g, ''))
+
   const vivid = rows['Vivid Lifeforce']
   assert.equal(vivid.sparkline.length, 2)
   // Right edge of the line == the printed number (same value, same unit).
-  assert.equal(Math.round(vivid.sparkline[1]), Number(vivid.display.split(' ')[0]))
+  assert.equal(asDisplayed(vivid.sparkline[1]), printed(vivid))
   assert.equal(vivid.sparkline[1], 1 / 0.03841)
   assert.equal(vivid.sparkline[0], 1 / (0.03841 / 2)) // half the revenue -> twice the pieces
 
   const sulphur = rows["Dead Man's Sulphur"]
   assert.equal(sulphur.sparkline.length, 2)
-  assert.equal(Math.round(sulphur.sparkline[1]), Number(sulphur.display.split(' ')[0]))
-  assert.equal(sulphur.sparkline[1], RATIO / 1.5)
+  assert.equal(asDisplayed(sulphur.sparkline[1]), printed(sulphur))
+  // Sulphur's recommendation is 'chaos' (see the earlier test), so the series
+  // is drawn in perC, not perDiv: pieces per 1 chaos, same unit as `display`.
+  assert.equal(sulphur.sparkline[1], 1 / 1.5)
+  assert.equal(sulphur.sparkline[0], 1 / (1.5 / 2)) // half the revenue -> twice the pieces
 
   // Rows the sell side can't back have no series at all — not even from the
   // old poe.ninja keys.
@@ -218,7 +253,7 @@ test('stale store -> the row shows no number instead of a market middle', async 
   const sulphur = msg.currency.find(r => r.name === "Dead Man's Sulphur")
   assert.equal(sulphur.display, '—')
   assert.equal('sell' in sulphur, false)
-  // Mirror keeps its poe.ninja number — only its badge is gone.
+  // Mirror keeps its poe.ninja number — only its `sell` object is gone.
   const mir = msg.currency.find(r => r.name === 'Mirror of Kalandra')
   assert.equal(mir.display, '500 div')
 })
