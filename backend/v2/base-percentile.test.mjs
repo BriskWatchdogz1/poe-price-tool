@@ -5,7 +5,10 @@ import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 
 process.env.PORT = '0'
-process.env.POE_HARVEST_DISABLED = '1'
+process.env.POE_FAUSTUS_DISABLED = '1'
+process.env.POE_CORPSE_DISABLED = '1'
+process.env.POE_DATA_REFRESH_DISABLED = '1'
+process.env.POE_REFERENCE_DISABLED = '1'
 
 let mod
 

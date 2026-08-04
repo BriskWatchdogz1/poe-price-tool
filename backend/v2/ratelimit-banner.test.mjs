@@ -9,7 +9,10 @@ import { WebSocket } from 'ws'
 
 // Env MUST be set before the import (top-level await reads it at load time).
 process.env.PORT = '0'
-process.env.POE_HARVEST_DISABLED = '1'
+process.env.POE_FAUSTUS_DISABLED = '1'
+process.env.POE_CORPSE_DISABLED = '1'
+process.env.POE_DATA_REFRESH_DISABLED = '1'
+process.env.POE_REFERENCE_DISABLED = '1'
 process.env.POE_USERS = 'player1,player2'
 process.env.POE_RATE_LIMIT_BANNER_MIN_SEC = '60' // threshold pinned explicitly
 

@@ -62,6 +62,7 @@ background consumer always goes in at `background` tier.
 
 ```bash
 POE_CORPSE_DISABLED=1 POE_FAUSTUS_DISABLED=1 POE_DATA_REFRESH_DISABLED=1 \
+POE_REFERENCE_DISABLED=1 \
 POE_NETWORTH_AUTOSYNC=0 \
 POE_NETWORTH_STORE=./config/networth-store.json \
 node backend/v2/server.mjs

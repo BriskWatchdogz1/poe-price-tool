@@ -2399,8 +2399,13 @@ wss.on('connection', (ws, req) => {
 // ---------------------------------------------------------------------------
 // Start
 // ---------------------------------------------------------------------------
-await refreshCdRatio(LEAGUE)
-await refreshReference(LEAGUE) // warm up the reference rail once (exchange cache is already warm)
+const REFERENCE_DISABLED = process.env.POE_REFERENCE_DISABLED === '1'
+if (REFERENCE_DISABLED) {
+  console.log('[reference] disabled via POE_REFERENCE_DISABLED=1')
+} else {
+  await refreshCdRatio(LEAGUE)
+  await refreshReference(LEAGUE) // warm up the reference rail once (exchange cache is already warm)
+}
 
 // ---------------------------------------------------------------------------
 // Net-Worth background refresher: syncs ONE stash tab per interval (default

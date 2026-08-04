@@ -72,7 +72,7 @@ test('429: one context line with rule, wait and per-consumer counts', () => {
   const log = collector()
   let t = 1_000_000
   const audit = createTradeAudit({ log, now: () => t })
-  // Four crawler requests and one price check inside the 60s window.
+  // Four corpse-pricer requests and one price check inside the 60s window.
   for (let i = 0; i < 4; i++) {
     audit.record({ url: SEARCH, status: 200, headers: headers({ state: `${i}:10:0,${i}:60:0` }), consumer: CONSUMER.CORPSE })
     t += 1000

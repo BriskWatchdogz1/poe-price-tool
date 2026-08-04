@@ -44,6 +44,12 @@ docs/superpowers/
 docs/design-new-ui-and-multiuser.md
 docs/setup-and-operations.md
 docs/ui-overhaul.md
+# The files below still exist on disk. These rules are the only reason they are
+# absent from the repository, so "this file is obsolete" argues for keeping the
+# rule, not for deleting it — dropping these entries once tracked all six on the
+# next `git add -A`. The systemd unit carries a private Documentation= URL naming
+# an internal host and must never be published.
+#
 # Dead v1 backend (replaced by backend/v2/) — incl. its tests, which npm test
 # does not run either (the script targets backend/v2 only)
 backend/config.js

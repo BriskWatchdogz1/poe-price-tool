@@ -63,10 +63,10 @@ test('settings dialog: status line -> open -> save -> status gone, file written'
       POE_NETWORTH_STORE: join(tmp, 'networth-store.json'),
       POE_NETWORTH_HISTORY: join(tmp, 'networth-history.ndjson'),
       POE_NETWORTH_AUTOSYNC: '0',
-      POE_CRAWLER_DISABLED: '1',
       POE_FAUSTUS_DISABLED: '1',
       POE_CORPSE_DISABLED: '1',
-      POE_CLUSTER_STORE: join(tmp, 'cluster-store.json')
+      POE_DATA_REFRESH_DISABLED: '1',
+      POE_REFERENCE_DISABLED: '1'
     },
     stdio: ['ignore', 'pipe', 'pipe']
   })

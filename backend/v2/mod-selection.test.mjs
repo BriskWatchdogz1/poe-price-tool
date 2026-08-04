@@ -16,9 +16,10 @@ import assert from 'node:assert/strict'
 import { WebSocket } from 'ws'
 
 process.env.PORT = '0'
-process.env.POE_HARVEST_DISABLED = '1'
+process.env.POE_FAUSTUS_DISABLED = '1'
 process.env.POE_CORPSE_DISABLED = '1'
 process.env.POE_DATA_REFRESH_DISABLED = '1'
+process.env.POE_REFERENCE_DISABLED = '1'
 process.env.POE_NETWORTH_AUTOSYNC = '0'
 // Dedicated rooms so these tests don't share state with any other suite.
 process.env.POE_USERS = 'seluser,replayuser'

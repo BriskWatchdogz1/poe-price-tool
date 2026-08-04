@@ -3,12 +3,16 @@
 // side-effect free, but it lives in server.mjs -> the import boots the REAL
 // server (top-level await, pattern: server.test.mjs) -> set env BEFORE the
 // import and close the server in after(), otherwise the process hangs (unbounded
-// cluster harvester interval, see POE_HARVEST_DISABLED).
+// background refresh intervals; see server.test.mjs for which flags disable
+// which one).
 import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 
 process.env.PORT = '0'
-process.env.POE_HARVEST_DISABLED = '1'
+process.env.POE_FAUSTUS_DISABLED = '1'
+process.env.POE_CORPSE_DISABLED = '1'
+process.env.POE_DATA_REFRESH_DISABLED = '1'
+process.env.POE_REFERENCE_DISABLED = '1'
 
 let mod
 before(async () => { mod = await import('./server.mjs') })

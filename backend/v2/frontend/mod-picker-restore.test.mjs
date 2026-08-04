@@ -21,9 +21,10 @@ import { createServer } from 'node:net'
 import WebSocket from 'ws'
 
 process.env.PORT = '0'
-process.env.POE_HARVEST_DISABLED = '1'
+process.env.POE_FAUSTUS_DISABLED = '1'
 process.env.POE_CORPSE_DISABLED = '1'
 process.env.POE_DATA_REFRESH_DISABLED = '1'
+process.env.POE_REFERENCE_DISABLED = '1'
 process.env.POE_NETWORTH_AUTOSYNC = '0'
 process.env.POE_USERS = 'picker'
 

@@ -18,6 +18,10 @@ const until = Date.now() + 3600_000
 await writeFile(statePath, JSON.stringify({ until, retryAfterSec: 3600 }))
 
 process.env.PORT = '0'
+process.env.POE_FAUSTUS_DISABLED = '1'
+process.env.POE_CORPSE_DISABLED = '1'
+process.env.POE_DATA_REFRESH_DISABLED = '1'
+process.env.POE_REFERENCE_DISABLED = '1'
 process.env.POE_RATE_LIMIT_STATE = statePath
 
 let mod

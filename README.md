@@ -54,13 +54,14 @@ sent back to the browser, never logged and never included in any API response �
 not even masked.
 
 **Where it goes:** to `pathofexile.com` and nowhere else. The cookie is attached
-in exactly one place in the code, on the stash request to GGG. The backend also
-talks to poe.ninja, GGG's `poecdn` (the Currency Exchange feed) and RePoE (item
-data) — none of those ever see it. There is no telemetry, no analytics, no
-phone-home: the whole thing runs on your own machine or your own LAN, and the
-only reason it reaches the internet at all is to ask those five hosts for
-prices and game data. You can paste it in the browser UI or drop it in the file
-yourself.
+in exactly one module in the code (`backend/v2/networth/stash-client.mjs`), on
+the stash requests to GGG. The backend also talks to poe.ninja, GGG's `poecdn`
+(the Currency Exchange feed), RePoE (item data) and `raw.githubusercontent.com`
+(the APT data auto-update, and RePoE's fallback host) — none of those ever see
+it. There is no telemetry, no analytics, no phone-home: the whole thing runs on
+your own machine or your own LAN, and the only reason it reaches the internet
+at all is to ask those five hosts for prices and game data. You can paste it in
+the browser UI or drop it in the file yourself.
 
 **It expires more often than you would expect.** Any fresh login invalidates the
 old cookie — not just logging in on pathofexile.com, but also authorising a
@@ -90,7 +91,7 @@ under your address.
 Two parts:
 
 - a **backend** (Docker) that does the pricing and serves the web UI, and
-- a small **hotkey daemon** (~24 KB) that runs on each gaming desktop: it copies the hovered item and sends it to the backend.
+- a small **hotkey daemon** (~20 KB total, ~14.5 KB for the Python script) that runs on each gaming desktop: it copies the hovered item and sends it to the backend.
 
 The backend can run on the **same PC you game on**, or **centrally on a home server** for several players. That's the only real choice — pick an install path below.
 
@@ -187,13 +188,15 @@ sudo pacman -S ydotool wl-clipboard xsel xdotool xorg-xprop python-evdev curl
 sudo usermod -aG input $USER      # then log out and back in once
 ```
 
-(`ydotool`/`xdotool`/`xorg-xprop`/`python-evdev` are only needed for the optional [chat macros](#chat-macros-optional) below. The price check itself needs `xsel` + `curl` — the daemon reads the clipboard via `xsel -b -o` first, since PoE runs under XWayland, and only falls back to `wl-clipboard`'s `wl-paste` if `xsel`/`DISPLAY` are unavailable. Installing all of it up front keeps this simple.)
+(`ydotool`/`xdotool`/`xorg-xprop` are only needed for the optional [chat macros](#chat-macros-optional) below. `python-evdev` is imported unconditionally by the daemon, so it is required even if you never configure macros — the daemon will not start without it. The price check itself only needs `xsel` + `curl` at runtime — the daemon reads the clipboard via `xsel -b -o` first, since PoE runs under XWayland, and only falls back to `wl-clipboard`'s `wl-paste` if `xsel`/`DISPLAY` are unavailable. Installing all of it up front keeps this simple.)
 
 **2. Install** — set up the daemon as a systemd user service:
 
 ```bash
 ./daemon/install.sh
 ```
+
+As a side effect, the script also enables and starts the `ydotool` user service (`systemctl --user enable --now ydotool`) — it is what the optional chat macros use to type; harmless to leave running if you never configure macros.
 
 **3. Configure — you must edit this.** `install.sh` already placed a config at `~/.config/poe-price-daemon/config.toml` (a copy of the example, with placeholder defaults). Note this is in your home directory — **not in the repo**: the repo only carries the `daemon/config.example.toml` template, while your live config lives outside it so `git pull` never overwrites your settings. **Open it and adjust it** — with the defaults it points at `127.0.0.1`, so for a server (Option B) it won't reach your backend until you change `backend_url`:
 

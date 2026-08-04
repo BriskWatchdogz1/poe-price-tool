@@ -1,5 +1,5 @@
 // backend/v2/networth/integration.test.mjs
-// Starts the REAL server.mjs on a random port (pattern: cluster/integration.test.mjs).
+// Starts the REAL server.mjs on a random port.
 // networth-latest arrives on connect (null, no manual scan trigger any more —
 // snapshots are filled exclusively by the 24/7 background refresher).
 import { test, before, after } from 'node:test'
@@ -12,8 +12,10 @@ import WebSocket from 'ws'
 const NW_STORE = join(tmpdir(), `ppt-nw-int-${process.pid}.json`)
 
 process.env.PORT = '0'
-process.env.POE_HARVEST_DISABLED = '1'
-process.env.POE_CLUSTER_STORE = join(tmpdir(), `ppt-cl-int-${process.pid}.json`)
+process.env.POE_FAUSTUS_DISABLED = '1'
+process.env.POE_CORPSE_DISABLED = '1'
+process.env.POE_DATA_REFRESH_DISABLED = '1'
+process.env.POE_REFERENCE_DISABLED = '1'
 process.env.POE_NETWORTH_STORE = NW_STORE
 process.env.POE_NETWORTH_CONFIG = '/nonexistent/networth-users.json' // -> no creds
 process.env.POE_USERS = 'player1,player2'
@@ -28,7 +30,6 @@ before(async () => {
 after(async () => {
   await new Promise(r => mod.server.close(r))
   await rm(NW_STORE, { force: true })
-  await rm(process.env.POE_CLUSTER_STORE, { force: true })
 })
 
 // Buffer messages FROM socket creation on. Reason: the server sends the opening

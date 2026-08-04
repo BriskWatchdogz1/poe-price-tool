@@ -8,10 +8,25 @@ import path from 'node:path'
 import { tmpdir } from 'node:os'
 
 process.env.PORT = '0'
-process.env.POE_HARVEST_DISABLED = '1'
+// Faustus stays ON here (unlike most other server.mjs-importing tests): the
+// store is populated directly via setPrices below and read back through
+// faustusChaosFor/faustusRangeFor, both of which short-circuit to null when
+// POE_FAUSTUS_DISABLED is set.
+process.env.POE_CORPSE_DISABLED = '1'
+process.env.POE_DATA_REFRESH_DISABLED = '1'
 process.env.POE_USERS = 'exuser'
 // Store file in tmp: the test sets prices via setPrices (writes immediately).
 process.env.POE_FAUSTUS_STORE = path.join(tmpdir(), `faustus-exchange-test-${process.pid}.json`)
+
+// No network: the Faustus CDN boot tick finds nothing (empty markets) and the
+// tests seed the store by hand; everything else (cd-ratio, reference rail) is
+// stubbed too so importing server.mjs never reaches out for real.
+const realFetch = globalThis.fetch
+globalThis.fetch = async (url) => {
+  const u = String(url)
+  if (u.includes('web.poecdn.com')) return { ok: true, status: 200, json: async () => ({ markets: [] }) }
+  return { ok: true, status: 200, json: async () => ({ lines: [] }) }
+}
 
 let mod
 const CD = 106 // chaos per divine (Allflame example from the bug report)
@@ -33,7 +48,10 @@ const tradeResult = (over = {}) => ({
 })
 
 before(async () => { mod = await import('./server.mjs') })
-after(async () => { await new Promise(r => mod.server.close(r)) })
+after(async () => {
+  globalThis.fetch = realFetch
+  await new Promise(r => mod.server.close(r))
+})
 
 test('Faustus knows it: the Exchange rate becomes the headline price, the trade ask moves to tradeAsk', () => {
   const r = mod.withExchangeMain(tradeResult(), 56, CD)

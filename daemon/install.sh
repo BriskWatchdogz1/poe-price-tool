@@ -27,7 +27,7 @@ if [ "${#missing[@]}" -gt 0 ]; then
 fi
 
 # 2) Enable the ydotool daemon (used by the chat macros; price check itself
-# needs no ydotool, just wl-paste + curl).
+# needs no ydotool, just xsel (wl-paste fallback) + curl).
 systemctl --user enable --now ydotool 2>/dev/null || warn "Could not enable ydotool service — is ydotoold running?"
 
 # 3) Create config (only if none exists yet -> never overwrites).

@@ -70,7 +70,11 @@ test('all three pages load without errors and show the global shell', { timeout:
       POE_NETWORTH_CONFIG: credPath,
       POE_NETWORTH_STORE: join(tmp, 'networth-store.json'),
       POE_NETWORTH_HISTORY: join(tmp, 'networth-history.ndjson'),
-      POE_NETWORTH_AUTOSYNC: '0'
+      POE_NETWORTH_AUTOSYNC: '0',
+      POE_FAUSTUS_DISABLED: '1',
+      POE_CORPSE_DISABLED: '1',
+      POE_DATA_REFRESH_DISABLED: '1',
+      POE_REFERENCE_DISABLED: '1'
     },
     stdio: ['ignore', 'pipe', 'pipe']
   })

@@ -1,7 +1,10 @@
-// Boots the REAL backend/v2/server.mjs on a random port (pattern:
-// cluster/integration.test.mjs), originally just to check GET /users (brand name
-// via POE_APP_NAME). PORT=0 + POE_HARVEST_DISABLED=1: no live crawl, no network
-// polling in tests.
+// Boots the REAL backend/v2/server.mjs on a random port, originally just to
+// check GET /users (brand name via POE_APP_NAME). PORT=0 plus
+// POE_FAUSTUS_DISABLED=1, POE_CORPSE_DISABLED=1, POE_DATA_REFRESH_DISABLED=1 and
+// POE_REFERENCE_DISABLED=1 turn off the four background network schedules
+// server.mjs would otherwise start on import (the Faustus CDN refresher, the
+// corpse Trade-API pricer, the APT/RePoE data auto-update, and the C:D ratio +
+// reference rail warm-up) — no live crawl, no network polling in tests.
 import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { WebSocket } from 'ws'
@@ -9,17 +12,16 @@ import { WebSocket } from 'ws'
 // Env MUST be set before server.mjs is imported (its top-level await reads it at
 // module load time).
 process.env.PORT = '0'
-process.env.POE_HARVEST_DISABLED = '1'
+process.env.POE_FAUSTUS_DISABLED = '1'
+process.env.POE_CORPSE_DISABLED = '1'
+process.env.POE_DATA_REFRESH_DISABLED = '1'
+process.env.POE_REFERENCE_DISABLED = '1'
 process.env.POE_APP_NAME = 'Custom Console'
 // Dedicated users so the robustness tests don't fight the dedup tests' rooms.
 process.env.POE_USERS = 'player1,player2,capuser,requser,xuser'
 // Small caps -> the tests can exercise eviction/requeue without posting 50+.
 process.env.POE_MAX_ITEMS_PER_ROOM = '3'
 process.env.POE_MAX_REQUEUE_ON_RECONNECT = '2'
-// W2: a harvest league DISTINCT from POE_LEAGUE (default 'Standard'). No room
-// ever uses the harvest league, so its presence in leaguesToRefresh() proves the
-// configured-league injection works independent of connected clients.
-process.env.POE_HARVEST_LEAGUE = 'TestHarvestLeague'
 
 let mod
 let base
@@ -275,7 +277,9 @@ test('POST /item: a missing X-User still falls back to USERS[0] (headerless stay
 // CONNECTED clients. But the corpse pricer + faustus bridge read cdMsgFor(LEAGUE)
 // passively -> with the server running headless (no tab open), divine
 // normalisation froze at its boot value. Fix: unconditionally put the configured
-// league into the refresh set.
+// league (POE_LEAGUE, exported as mod.LEAGUE) into the refresh set. No test
+// client ever joins that league's room, so its presence in the set proves the
+// unconditional injection, independent of connected clients.
 test('leaguesToRefresh: the configured league is in there, even with no client connected', () => {
   const set = mod.leaguesToRefresh()
   assert.ok(set.has(mod.LEAGUE), 'POE_LEAGUE is always in the refresh set')

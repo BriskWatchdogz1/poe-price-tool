@@ -9,8 +9,9 @@ filters for PoE items ("Item Class: ..."), de-dupes, and POSTs to the backend.
 Polling (a direct read) rather than `wl-paste --watch` (an event) is
 deliberate: XWayland game selections don't reliably fire change events until
 materialized, but a direct read pulls them on demand. No key injection is
-involved — bind your key (Azeron/hardware or a KDE shortcut) to PoE's own
-Ctrl+Alt+C copy, and this daemon prices whatever lands in the clipboard.
+involved — bind your key (a hardware macro device, e.g. a keypad with extra
+buttons, or a KDE shortcut) to PoE's own Ctrl+Alt+C copy, and this daemon
+prices whatever lands in the clipboard.
 
 Optionally (config `[macros]` section), the daemon also binds evdev keys to
 chat commands: on press, it opens chat, types the command layout-aware via
@@ -19,8 +20,9 @@ daemon runs price-check only (no evdev needed at all).
 
 Why a daemon instead of "just" a shortcut? For the macros, it checks PoE
 focus (so the key doesn't interfere outside the game) and copes with USB
-hotplug (e.g. an Azeron that re-enumerates). For the price check, it polls the
-clipboard so PoE (XWayland) copies are caught reliably.
+hotplug (e.g. a device that re-enumerates, as some macro keypads do). For the
+price check, it polls the clipboard so PoE (XWayland) copies are caught
+reliably.
 
 Everything comes from config.toml — nothing is hardcoded.
 """
@@ -249,8 +251,8 @@ class PriceDaemon:
 
 def find_keyboards(keycodes):
     """Devices exposing a macro key (they may live on different physical
-    keyboards, e.g. an Azeron plus the F5-F9 row). Only relevant for macros —
-    price check no longer needs evdev at all."""
+    keyboards, e.g. a hardware macro keypad plus the F5-F9 row). Only relevant
+    for macros — price check no longer needs evdev at all."""
     kbs = []
     for path in evdev.list_devices():
         try:
@@ -271,8 +273,8 @@ def main():
     cfg, path = load_config()
     app = PriceDaemon(cfg)
     # price check: the clipboard is polled in the main loop (poll_clipboard).
-    # Macro keys only: they may sit on different physical devices (e.g. an
-    # Azeron plus the F5-F9 row), all must be watched. Empty if no [macros].
+    # Macro keys only: they may sit on different physical devices (e.g. a
+    # macro keypad plus the F5-F9 row), all must be watched. Empty if no [macros].
     relevant_keys = set(app.macros.keys())
     sel = selectors.DefaultSelector()
     registered = {}  # path -> InputDevice

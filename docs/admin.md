@@ -72,8 +72,8 @@ queue and one ban detector, `backend/v2/rate-limit-signal.mjs`. It used to be
 two independently-drifted regexes (server / corpse) — the corpse pricer's
 copy only recognised the harmless client-side wording, so a real GGG ban fell
 through its "local error" branch, set no cooldown, and it kept firing one job
-every 30s straight into the ban. That drift caused two real trade-API bans this
-league; the shared module exists so it can't happen again.
+every 30s straight into the ban. That drift caused two real trade-API bans
+during development; the shared module exists so it can't happen again.
 
 `classifyRateLimit(err)` returns `{ seconds, kind }`:
 
@@ -162,7 +162,7 @@ Verify:
 
 ```bash
 curl -s http://127.0.0.1:8788/health     # → ok
-curl -s http://127.0.0.1:8788/users      # → {"users":["player1","player2"]}
+curl -s http://127.0.0.1:8788/users      # → {"users":["player1","player2"],"appName":"Trade Console"}
 docker compose logs -f poe-price-tool
 ```
 
@@ -202,6 +202,7 @@ In `docker-compose.yml` under `environment:` as a commented-out template:
 | `POE_CORPSE_BUDGET_PER_HOUR` | `25` | max distinct corpse names queried on the Trade API per rolling hour (stalest/unpriced first); caps the first-snapshot burst |
 | `POE_CORPSE_INTERVAL_MS` | `120000` | delay between corpse pricer ticks (one name priced per tick) |
 | `POE_REFERENCE_HISTORY` | `/config/reference-history.ndjson` | path of the reference rail's own price series (one point per reference refresh, i.e. ≥15min apart) — the sparklines next to the rail rows are drawn from it |
+| `POE_REFERENCE_DISABLED` | *(off)* | `1` skips the one-time C:D ratio + reference rail warm-up done at boot (both stay on their fallback value until the periodic background refresh reaches them) |
 | `POE_RATE_LIMIT_STATE` | `/config/rate-limit.json` | path of the persisted ban gate, so a restart resumes an active cooldown instead of probing GGG blindly |
 | `POE_MAX_ITEMS_PER_ROOM` | `50` | server-side cap on item cards held per room; the oldest is evicted (and an `item-removed` sent) when a new one arrives. A negative value is clamped to 1; `0` (like an unset or unparsable value) falls back to the default |
 | `POE_MAX_REQUEUE_ON_RECONNECT` | `10` | how many priceless cards a single WS reconnect may re-queue (newest first). Caps the queue flood after a poe.ninja/Trade outage; the remaining cards replay as `queued` and can be searched on demand |
@@ -326,7 +327,7 @@ then runs unprivileged and simply execs the command.
 If the log says `/config is owned by uid N and not writable`, fix it once by
 hand — the entrypoint deliberately does not:
 ```bash
-ssh your-server 'chown -R 1000:1000 /mnt/user/appdata/poe-price-tool/config && docker restart poe-price-tool'
+ssh your-server 'chown -R 1000:1000 /path/to/poe-price-tool/config && docker restart poe-price-tool'
 ```
 Never a blanket `chmod -R 777` on `/config`: that would make
 `networth-users.json` (POESESSID session cookies — full account control if
@@ -447,8 +448,9 @@ denied`. Created it as `root`? Make sure UID 1000 can read it, e.g. via
 chown 1000:1000 config/networth-users.json
 ```
 
-If ownership doesn't take effect (see the shfs caveat above), fall back to a
-more permissive `chmod` (e.g. `644`) instead. Verify by checking the
+If ownership doesn't take effect (see "How the container handles /config
+permissions" above — a NAS share the entrypoint deliberately won't take over),
+fall back to a more permissive `chmod` (e.g. `644`) instead. Verify by checking the
 background sync gets past the `EACCES` on its next tick (`docker compose
 logs -f poe-price-tool`).
 
@@ -475,13 +477,13 @@ cookie should never end up in the repo.)
 Getting the cookie: log in on pathofexile.com → browser DevTools → Cookies →
 copy `POESESSID`. If the cookie expires (the background sync logs a
 401/403 and pauses that user until the cookie is renewed), just refresh
+the value in the file — no restart needed (credentials are re-read every
+sync round).
 
 **Why it expires so often:** every new login invalidates the previous
 POESESSID — including logging in through your PoE account on a third-party
 site (Filterblade and similar). A paused user after such a login is expected
 behaviour, not a fault of the sync.
-the value in the file — no restart needed (credentials are re-read every
-sync round).
 
 **Preferred way to set/renew credentials: the UI.** The Net Worth page has a
 "Sync settings" dialog (button top right; the status line "POESESSID expired…"
@@ -532,12 +534,13 @@ stash-tab list itself is cached for `POE_NETWORTH_LIST_TTL_MS` (default
 15min). On a 429 a user backs off for `POE_NETWORTH_COOLDOWN_MS` (default
 10min) before the next try.
 
-**Why a drip-feed and no manual full-scan button:** a standard-size stash
-(~115 tabs) fetched back-to-back in one burst runs straight into GGG's
+**Why a drip-feed and no manual full-scan button:** a large stash (example:
+~115 tabs) fetched back-to-back in one burst runs straight into GGG's
 trade-API rate limit (429, aborts partway). The auto-refresher avoids this
 entirely by spreading requests over time (one tab/~30s) instead of bursting
-— there is no manual trigger; a full stash fills in over one refresher cycle
-(~115 tabs × 30s ≈ 1h), then stays fresh in the background indefinitely.
+— there is no manual trigger; a full stash of that size fills in over one
+refresher cycle (~115 tabs × 30s ≈ 1h), then stays fresh in the background
+indefinitely.
 
 The `/networth.html` page itself is **read-only** — it just displays
 whatever the background auto-sync has built up so far, no button, no
@@ -554,9 +557,11 @@ routing and the rules behind each category: [docs/pricing-logic.md](pricing-logi
 The History page draws the net-worth series over time — a trend chart plus the
 stock movements behind it ("what came in, what went out"). It has no data
 source of its own: it reads what the Net-Worth auto-refresher records as it
-walks the stash, over three read-only endpoints (`/networth-trend`,
-`/networth-events`, `/networth-detail`, identity via the same `ppt_user`
-cookie). Selectable ranges are 1h, 6h, 24h, 7d and 14d.
+walks the stash, over two read-only endpoints the page actually calls
+(`/networth-trend`, `/networth-events`, identity via the same `ppt_user`
+cookie). Selectable ranges are 1h, 6h, 24h, 7d and 14d. A third endpoint,
+`/networth-detail` (per-point item detail), exists on the server but is not
+called by the current frontend.
 
 **Where the data lives.** Two files in the `/config` volume:
 

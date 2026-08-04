@@ -398,8 +398,11 @@ exchanged: the real series moved elsewhere.
 
 That real series is **not** this message. It lives in
 `networth-history.ndjson`, is far denser (a point per minute, 15 days of
-retention) and is fetched over HTTP (`/networth-trend`, `/networth-events`,
-`/networth-detail`) by the History page. Same idea, two different resolutions.
+retention) and is fetched over HTTP (`/networth-trend`, `/networth-events`) by
+the History page. Same idea, two different resolutions. A third endpoint,
+`/networth-detail` (item detail behind one stretch of the trend line), also
+exists server-side but is not called by the current History page — no shipped
+frontend file references it.
 
 ### `league-state` — the active league
 ```json

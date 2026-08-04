@@ -81,7 +81,11 @@ test('a collapsed group stays collapsed: re-render and reload', { timeout: 120_0
       POE_USERS: 'player1,player2',
       POE_NETWORTH_STORE: join(tmp, 'networth-store.json'),
       POE_NETWORTH_HISTORY: join(tmp, 'networth-history.ndjson'),
-      POE_NETWORTH_AUTOSYNC: '0'
+      POE_NETWORTH_AUTOSYNC: '0',
+      POE_FAUSTUS_DISABLED: '1',
+      POE_CORPSE_DISABLED: '1',
+      POE_DATA_REFRESH_DISABLED: '1',
+      POE_REFERENCE_DISABLED: '1'
     },
     stdio: ['ignore', 'pipe', 'pipe']
   })
