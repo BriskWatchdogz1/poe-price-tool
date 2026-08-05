@@ -502,8 +502,10 @@ test('Divine Orb takes the ninja exchange rate, not Faustus', async () => {
 })
 
 // ---------------------------------------------------------------------------
-// Volume floor on the poe.ninja exchange lines (MIN_EXCHANGE_UNITS).
-// volumePrimaryValue/primaryValue = units traded (1/6 == 1 unit).
+// Volume floor on the poe.ninja exchange lines (MIN_EXCHANGE_UNITS = 10 OR
+// MIN_EXCHANGE_TURNOVER_C = 2000, see the calibration comment above the
+// constants in valuator.mjs). volumePrimaryValue/primaryValue = units traded
+// (1/6 == 1 unit); volumePrimaryValue alone = chaos turnover.
 // ---------------------------------------------------------------------------
 
 function exchangeOnlyValuator (byType) {
@@ -531,8 +533,40 @@ test('single-trade outlier (The Carrion Crow) is rejected -> null instead of 0',
   assert.equal(r, null, 'unpriced, neither 0 nor 2016c')
 })
 
+// The measured headline case (see valuator.mjs comment above
+// MIN_EXCHANGE_UNITS): live Allflame, 2026-08-05. 1359c off volumePrimaryValue
+// 906 -> 0.67 units — two thirds of a single card, and only 906 chaos of
+// turnover behind the whole price, under the 2000c turnover floor too. This
+// is the one CONFIRMED-bad line the turnover floor's own margin (2000) is
+// measured against, so it must fail BOTH floors, not just the unit one.
+test('The Trial (1359c off 0.67 units / 906 turnover) is rejected under both floors', async () => {
+  const v = exchangeOnlyValuator({
+    DivinationCard: {
+      nameToId: new Map([['The Trial', 'the-trial']]),
+      lineById: new Map([['the-trial', { id: 'the-trial', primaryValue: 1359, volumePrimaryValue: 906 }]])
+    }
+  })
+  const r = await v.value({ kind: 'divcard', name: 'The Trial', stack: 1 })
+  assert.equal(r, null, 'less than one trade, and under the turnover floor too, must never enter net worth')
+})
+
+// Second confirmed-bad anchor, live Allflame 2026-08-05: 14c off
+// volumePrimaryValue 4.67 -> 0.334 units and 4.67 chaos of turnover — fails
+// both floors by a wide margin, unlike The Trial which at least clears
+// several hundred chaos of turnover.
+test('Man With Bear (14c off 0.334 units / 4.67 turnover) is rejected under both floors', async () => {
+  const v = exchangeOnlyValuator({
+    DivinationCard: {
+      nameToId: new Map([['Man With Bear', 'man-with-bear']]),
+      lineById: new Map([['man-with-bear', { id: 'man-with-bear', primaryValue: 14, volumePrimaryValue: 4.67 }]])
+    }
+  })
+  const r = await v.value({ kind: 'divcard', name: 'Man With Bear', stack: 1 })
+  assert.equal(r, null, 'trivial units and trivial turnover must never enter net worth')
+})
+
 // Counter-check: expensive AND genuinely traded (House of Mirrors, 9404c /
-// 2152043 -> 228 units == 1373 cards) must get through.
+// 2152043 -> 228 units, clearly above the 10-unit floor) must get through.
 test('an expensive but well-traded card stays priced', async () => {
   const v = exchangeOnlyValuator({
     DivinationCard: {
@@ -545,9 +579,15 @@ test('an expensive but well-traded card stays priced', async () => {
   assert.equal(r.source, 'exchange:DivinationCard')
 })
 
-// Thinnest REAL line in the live run: Father's Love, 3708c at 4944 -> 1.33
-// units == 8 cards. Must not fall together with the outlier.
-test('thin but traded more than once (Father\'s Love) stays priced', async () => {
+// Father's Love, 3708c at volumePrimaryValue 4944 -> 1.33 units. A PREVIOUS
+// version of this test asserted this line was rejected under a flat 10-unit
+// floor — that assertion encoded the bug this fix corrects (see THE
+// REGRESSION in the valuator.mjs comment above MIN_EXCHANGE_UNITS) and has
+// been rewritten, not weakened: 1.33 units genuinely fails the unit floor,
+// but 4944 chaos of turnover clears the 2000c turnover floor with more than
+// double the margin, and this is the real, live, most-liquid-card-in-the-
+// league case the turnover floor exists to keep priced. It must stay priced.
+test("Father's Love (1.33 units but 4944 turnover) keeps its price on turnover grounds", async () => {
   const v = exchangeOnlyValuator({
     DivinationCard: {
       nameToId: new Map([["Father's Love", 'fathers-love']]),
@@ -555,7 +595,75 @@ test('thin but traded more than once (Father\'s Love) stays priced', async () =>
     }
   })
   const r = await v.value({ kind: 'divcard', name: "Father's Love", stack: 1 })
-  assert.equal(r.chaosEach, 3708)
+  assert.equal(r?.chaosEach, 3708, 'a thin unit count must not blank a line with real chaos turnover behind it')
+})
+
+// Boundary of the new floor: turnover just under 2000 must still fail (no
+// rescue), turnover at/above 2000 must pass, both at a unit count that fails
+// MIN_EXCHANGE_UNITS on its own — isolates MIN_EXCHANGE_TURNOVER_C from the
+// unit floor it ORs with.
+test('turnover floor is a hard cutoff at 2000c, independent of the unit floor', async () => {
+  const below = exchangeOnlyValuator({
+    DivinationCard: {
+      nameToId: new Map([['Thin Card', 'thin-card']]),
+      // 500c off 1999.99 turnover -> 4.0 units (fails both floors, turnover just short).
+      lineById: new Map([['thin-card', { id: 'thin-card', primaryValue: 500, volumePrimaryValue: 1999.99 }]])
+    }
+  })
+  assert.equal(await below.value({ kind: 'divcard', name: 'Thin Card', stack: 1 }), null)
+
+  const at = exchangeOnlyValuator({
+    DivinationCard: {
+      nameToId: new Map([['Thin Card', 'thin-card']]),
+      // Same 500c line, turnover exactly at the floor -> 4.0 units still fails
+      // MIN_EXCHANGE_UNITS, turnover alone must carry it.
+      lineById: new Map([['thin-card', { id: 'thin-card', primaryValue: 500, volumePrimaryValue: 2000 }]])
+    }
+  })
+  const r = await at.value({ kind: 'divcard', name: 'Thin Card', stack: 1 })
+  assert.equal(r?.chaosEach, 500, 'turnover >= 2000 must price even at 4 units')
+})
+
+// The turnover floor must never vouch for a line on its own: turnover is
+// units x price, so an inflated price manufactures the turnover that backs it.
+// A fraction of a single trade at a high enough price clears 2000c by itself —
+// MIN_EXCHANGE_TURNOVER_UNITS is what stops it.
+test('turnover cannot rescue a line that is not even one completed trade', async () => {
+  const v = exchangeOnlyValuator({
+    DivinationCard: {
+      nameToId: new Map([['Inflated Card', 'inflated-card']]),
+      // 3000c off 2010 turnover -> 0.67 units: the exact unit count that made
+      // The Trial (1359c/906) a rejected fake, at a price high enough that the
+      // same fraction of a trade clears the turnover floor.
+      lineById: new Map([['inflated-card', { id: 'inflated-card', primaryValue: 3000, volumePrimaryValue: 2010 }]])
+    }
+  })
+  assert.equal(await v.value({ kind: 'divcard', name: 'Inflated Card', stack: 1 }), null)
+
+  // One completed trade at the same price does clear it — the floor is about
+  // "a trade actually happened", not about being expensive.
+  const ok = exchangeOnlyValuator({
+    DivinationCard: {
+      nameToId: new Map([['Real Card', 'real-card']]),
+      lineById: new Map([['real-card', { id: 'real-card', primaryValue: 3000, volumePrimaryValue: 3000 }]])
+    }
+  })
+  assert.equal((await ok.value({ kind: 'divcard', name: 'Real Card', stack: 1 }))?.chaosEach, 3000)
+})
+
+// A line comfortably above the new floor (10 units) but nowhere near
+// House of Mirrors' liquidity must still price — the floor is a hard cutoff,
+// not a slope toward "more is better".
+test('a line with clearly sufficient volume (well above 10 units) stays priced', async () => {
+  const v = exchangeOnlyValuator({
+    DivinationCard: {
+      nameToId: new Map([['The Fiend', 'the-fiend']]),
+      // 100c at volumePrimaryValue 2500 -> 25 units, comfortably above the floor.
+      lineById: new Map([['the-fiend', { id: 'the-fiend', primaryValue: 100, volumePrimaryValue: 2500 }]])
+    }
+  })
+  const r = await v.value({ kind: 'divcard', name: 'The Fiend', stack: 1 })
+  assert.equal(r.chaosEach, 100)
 })
 
 test('missing volume field -> fail open, no crash, no 0', async () => {

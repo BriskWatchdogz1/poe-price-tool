@@ -211,6 +211,41 @@ test('a one-trade chaos market loses to a liquid divine one', async () => {
   assert.ok(d.chaos >= d.min && d.chaos <= d.max, `${d.chaos} outside ${d.min}..${d.max}`)
 })
 
+test('an expensive divine market bridges on turnover, though it is short of the unit floor', async () => {
+  // The Father's Love case. The bridge gate used to demand full isAttested() on
+  // the divine side, unit floor included, and this card missed it by 3: 7 cards
+  // traded for 305 divine. So a lone 153-chaos sale set the price of a card
+  // worth ~8500 chaos — a 98% underpricing, and a CONFIDENT one, which is worse
+  // than none because it blocks the poe.ninja fallback an unpriced item gets.
+  // Its turnover clears the bar 11.8x over; only the flat item count stood in
+  // the way, and a flat item count is exactly what punishes expensive items.
+  const X = 'Metadata/Items/DivinationCards/DivinationCardThin'
+  const m = await dualPricer([
+    CD100,
+    mk([X, CHAOS], { [X]: 1, [CHAOS]: 153 }, { [X]: 1, [CHAOS]: 153 }, { [X]: 1, [CHAOS]: 153 }),
+    mk([X, DIVINE], { [X]: 1, [DIVINE]: 43 }, { [X]: 1, [DIVINE]: 44 }, { [X]: 7, [DIVINE]: 305 })
+  ]).detailByName()
+  const d = m.get('Thin Card')
+  assert.ok(d.chaos > 153, `the single 153c sale must not win, got ${d.chaos}`)
+  assert.ok(approx(d.chaos, (305 / 7) * 100, 1e-9), 'priced off the divine market, bridged at C:D')
+})
+
+test('a divine market with many units but little turnover must NOT bridge', async () => {
+  // The other half of dropping the unit floor: it must not let the cases back in
+  // that the measurement table in sell-side.mjs calls bogus. Rogue's Marker is
+  // the sharpest of them — 715000 units traded for 1918 chaos of turnover, a
+  // shape that sails past ANY unit floor and is caught only by turnover. With
+  // C:D 100 here: 19 divine = 1900 chaos, under the 5000 bar, so the bridge must
+  // stay shut and the chaos market keeps the price.
+  const X = 'Metadata/Items/DivinationCards/DivinationCardThin'
+  const m = await dualPricer([
+    CD100,
+    mk([X, CHAOS], { [X]: 1, [CHAOS]: 100 }, { [X]: 1, [CHAOS]: 100 }, { [X]: 60, [CHAOS]: 6000 }),
+    mk([X, DIVINE], { [X]: 1, [DIVINE]: 0.0000266 }, { [X]: 1, [DIVINE]: 0.0000266 }, { [X]: 715000, [DIVINE]: 19 })
+  ]).detailByName()
+  assert.ok(approx(m.get('Thin Card').chaos, 100, 1e-9), 'the thin-turnover divine side must not take over')
+})
+
 test('a cheap but liquid chaos market keeps the price', async () => {
   // Regression guard for the first attempt at the above, which demanded full
   // isAttested() on the chaos side — including 5000c of turnover. That bar is
@@ -696,4 +731,96 @@ test('a pair with nothing but all-zero entries stays unpriced (no crash)', async
   const m = await cardPricer(byHour, now).chaosByName()
   assert.equal(m.has("The Jeweller's Boon"), false)
   assert.equal(m.get('Chaos Orb'), 1)
+})
+
+// ---------------------------------------------------------------------------
+// Cross-hour sanity check on the DIRECT chaos path (THIN_X_UNITS /
+// DEEP_HOUR_VOL_RATIO / DEEP_HOUR_DISAGREE_RATIO in faustus.mjs): a thin
+// winning hour's own QUOTE_VOL_MIN pass is self-validating (quote turnover =
+// units * price, so the price under test buys its own credibility). Real
+// case, live digest 2026-08-05 11:00 (hour 1785927600): Broken Truce "priced"
+// at 22c off 3 cards for 66 chaos; poe.ninja said 6.4c, the trade-site ask
+// was 1c/218 listings, GGG's own Currency Exchange showed "No Stock". The
+// hour immediately before (10:00) the SAME card traded 61 units for 346
+// chaos = 5.67c/card — 20x the volume, a fraction of the price.
+// ---------------------------------------------------------------------------
+const BT = 'Metadata/Items/DivinationCards/DivinationCardBrokenTruce'
+const btNames = { byId: new Map([[CHAOS, 'Chaos Orb'], [DIVINE, 'Divine Orb'], [BT, 'Broken Truce']]) }
+const btPricer = (byHour, nowSec) => createFaustusPricer({
+  league: 'Standard',
+  deps: {
+    now: () => nowSec,
+    baseNames: btNames,
+    fetchHour: async id => (byHour[id] ? { next_change_id: byHour[id].next_change_id, markets: byHour[id] } : null)
+  }
+})
+
+test('Broken Truce, real numbers: a thin winning hour (3 units) that disagrees with a materially deeper hour (61 units, one hour older) is abstained, not priced at 22c', async () => {
+  const now = 12 * 3600 // -> lastHour 11:00, the exact winning hour from the live digest
+  const byHour = {
+    [11 * 3600]: [mk([BT, CHAOS], { [BT]: 1, [CHAOS]: 22 }, { [BT]: 1, [CHAOS]: 22 }, { [BT]: 3, [CHAOS]: 66 })],
+    [10 * 3600]: [mk([BT, CHAOS], { [BT]: 1, [CHAOS]: 19 }, { [BT]: 1, [CHAOS]: 4 }, { [BT]: 61, [CHAOS]: 346 })]
+  }
+  const d = await btPricer(byHour, now).detailByName()
+  assert.equal(d.get('Broken Truce'), undefined,
+    'the thin, self-validated 22c hour must not win — better honestly unpriced (valuator falls back to poe.ninja) than confidently wrong')
+})
+
+test('a materially deeper hour that AGREES with the thin winning hour does not cause abstention', async () => {
+  // Same volumes as the Broken Truce case (3 vs 61 units), but the deeper
+  // hour traded at essentially the same rate (22 vs 21) -- no disagreement,
+  // so the winning hour's own price must survive untouched.
+  const now = 12 * 3600 // -> lastHour 11:00
+  const byHour = {
+    [11 * 3600]: [mk([BT, CHAOS], { [BT]: 1, [CHAOS]: 22 }, { [BT]: 1, [CHAOS]: 22 }, { [BT]: 3, [CHAOS]: 66 })],
+    [10 * 3600]: [mk([BT, CHAOS], { [BT]: 1, [CHAOS]: 20 }, { [BT]: 1, [CHAOS]: 22 }, { [BT]: 61, [CHAOS]: 1281 })]
+  }
+  const d = await btPricer(byHour, now).detailByName()
+  assert.ok(d.get('Broken Truce'), 'agreeing hours must not trigger abstention')
+  assert.equal(d.get('Broken Truce').chaos, 22)
+})
+
+test('a deeper hour that disagrees but does not itself clear THIN_X_UNITS does not override (no blanket X-side floor)', async () => {
+  // The deeper hour here has MORE volume than the winning hour (5 vs 3) and a
+  // wildly different rate, but 5 units is still below THIN_X_UNITS=10 itself
+  // -- "more evidence than a thin hour" is not the same as "enough evidence".
+  // This is the guard the QUOTE_VOL_MIN comment warns about: a blanket
+  // X-side floor would unprice legitimately thin, expensive items, so the
+  // deeper hour must clear the SAME absolute bar, not just relatively beat
+  // the winning hour.
+  const now = 12 * 3600 // -> lastHour 11:00
+  const byHour = {
+    [11 * 3600]: [mk([BT, CHAOS], { [BT]: 1, [CHAOS]: 22 }, { [BT]: 1, [CHAOS]: 22 }, { [BT]: 3, [CHAOS]: 66 })],
+    [10 * 3600]: [mk([BT, CHAOS], { [BT]: 1, [CHAOS]: 5 }, { [BT]: 1, [CHAOS]: 5 }, { [BT]: 5, [CHAOS]: 25 })]
+  }
+  const d = await btPricer(byHour, now).detailByName()
+  assert.equal(d.get('Broken Truce')?.chaos, 22, 'a deeper-but-still-thin hour must not override the winning price')
+})
+
+test('a deeper hour that clears THIN_X_UNITS but is not materially deeper (below DEEP_HOUR_VOL_RATIO) does not override', async () => {
+  // 20 units vs 9 (winning) is only ~2.2x -- below the 3x DEEP_HOUR_VOL_RATIO
+  // bar -- even though both clear THIN_X_UNITS and the rates disagree hugely.
+  const now = 12 * 3600 // -> lastHour 11:00
+  const byHour = {
+    [11 * 3600]: [mk([BT, CHAOS], { [BT]: 1, [CHAOS]: 22 }, { [BT]: 1, [CHAOS]: 22 }, { [BT]: 9, [CHAOS]: 198 })],
+    [10 * 3600]: [mk([BT, CHAOS], { [BT]: 1, [CHAOS]: 5 }, { [BT]: 1, [CHAOS]: 5 }, { [BT]: 20, [CHAOS]: 100 })]
+  }
+  const d = await btPricer(byHour, now).detailByName()
+  assert.equal(d.get('Broken Truce')?.chaos, 22, 'volume ratio below DEEP_HOUR_VOL_RATIO must not override')
+})
+
+test('guard: an expensive item that legitimately trades 1-3 units every hour, with huge chaos turnover, keeps its price across the whole union window', async () => {
+  // Mirror-of-Kalandra shape: every single walked hour is "thin" by
+  // THIN_X_UNITS (2-3 units), so no hour in the window can ever clear the
+  // deep-hour floor and the cross-hour check must never fire -- this is the
+  // exact scenario the QUOTE_VOL_MIN comment warns a two-sided/blanket floor
+  // would wrongly unprice.
+  const now = 12 * 3600 // -> lastHour 11:00
+  const byHour = {
+    [11 * 3600]: [mk([BT, CHAOS], { [BT]: 1, [CHAOS]: 100000 }, { [BT]: 1, [CHAOS]: 100000 }, { [BT]: 2, [CHAOS]: 200000 })],
+    [10 * 3600]: [mk([BT, CHAOS], { [BT]: 1, [CHAOS]: 99000 }, { [BT]: 1, [CHAOS]: 99000 }, { [BT]: 3, [CHAOS]: 297000 })],
+    [9 * 3600]: [mk([BT, CHAOS], { [BT]: 1, [CHAOS]: 101000 }, { [BT]: 1, [CHAOS]: 101000 }, { [BT]: 1, [CHAOS]: 101000 })]
+  }
+  const d = await btPricer(byHour, now).detailByName()
+  assert.equal(d.get('Broken Truce')?.chaos, 100000, 'a consistently thin but expensive market must keep its price')
 })

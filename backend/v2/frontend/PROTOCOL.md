@@ -132,14 +132,49 @@ keep showing the stale card until they reconnect.
   "currency": "divine",            // divine|div -> gold, chaos -> teal, exalted, mirror, ...
   "priceLow": 125,
   "priceHigh": 170,
+  "priceMedian": 140,
   "count": 259,                    // listings (single) / sellers (bulk)
   "listings": [
     { "price": 128, "currency": "divine", "seller": "@Exilequeen", "ageMinutes": 4 }
-  ]
+  ],
+
+  "priceSource": "exchange",       // optional: "exchange" | "ninja" — absent for a plain trade-search price
+  "sourceLabel": "Exchange",       // optional: label shown under the headline when priceSource is set
+  "tradeAsk": {                    // optional: the real trade-site ask, demoted to a secondary line
+    "low": 0.7, "high": 1, "currency": "divine",
+    "chaosLow": 74.2, "chaosHigh": 106, "chaosMedian": 106
+  },
+  "exchangeRange": { "low": 10, "high": 17.1 }, // optional: span the exchange itself traded at this hour
+  "askConflict": { "dir": "over", "factor": 22 } // optional: headline vs. tradeAsk disagree, see below
 }
 ```
 Sets the item's status to `done`, fills the price block + listing rows, and flashes
 the hit counter. `display:"bulk"` renders a `215 : 1` exchange ratio instead of a range.
+
+`priceSource: "exchange"` means the GGG Currency Exchange rate (Faustus) was
+promoted to the headline (`priceLow`/`priceHigh`/`priceMedian` all equal that
+rate, in chaos) — see `withExchangeMain` in `server.mjs`. In that case the real
+trade-site ask is not discarded, it moves to `tradeAsk`: `low`/`high` in the
+listing's own currency, plus `chaosLow`/`chaosHigh`/`chaosMedian` converted at
+the same C:D rate the card uses (`null` when the ask currency isn't chaos or
+divine — no C:D rate to convert by). `chaosMedian` is the median of the
+fetched trade-search listings (in chaos), distinct from `chaosLow`/`chaosHigh`
+which are the cheapest/10th-cheapest of that same fetch, not a market low/high.
+`exchangeRange`, when present, is the {low, high} the exchange itself actually
+traded at in the last hour — an honest "how wide is this market" figure, shown
+in place of the listing count for an exchange-priced item.
+
+`askConflict` fires when the headline and the trade-site ask disagree enough to
+matter (thresholds `ASK_CONFLICT_RATIO`/`ASK_CONFLICT_ABS_GAP_C`/
+`MIN_ASK_EVIDENCE`/`MIN_CONFLICT_HEADLINE_C` in `server.mjs`, all overridable
+via `POE_*` env vars): `dir: "over"` means the headline may be too high (the
+ask median sits well below it); `dir: "under"` means the headline may be too
+low (even the cheapest ask sits well above it). `factor` is the ratio between
+the two, rounded to 1 decimal — logged server-side on every firing, but the
+frontend never renders the number, only the fact of disagreement (`.psrc`
+suffix "— asks disagree" + a `title` tooltip on the price). This is disclosure,
+not correction: the headline is never overridden, and the marker never says
+which side is right — both real numbers are already on the card.
 
 ### `queue-status` — the "Price queue" panel
 ```json

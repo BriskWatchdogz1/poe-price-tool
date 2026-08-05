@@ -62,7 +62,7 @@ test('Faustus knows it: the Exchange rate becomes the headline price, the trade 
   assert.equal(r.priceSource, 'exchange')
   assert.equal(r.sourceLabel, 'Exchange')
   assert.deepEqual(r.tradeAsk, {
-    low: 0.7, high: 1, currency: 'divine', chaosLow: 74.2, chaosHigh: 106
+    low: 0.7, high: 1, currency: 'divine', chaosLow: 74.2, chaosHigh: 106, chaosMedian: 106
   })
 })
 
@@ -93,7 +93,7 @@ test('trade ask already in chaos: no double conversion', () => {
   const r = mod.withExchangeMain(
     tradeResult({ currency: 'chaos', priceLow: 80, priceHigh: 120 }), 56, CD)
   assert.deepEqual(r.tradeAsk, {
-    low: 80, high: 120, currency: 'chaos', chaosLow: 80, chaosHigh: 120
+    low: 80, high: 120, currency: 'chaos', chaosLow: 80, chaosHigh: 120, chaosMedian: 1
   })
 })
 
@@ -172,6 +172,46 @@ test('no Faustus value: even WITH a range the result stays byte for byte identic
   const base = tradeResult()
   assert.deepEqual(mod.withExchangeMain(base, null, CD, { min: 1, max: 2 }), base)
   assert.equal(mod.withExchangeMain(base, null, CD, { min: 1, max: 2 }).exchangeRange, undefined)
+})
+
+// --- askConflict (ask-conflict marker) --------------------------------------
+
+test('ask-conflict: over — Broken Truce shape (headline far above the ask median)', () => {
+  const r = mod.withExchangeMain(
+    tradeResult({ currency: 'chaos', priceLow: 1, priceHigh: 1, priceMedian: 1, count: 218 }), 22, CD)
+  assert.deepEqual(r.askConflict, { dir: 'over', factor: 22 })
+})
+
+test("ask-conflict: under — cheapest ask far above headline (Father's Love shape)", () => {
+  const r = mod.withExchangeMain(
+    tradeResult({ currency: 'chaos', priceLow: 8000, priceHigh: 8500, priceMedian: 8200, count: 50 }), 153, CD)
+  assert.deepEqual(r.askConflict, { dir: 'under', factor: 52.3 })
+})
+
+test('ask-conflict: near-floor no-fire — ratio crossed but the absolute gap is too small', () => {
+  const r = mod.withExchangeMain(
+    tradeResult({ currency: 'chaos', priceLow: 1, priceHigh: 1, priceMedian: 1, count: 50 }), 4.5, CD)
+  assert.equal(r.askConflict, undefined)
+})
+
+test('ask-conflict: sub-chaos no-fire — headline below the minimum', () => {
+  const r = mod.withExchangeMain(
+    tradeResult({ currency: 'chaos', priceLow: 164, priceHigh: 170, priceMedian: 165, count: 50 }), 0.6, CD)
+  assert.equal(r.askConflict, undefined)
+})
+
+test('ask-conflict: thin-evidence no-fire — fewer than 5 fetched asks', () => {
+  const r = mod.withExchangeMain(
+    tradeResult({ currency: 'chaos', priceLow: 1, priceHigh: 1, priceMedian: 1, count: 3 }), 22, CD)
+  assert.equal(r.askConflict, undefined)
+})
+
+test('ask-conflict: exotic ask currency no-fire — no C:D rate to convert by', () => {
+  const r = mod.withExchangeMain(
+    tradeResult({ priceLow: 1, priceHigh: 1, priceMedian: 1, count: 218 }), 22, 0)
+  assert.equal(r.tradeAsk.chaosLow, null)
+  assert.equal(r.tradeAsk.chaosMedian, null)
+  assert.equal(r.askConflict, undefined)
 })
 
 test('faustusRangeFor: range from the store, same league/freshness guards', async () => {

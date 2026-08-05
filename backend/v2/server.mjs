@@ -1073,20 +1073,54 @@ function toPriceResult (id, price, kind, league, cdRatio) {
 // `range` ({min,max} chaos per piece, optional) is what the exchange ACTUALLY
 // traded at that hour and rides along as `exchangeRange` so the card can show
 // how wide the market is instead of just the single derived number.
-function withExchangeMain (result, chaos, cdRatio, range) {
+//
+// `itemName` is display-only, for the ask-conflict log line below — it never
+// affects pricing.
+//
+// ---- Ask-conflict thresholds (see the marker logic further down) ----------
+// Disclose, never override: a lowball ask is not a sale and asks are
+// manipulable, so the Exchange headline still wins outright — the marker only
+// says the two sources disagree, it never substitutes a "corrected" number.
+//
+// Measured against the bug report (divination card Broken Truce: headline 22c
+// while 218 people asked 1c on the trade site, shown with no hint anything
+// was off) and validated across 505 Allflame fungibles priced by both Faustus
+// and poe.ninja on the same day: median divergence there was 1.07x, p95
+// 1.83x, and the worst HONEST divergence topped out near 2.4x, while
+// everything measurably broken sat at 9x or more. 4 halves that gap with
+// margin on both sides (only ~1.0% of lines exceed it) and is the same number
+// AND the same meaning as BRIDGE_TOLERANCE in networth/faustus.mjs.
+const ASK_CONFLICT_RATIO = positiveEnvInt(process.env.POE_ASK_CONFLICT_RATIO, 4)
+// Absolute floor on top of the ratio. Sub-chaos fungibles (lifeforce trades
+// near 0.018c while the trade site can't list below 1c) would otherwise fire
+// on pure granularity, and the over-direction would fire constantly on
+// near-floor junk where 1c walls are endemic — the ratio alone can't tell
+// "22c vs 1c" (real conflict) from "1.5c vs 1c" (rounding noise).
+const ASK_CONFLICT_ABS_GAP_C = positiveEnvInt(process.env.POE_ASK_CONFLICT_ABS_GAP_C, 5)
+// Below this many fetched asks, the ask median is itself noise.
+const MIN_ASK_EVIDENCE = positiveEnvInt(process.env.POE_MIN_ASK_EVIDENCE, 5)
+// Same granularity problem as the abs-gap, from the other end: below 1c the
+// exchange rate is honestly sub-chaos and the trade site's floor is the whole
+// reason for the gap, not evidence of a wrong headline.
+const MIN_CONFLICT_HEADLINE_C = positiveEnvInt(process.env.POE_MIN_CONFLICT_HEADLINE_C, 1)
+function withExchangeMain (result, chaos, cdRatio, range, itemName) {
   if (typeof chaos !== 'number' || !(chaos > 0) || !result) return result
   const ratio = Number(cdRatio) > 0 ? Number(cdRatio) : 0
   const toChaos = v => (result.currency === 'chaos'
     ? v
     : (result.currency === 'divine' && ratio ? round1(v * ratio) : null))
   // No priced listing at all -> nothing to ask about, so no second line.
+  // chaosMedian is read off `result.priceMedian` HERE, before `out` below
+  // overwrites that field with the Exchange headline — this is still the
+  // trade-derived median.
   const ask = (result.priceLow > 0 || result.priceHigh > 0)
     ? {
         low: result.priceLow,
         high: result.priceHigh,
         currency: result.currency,
         chaosLow: toChaos(result.priceLow),
-        chaosHigh: toChaos(result.priceHigh)
+        chaosHigh: toChaos(result.priceHigh),
+        chaosMedian: toChaos(result.priceMedian)
       }
     : null
   // round1 would flatten a genuinely sub-chaos fungible (lifeforce & co, whose
@@ -1108,6 +1142,40 @@ function withExchangeMain (result, chaos, cdRatio, range) {
   // Only a real span: no range, a degenerate one or garbage -> the field stays
   // absent and the card shows nothing there (never a made-up placeholder).
   if (isFinite(lo) && isFinite(hi) && lo > 0 && lo < hi) out.exchangeRange = { low: rc(lo), high: rc(hi) }
+
+  // ---- Ask-conflict marker ---------------------------------------------------
+  // Gates: ALL required or there is no comparison at all — thin/exotic/floor
+  // situations are not evidence of anything, so they stay silent rather than
+  // guess.
+  if (
+    ask &&
+    c >= MIN_CONFLICT_HEADLINE_C &&
+    result.count >= MIN_ASK_EVIDENCE &&
+    ask.chaosLow != null &&
+    ask.chaosMedian != null
+  ) {
+    // Over (headline maybe too high) and under (headline maybe too low) read
+    // DIFFERENT ask statistics on purpose. Asks BELOW the headline are
+    // self-enforcing — an ask that's genuinely too cheap gets bought, so a
+    // standing wall of cheap asks is real supply — so the robust measure is
+    // the MEDIAN of the fetched asks. Asks ABOVE the headline are aspirational
+    // and cost nothing to post — a single greedy listing proves nothing — so
+    // the conservative measure is the CHEAPEST ask; only if even that is
+    // ASK_CONFLICT_RATIO above the headline is the headline itself suspect.
+    // Never `ask.chaosHigh`: it is not a market high, it's the 10th-cheapest
+    // fetched listing — a meaningless quantity for this purpose.
+    const over = c >= ASK_CONFLICT_RATIO * ask.chaosMedian && c - ask.chaosMedian >= ASK_CONFLICT_ABS_GAP_C
+    const under = ask.chaosLow >= ASK_CONFLICT_RATIO * c && ask.chaosLow - c >= ASK_CONFLICT_ABS_GAP_C
+    if (over || under) {
+      const dir = over ? 'over' : 'under'
+      const factor = Math.round((over ? c / ask.chaosMedian : ask.chaosLow / c) * 10) / 10
+      out.askConflict = { dir, factor }
+      // Logged unconditionally on every firing so the thresholds above can be
+      // calibrated from real use later — that is the point of shipping this.
+      console.log(`[server] ask-conflict ${dir} x${factor} item=${itemName || 'unknown'} headline=${c} askMed=${ask.chaosMedian} askLow=${ask.chaosLow} count=${result.count}`)
+    }
+  }
+
   return out
 }
 
@@ -1452,7 +1520,8 @@ async function pump () {
                 toPriceResult(job.id, price, tradeKind, room.league, cdMsgFor(room.league).chaosPerDivine),
                 faustusChaos,
                 cdMsgFor(room.league).chaosPerDivine,
-                faustusRangeFor(rec.item, room.league)
+                faustusRangeFor(rec.item, room.league),
+                rec.item.name || rec.item.info?.name || 'Unknown'
               )
         rec.status = 'done'
         rec.lastPrice = result

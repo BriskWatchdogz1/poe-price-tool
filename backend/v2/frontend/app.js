@@ -167,7 +167,24 @@ function priceHtml (item) {
     const range = (r && typeof r.low === 'number' && typeof r.high === 'number')
       ? `<div class="hits"><span class="xrange" title="Range the exchange actually traded at this hour">range ${r.low}–${r.high} c</span></div>`
       : ''
-    return `<div class="pcol">${head}<div class="psrc">${esc(p.sourceLabel || 'Exchange')}</div>${askTxt}</div>${range}`
+    // askConflict (see server.mjs withExchangeMain): the headline still wins —
+    // this only DISCLOSES that the trade-derived asks disagree with it, it
+    // never corrects or judges which side is right. Both real numbers are
+    // already on the card (headline here, asks on the Trade-Ask line above);
+    // the marker just says to check them against each other.
+    const conflict = p.askConflict
+    const conflictTitle = conflict
+      ? (conflict.dir === 'over'
+          ? 'The trade site asks well below this rate (see Trade-Ask). One of the two is off — check before valuing the item at this number.'
+          : 'Even the cheapest trade ask is several times this rate (see Trade-Ask). The rate may be stale or from a thin hour — check before selling at this number.')
+      : ''
+    const headTxt = conflict
+      ? `<div class="pr ${gold ? '' : 'c'}" title="${esc(conflictTitle)}">${prTxt}</div>`
+      : head
+    const srcTxt = conflict
+      ? `${esc(p.sourceLabel || 'Exchange')}<span class="pconflict"> — asks disagree</span>`
+      : esc(p.sourceLabel || 'Exchange')
+    return `<div class="pcol">${headTxt}<div class="psrc">${srcTxt}</div>${askTxt}</div>${range}`
   }
   const ask = p.tradeAsk
     ? `<div class="pask">Trade-Ask: ${esc(askText(p.tradeAsk))}</div>` : ''

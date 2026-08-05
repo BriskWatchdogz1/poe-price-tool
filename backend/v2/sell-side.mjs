@@ -82,6 +82,44 @@ export function isAttested (side, chaosPerQuote) {
   return true
 }
 
+// Attestation for a DIFFERENT question: not "does this side pay a seller more"
+// (isAttested, above, whose answer becomes a claim in the UI) but "is this side
+// evidenced well enough to SET THE PRICE" — the faustus bridge's decision. Same
+// turnover bar, NO unit floor. Two call sites, two questions; conflating them
+// is how the bug below got in.
+//
+// Why dropping the unit floor is safe HERE, checked row by row against the
+// measurement table at the top of this file — every bogus side in it fails on
+// turnover, and two of them clear the unit floor comfortably:
+//
+//   The Apothecary       1 unit    1900c   both floors reject
+//   The Demon            1 unit    1423c   both floors reject
+//   Divine Justice       2 units    920c   both floors reject
+//   Rogue's Marker  715000 units   1918c   UNIT FLOOR PASSES, turnover rejects
+//   Tainted Exalted     21 units   1744c   UNIT FLOOR PASSES, turnover rejects
+//   Tattoo o.t. Ramako  12 units   1744c   UNIT FLOOR PASSES, turnover rejects
+//
+// So the unit floor catches nothing in that measurement the turnover floor does
+// not already catch. What it does catch is the opposite mistake: Father's Love,
+// a card trading at ~44 divine, moved 7 cards for 305 divine (59 117 chaos of
+// turnover, 11.8x the bar) and was rejected for being 3 units short — so a
+// single 153-chaos sale set the price of a 8500-chaos card, a 98% underpricing
+// that no fallback could correct, because a confident wrong price blocks the
+// fallback that an unpriced item would have got.
+//
+// A flat item count punishes expensive items. That is the same lesson as
+// MIN_EXCHANGE_UNITS in networth/valuator.mjs and the QUOTE_VOL_MIN comment in
+// networth/faustus.mjs, arrived at a third time from a third direction.
+//
+// Turnover here is the QUOTE side's own traded volume (divine actually changed
+// hands), not the item price under test, so it does not validate itself the way
+// a turnover bar denominated in the estimated price would.
+export function isTurnoverAttested (side, chaosPerQuote) {
+  if (!side || typeof side.perItem !== 'number' || !isFinite(side.perItem) || side.perItem <= 0) return false
+  if (typeof chaosPerQuote !== 'number' || !isFinite(chaosPerQuote) || chaosPerQuote <= 0) return false
+  return (side.volQuote ?? 0) * chaosPerQuote >= SELL_MIN_QUOTE_TURNOVER_C
+}
+
 /**
  * compareSellSides(sell, chaosPerDivine, prevBetter = null) -> {
  *   viaChaos:  chaos revenue per item via the chaos market | null,

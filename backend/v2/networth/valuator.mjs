@@ -37,59 +37,126 @@ const confident = l => typeof l.count === 'number' && l.count >= MIN_CONFIDENCE
 // Volume floor for the poe.ninja EXCHANGE lines (the confidence gate above only
 // covers item/overview, which is a different shape). Every exchange line carries
 // `volumePrimaryValue` — that line's traded volume expressed in chaos — so
-// `volumePrimaryValue / primaryValue` is the number of ITEMS behind the price.
-// poe.ninja reports the volume averaged over its 6-slot window, i.e. a ratio of
-// 1/6 (0.1667) is EXACTLY ONE traded item; measured over all 947 Allflame
-// exchange lines the ratio is a multiple of 1/6 throughout. 0.5 therefore means
-// "at least three items changed hands".
+// `volumePrimaryValue / primaryValue` is the number of ITEMS behind the price
+// (poe.ninja reports the volume averaged over its 6-slot window, i.e. a ratio
+// of 1/6 == 0.1667 is EXACTLY ONE traded item), and `volumePrimaryValue`
+// itself is the same evidence expressed as chaos turnover instead of item
+// count. Why a floor at all: a line backed by a handful of trades is one or
+// two observations, not a market, and it survives into our valuation even
+// after the Faustus path (GGG digest) correctly rejects it — both sources
+// scrape the same thin trades.
 //
-// Why a floor at all: a line backed by a single trade is one observation, not a
-// market, and it survives into our valuation even after the Faustus path
-// (GGG digest) correctly rejects it — both sources scrape the same lone trade.
-// Measured case: "The Carrion Crow" (a 4-card set buys a random magic armour,
-// i.e. vendor trash) was listed at 2016c off volumePrimaryValue 336 -> 0.17
-// units -> ONE card. GGG's digest showed the very same single 1:14 divine trade.
+// THE REGRESSION this comment used to argue for and no longer does: this
+// floor was raised from 0.5 to 10 units on the strength of the calibration
+// below (all cases, cheap and expensive, distributed on both sides of 10 —
+// "no reason for a value-dependent floor"). That was wrong. A flat item-count
+// floor is itself value-dependent in effect, because ITEM COUNT and PRICE are
+// inversely related for a fixed amount of chaos changing hands: an expensive
+// card clears fewer units for the exact same turnover a cheap card clears in
+// bulk. Live Allflame case that broke it (measured 2026-08-05): "Father's
+// Love" at 8608c off volumePrimaryValue 41607 -> 4.83 units — comfortably
+// under the 10-unit floor despite 41607 CHAOS of turnover, more than every
+// Fragment/Scarab/Fossil/Oil line this same floor was calibrated to trust.
+// The floor doesn't measure "is this a real market" here, it measures "is
+// this item cheap enough to move ten of in the window" — exactly the
+// instrument backend/v2/networth/faustus.mjs's comment above QUOTE_VOL_MIN
+// warns against: "An expensive X legitimately trades 1-3/hour while the chaos side
+// is huge, so a two-sided floor would unprice exactly the high-value items."
+// This constant was that two-sided floor, single-sided.
 //
-// Calibration against the live Allflame data (all 15 exchange types, 947 lines):
-//   - The floor removes 29 of 947 lines. Exactly ONE of them is worth more than
-//     100c: The Carrion Crow (2016c, 1 item) — the documented outlier.
-//     The rest: Left to Fate (97c, 1) and 22 further cards at <=7c, plus 5
-//     essences at <=3c. Full list at the time of writing (name, price, items):
-//     Left to Fate 97c/1, The Tumbleweed 7c/1, The Hale Heart 5c/1,
-//     Fateful Meeting 4c/2, Forbidden Power 4c/2, The Throne 3.67c/3,
-//     The Fathomless Depths 3c/1, The Fox in the Brambles 3c/2,
-//     Muttering Essence of Woe 3c/1, Man With Bear 2c/2, The Rabid Rhoa 2c/1,
-//     The Return of the Rat 2c/2, Ever-Changing 2c/1, The Whiteout 2c/1,
-//     Ambitious Obsession 1.5c/2, A Note in the Wind 1.5c/2,
-//     Abandoned Wealth 1c/1, The King's Blade 1c/1, The Lord of Celebration 1c/2,
-//     The Metalsmith's Gift 1c/1, The Army of Blood 1c/1, The Body 1c/1,
-//     Three Voices 1c/1, and 4 more 0.5-1c essences at 2 items.
-//   - The known heavyweights stay: House of Mirrors 9404c/1373 items,
-//     The Apothecary 5053c/1820, The Doctor 1804c/1714, The Nurse 216c/2079,
-//     Unrequited Love 3281c/1268, The Eye of Terror 3135c/705.
-//   - The thinnest lines we still ACCEPT are Father's Love (3708c, 8 items),
-//     Pearls Before Swine (2106c, 8) and Runegraft of the Angler (2631c, 4) —
-//     so the gap between "rejected" (1 item) and "genuine but thin" (4 items)
-//     is real and the floor sits inside it with margin on both sides.
-//   - Currency/Fragment/Scarab/Fossil/Oil/… have NO line below the floor in a
-//     live league (thinnest currency line: 66 items), so the merged stackable
-//     map only ever loses the odd 1c essence.
-// The artifact shows up at every price level (2016c and 1c alike), so the data
-// give no reason for a value-dependent floor — a flat item count is what they
-// support.
-const MIN_EXCHANGE_UNITS = 0.5
+// THE FIX: accept a line when it clears EITHER the unit floor below OR a
+// turnover floor in chaos (MIN_EXCHANGE_TURNOVER_C) — but this is NOT
+// backend/v2/sell-side.mjs's SELL_MIN_UNITS/SELL_MIN_QUOTE_TURNOVER_C AND
+// copied in as an OR. That pair guards two INDEPENDENT market legs (X-side
+// item count and quote-side turnover come from separate GGG digest markets,
+// which is exactly how Rogue's Marker fooled a unit-only floor there:
+// 715000 units traded, but only 1918c of quote turnover behind them — a unit
+// floor cleared by a near-worthless side with nothing backing it). A poe.ninja
+// exchange line has no such second leg: `volumePrimaryValue` and
+// `volumePrimaryValue / primaryValue` are the SAME observation read two ways
+// (turnover = units x price by construction), so a Rogue's-Marker-shaped
+// failure — huge units, thin turnover — cannot occur on the turnover side of
+// this particular OR: turnover here can only be large when either units or
+// price is large, and it was checked (see below) that every line the turnover
+// floor rescues has non-trivial units too, none anywhere near the "single
+// extreme trade" shape.
+//
+// Calibration against live Allflame data (2026-08-05, all 10 exchange types
+// fetched fresh via curl — DivinationCard, Currency, Fragment, Scarab,
+// Fossil, Oil, Essence, Tattoo, Runegraft, Omen — 916 priced lines total).
+// For the population that fails the 10-unit floor, turnover (in chaos) does
+// NOT show one clean gap the way the old flat-count calibration implied one
+// existed: sorted turnover climbs close to continuously from a few hundred
+// chaos into the tens of thousands. What DOES separate cleanly is confirmed
+// bad vs. the rescue target: "The Trial", the case that originally motivated
+// this floor, topped out at 1359c off 906 turnover (0.67 units) — genuinely
+// under one traded card, and it must stay rejected. The closest line the
+// turnover floor is meant to rescue ("Journey Tattoo of the Mind", 1085c off
+// 2169 turnover, 2.00 units) sits at 2.4x that. MIN_EXCHANGE_TURNOVER_C =
+// 2000 sits in between: a safety margin over the one CONFIRMED-bad turnover
+// value in this dataset (906c), same margin-over-worst-known-bad logic
+// sell-side.mjs used for its own 5000 (never the number itself — that number
+// comes from a different market/currency pair shape and does not transfer).
+//   - DivinationCard: 391 lines, 157 fail the unit floor -> 150 still fail
+//     with the turnover floor added (7 rescued): Father's Love 8608c/41607
+//     turnover, The Miracle 3020c/11074, Lucky Bastion 1918c/15348, Pearls
+//     Before Swine 3691c/5537, Choking Guilt 1199c/4598, Brother's Gift
+//     957c/4306, Outfoxed 917.8c/4283 — every one of these was a named
+//     casualty of the old flat floor above. Most expensive line STILL
+//     rejected: The Sacrifice, 200c off 33.3 turnover (0.167 units) — a
+//     single trade's fraction, same shape as The Trial.
+//   - Tattoo: 3 of 53 fail the unit floor -> 2 still fail (1 rescued: Journey
+//     Tattoo of the Mind, above). Most expensive still-rejected line: Journey
+//     Tattoo of the Body, 740.3c off 1481 turnover (2.00 units) — turnover
+//     falls short of 2000, correctly stays out.
+//   - Runegraft: 1 of 31 fails the unit floor (Runegraft of the Angler,
+//     2574c/5148 turnover, 2.00 units) -> 0 still fail; fully rescued.
+//   - Essence: 23 of 99 fail the unit floor, all still fail (turnover floor
+//     changes nothing) — capped at 20c (Whispering Essence of Contempt), a
+//     thin essence line is cheap, never a stash-sized bet.
+//   - Currency: 2 of 102 fail, unchanged — both trivial shard prices
+//     (Transmutation Shard 0.5c and similar).
+//   - Omen: 3 of 12 fail, unchanged — all under 2c, trivial.
+//   - Fragment, Scarab, Fossil, Oil: ZERO lines fail the unit floor in either
+//     version — untouched, as before.
+const MIN_EXCHANGE_UNITS = 10
+
+// Chaos turnover floor — the rescue for a line that fails MIN_EXCHANGE_UNITS
+// but moves real chaos anyway (see the calibration above). Units alone cannot
+// tell "few trades because nobody wants it" apart from "few trades because
+// each one is expensive"; total chaos moved can, which is exactly what this
+// reads.
+const MIN_EXCHANGE_TURNOVER_C = 2000
+
+// The turnover floor alone is SELF-VALIDATING and must never stand on its own:
+// turnover is units x price, and price is the very number under test, so an
+// inflated price manufactures the turnover that vouches for it. Concretely, The
+// Trial at 1359c off 0.67 units yields 906 turnover and is correctly rejected —
+// but the SAME 0.67 units at a (more) inflated 3000c would yield 2010 and pass.
+// The more wrong the price, the likelier it clears the bar.
+//
+// This is the identical disease the cross-hour check in faustus.mjs was built
+// for, where QUOTE_VOL_MIN is denominated in the quote currency for the same
+// structural reason. The cure here is cheap: turnover may only vouch for a line
+// that represents at least one COMPLETED trade. No line currently rescued by
+// the turnover floor is affected — the thinnest is Pearls Before Swine at 1.5
+// units — so this costs nothing today and closes the hole for good.
+const MIN_EXCHANGE_TURNOVER_UNITS = 1
 
 // Chaos value of a poe.ninja exchange line, or null when it must not be trusted.
 // Rejects a non-positive price (would enter the sum as a fake 0) and any line
-// below the volume floor. No usable volume field -> fail OPEN: the floor exists
-// to drop lines we can PROVE are thin, so if poe.ninja ever stops shipping the
-// field we keep pricing instead of blanking every stackable. Never returns 0.
+// clearing NEITHER the unit floor NOR the turnover floor. No usable volume
+// field -> fail OPEN: the floors exist to drop lines we can PROVE are thin, so
+// if poe.ninja ever stops shipping the field we keep pricing instead of
+// blanking every stackable. Never returns 0.
 function exchangeLineValue (line) {
   const v = line && typeof line.primaryValue === 'number' ? line.primaryValue : null
   if (v == null || !(v > 0)) return null
   const vol = line.volumePrimaryValue
   if (typeof vol !== 'number' || !Number.isFinite(vol) || vol < 0) return v
-  return vol / v >= MIN_EXCHANGE_UNITS ? v : null
+  const units = vol / v
+  if (units >= MIN_EXCHANGE_UNITS) return v
+  return (vol >= MIN_EXCHANGE_TURNOVER_C && units >= MIN_EXCHANGE_TURNOVER_UNITS) ? v : null
 }
 
 // Max staleness for the Faustus store before its prices are treated as absent

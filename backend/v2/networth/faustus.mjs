@@ -13,7 +13,7 @@
 // officially documented; the midpoint derivation below is empirically verified
 // and pinned by faustus.test.mjs — see rateXperQuote.
 import { loadBaseNames } from './base-names.mjs'
-import { isAttested } from '../sell-side.mjs'
+import { isTurnoverAttested, SELL_MIN_UNITS } from '../sell-side.mjs'
 
 const FAUSTUS_BASE = 'https://web.poecdn.com/api/currency-exchange'
 const FAUSTUS_UA = 'poe-price-tool/0.1'
@@ -42,6 +42,24 @@ const BRIDGE_TOLERANCE = 4
 // away from the item's OWN chaos market: divine units >= this x chaos units.
 // See the long note in buildDetailById for the measurement behind the 3.
 const BRIDGE_UNIT_RATIO = 3
+// Cross-hour sanity check on the DIRECT X<->Chaos path (see the long note in
+// buildDetailById for the Broken Truce case and the measurement behind these
+// three constants). THIN_X_UNITS mirrors SELL_MIN_UNITS from sell-side.mjs:
+// this hour's own item-side volume below it is too thin to trust alone --
+// same "one/two trades say nothing" floor, reused rather than re-derived.
+const THIN_X_UNITS = SELL_MIN_UNITS
+// How many times more item-side volume another hour in the same union window
+// must carry, AND clear THIN_X_UNITS itself, before it counts as materially
+// deeper evidence than a thin winning hour. Same role as BRIDGE_UNIT_RATIO
+// above -- a relative comparison of evidence quality, not an absolute floor
+// (an absolute X-side floor is exactly the wrong fix the QUOTE_VOL_MIN
+// comment above warns against).
+const DEEP_HOUR_VOL_RATIO = 3
+// How far the two hours' volume-weighted rates must disagree (higher/lower
+// ratio) before the thin hour's price is discarded outright. See
+// buildDetailById: measured to keep good thin-hour prices intact while
+// catching the broken ones.
+const DEEP_HOUR_DISAGREE_RATIO = 2
 const DEFAULT_UNION_HOURS = 8 // walk back this many completed hours, most-recent market wins; overridable via deps.unionHours (Task 3: POE_FAUSTUS_UNION_HOURS)
 // Slack for the union walk: the newest completed hour may not be published yet
 // (undocumented delay) and GGG-deleted history leaves holes — allow that many
@@ -223,10 +241,20 @@ export function createFaustusPricer ({ league, deps = {} } = {}) {
   // discussion in buildDetailById for why one hour is not enough. Placeholder
   // entries contribute nothing on their own (rawRateRange returns null for
   // all-zero ratios), so no idle hour can widen the range.
+  //
+  // Third return value `chaosDeepById`: for every X with a chaos market, the
+  // SINGLE walked-hour market with the most X-side volume traded (raw
+  // volume_traded[x], no guards applied yet — those are the caller's job, see
+  // the THIN_X_UNITS check in buildDetailById). This is deliberately NOT the
+  // same market as byPair's "most recent informative" pick: byPair answers
+  // "what's the freshest price", this answers "which hour in the window had
+  // the most evidence for this item", and the two can disagree — that
+  // disagreement is exactly what the Broken Truce check below is for.
   async function fetchUnion () {
     let id = lastHour(now())
     const byPair = new Map()
     const chaosEnvById = new Map() // xId -> { min, max } in chaos per X
+    const chaosDeepById = new Map() // xId -> market with the most X-side volume seen
     const usable = new Set() // pairKeys whose stored entry is informative
     let collected = 0
     let guard = 0
@@ -247,6 +275,9 @@ export function createFaustusPricer ({ league, deps = {} } = {}) {
             if (!cur) chaosEnvById.set(x, { min: r.min, max: r.max })
             else { cur.min = Math.min(cur.min, r.min); cur.max = Math.max(cur.max, r.max) }
           }
+          const volX = m.volume_traded?.[x] ?? 0
+          const curDeep = chaosDeepById.get(x)
+          if (volX > 0 && (!curDeep || volX > (curDeep.volume_traded?.[x] ?? 0))) chaosDeepById.set(x, m)
         }
         const key = pairKeyOf(m)
         if (usable.has(key)) continue // newest-first walk -> newest usable wins
@@ -257,7 +288,7 @@ export function createFaustusPricer ({ league, deps = {} } = {}) {
       collected++
       id -= 3600
     }
-    return { byPair, chaosEnvById }
+    return { byPair, chaosEnvById, chaosDeepById }
   }
 
   // From the unioned markets, build metadata-id -> { chaos, min?, max?, sell? }.
@@ -265,7 +296,7 @@ export function createFaustusPricer ({ league, deps = {} } = {}) {
   // WITHOUT the volume/spread guards — the guards decide whether we price at
   // all, not how wide the market was). Omitted when there is no usable range,
   // never guessed.
-  async function buildDetailById (byPair, chaosEnvById = new Map()) {
+  async function buildDetailById (byPair, chaosEnvById = new Map(), chaosDeepById = new Map()) {
     // id -> Map(counterpartId -> market)
     const marketOf = new Map()
     const allIds = new Set()
@@ -304,6 +335,61 @@ export function createFaustusPricer ({ league, deps = {} } = {}) {
 
       // 1. + 2. X<->Chaos: volume-weighted primary, extremes-midpoint fallback.
       if (cm) chaos = volumeRateXperQuote(cm, x, CHAOS) ?? rateXperQuote(cm, x, CHAOS)
+
+      // CROSS-HOUR SANITY CHECK ON THE DIRECT CHAOS PATH: QUOTE_VOL_MIN is
+      // denominated in the quote currency, and how much quote currency moved
+      // depends on the very price under test — an inflated thin sample buys
+      // its own credibility. Broken Truce, 2026-08-05 hour 1785927600: 3
+      // cards traded for 66 chaos (22c/card) clears QUOTE_VOL_MIN[CHAOS]=50
+      // (66 >= 50) and SPREAD_LIMIT trivially (a single ratio, hi/lo = 1);
+      // poe.ninja said 6.3c, the trade-site ask was 1c/218 listings, and
+      // GGG's own Currency Exchange showed "No Stock". One hour earlier
+      // (1785924000) the SAME card traded 61 units for 346 chaos = 5.67c/card
+      // — 20x the volume, a fraction of the price.
+      //
+      // Measured over 302 thin-winning-hour Allflame-divination-card samples
+      // (13 sliding 8h union windows walked from live digests on 2026-08-05,
+      // cross-checked against poe.ninja): requiring only the winning hour's
+      // OWN X-side volume < 10 (THIN_X_UNITS = SELL_MIN_UNITS) is not enough
+      // by itself — most thin-hour prices are still fine, and an unconditional
+      // "thin winning hour" veto would have thrown away good prices as often
+      // as bad ones. Requiring in addition that some OTHER hour in the window
+      // traded >= 3x more of the item (DEEP_HOUR_VOL_RATIO) while itself
+      // clearing THIN_X_UNITS, AND that its rate disagrees by more than 2x
+      // (DEEP_HOUR_DISAGREE_RATIO), isolates the genuinely broken prices: at
+      // that gate, 16 of 302 fire, 15 have a winning-hour error against
+      // poe.ninja >= 30% (mean 366%, up to 970% — The Fishmonger, The
+      // Professor, Desperate Crusade, A Dusty Memory and Broken Truce are all
+      // in this bucket), and only 1 (Keeper's Corruption, 9% off) was a price
+      // that did not need discarding.
+      //
+      // What this deliberately does NOT do: swap in the deeper hour's rate
+      // instead of abstaining. Measured on the same 16 firings, the deeper
+      // hour usually IS the better number (lower error in 14 of 16) — but not
+      // always: Temperance's deep hour (67 units) priced 179% off poe.ninja
+      // against the thin hour's 39%, i.e. preferring it would have made that
+      // item MORE wrong, not less. There is no threshold tweak that fixes
+      // this without losing the cases it exists for — the two hours are two
+      // different (both real) trades, not one true value and one error, and
+      // nothing here can tell which is closer without an outside reference.
+      // Abstaining has no failure mode: the valuator's poe.ninja fallback
+      // takes over, same as the existing Jeweller's Boon fix a few lines
+      // down handles a different shape of the same "thin sample" problem.
+      if (chaos != null && cm) {
+        const winVolX = cm.volume_traded?.[x] ?? 0
+        if (winVolX < THIN_X_UNITS) {
+          const deepM = chaosDeepById.get(x)
+          const deepVolX = deepM ? (deepM.volume_traded?.[x] ?? 0) : 0
+          if (deepM && deepM !== cm && deepVolX >= THIN_X_UNITS &&
+              deepVolX >= DEEP_HOUR_VOL_RATIO * Math.max(winVolX, 1)) {
+            const deepRate = volumeRateXperQuote(deepM, x, CHAOS) ?? rateXperQuote(deepM, x, CHAOS)
+            if (deepRate != null) {
+              const disagree = Math.max(chaos, deepRate) / Math.min(chaos, deepRate)
+              if (disagree >= DEEP_HOUR_DISAGREE_RATIO) chaos = null
+            }
+          }
+        }
+      }
 
       // SELL-SIDE RATES (additive, consumed by the reference rail via
       // sell-side.mjs): the two per-market rates KEPT SEPARATE, plus the
@@ -460,7 +546,12 @@ export function createFaustusPricer ({ league, deps = {} } = {}) {
       // so a tighter band cuts good prices, not bad ones.
       if (chaos != null && dm && sell.chaos && sell.divine && chaosPerDivine != null &&
           sell.divine.volX >= BRIDGE_UNIT_RATIO * sell.chaos.volX &&
-          isAttested(sell.divine, chaosPerDivine)) {
+          // Turnover only, no unit floor — see isTurnoverAttested in
+          // sell-side.mjs for why, and for the 98% underpricing the unit floor
+          // caused here (Father's Love, rejected 3 units short of 10 while its
+          // turnover cleared the bar 11.8x, leaving a single 153-chaos sale to
+          // price an 8500-chaos card).
+          isTurnoverAttested(sell.divine, chaosPerDivine)) {
         const spanned = chaosEnvById.get(x)
         const env = (spanned && spanned.min < spanned.max) ? spanned : null
         const bridgedChaos = sell.divine.perItem * chaosPerDivine
@@ -526,8 +617,8 @@ export function createFaustusPricer ({ league, deps = {} } = {}) {
   async function buildDetailByName () {
     if (!baseNames) baseNames = await loadBaseNames()
     const byId = baseNames.byId
-    const { byPair, chaosEnvById } = await fetchUnion()
-    const detailById = await buildDetailById(byPair, chaosEnvById)
+    const { byPair, chaosEnvById, chaosDeepById } = await fetchUnion()
+    const detailById = await buildDetailById(byPair, chaosEnvById, chaosDeepById)
 
     const byName = new Map()
     const unmappedPrefixes = new Set()

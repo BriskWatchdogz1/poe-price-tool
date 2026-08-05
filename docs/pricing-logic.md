@@ -113,6 +113,49 @@ didn't happen to price in the current window.
   is 10 now: measured across a league's 74 divine-quoted markets in one hour the
   median volume was 5, so a floor of 2 admitted single trades — which is how one
   lone "2 divine for 30 regal" priced a Regal Orb at 5.67c.
+- **Cross-hour sanity check on the direct chaos path.** The quote-side floor
+  above is denominated in the quote currency, and how much quote currency
+  moved depends on the very price under test — an inflated thin sample buys
+  its own credibility. Live case: on 2026-08-05 the divination card *Broken
+  Truce* traded 3 cards for 66 chaos in one hour (22c/card), clearing the
+  50-chaos quote floor and the spread guard (a single ratio trivially agrees
+  with itself) — poe.ninja said 6.4c, the trade-site ask was 1c/218 listings,
+  and GGG's own in-game Currency Exchange showed "No Stock" for it. The hour
+  immediately before, the same card traded 61 units for 346 chaos = 5.67c/card
+  — 20× the volume, a fraction of the price.
+
+  The fix: when the hour that produced a market's rate traded fewer than 10
+  units of the item itself (**THIN_X_UNITS**, the same "one/two trades say
+  nothing" floor the sell-side comparison already uses), and some other hour
+  in the same union window traded at least 3× more of the item
+  (**DEEP_HOUR_VOL_RATIO**) while itself clearing that same 10-unit floor, and
+  the two hours' volume-weighted rates disagree by more than 2×
+  (**DEEP_HOUR_DISAGREE_RATIO**), the thin hour's price is **discarded, not
+  replaced** — the item falls through to the poe.ninja fallback rather than
+  being priced from either hour.
+
+  Discarding instead of preferring the deeper hour was a measured choice, not
+  a default to "safe": over 302 thin-winning-hour Allflame divination-card
+  samples (13 sliding union windows, live digests, checked against poe.ninja),
+  this three-part gate fires 16 times, 15 of which have a winning-hour error
+  ≥ 30 % (mean 366 %, up to 970 %) — but the deeper hour is not reliably
+  better. It usually is (lower error in 14 of 16), except when it isn't:
+  *Temperance*'s deeper hour (67 units) priced 179 % off poe.ninja against the
+  thin hour's 39 % — replacing would have made that item *more* wrong. The two
+  hours are two different real trades, not one true value and one error, and
+  nothing in the digest itself says which is closer without an outside
+  reference. Only 1 of the 16 firings (*Keeper's Corruption*, 9 % off) was a
+  price that did not need discarding at all — an acceptable cost for zero
+  chance of making a price worse.
+
+  Requiring the deeper hour to *itself* clear THIN_X_UNITS (not just beat the
+  thin hour proportionally) is what keeps this from becoming the two-sided
+  floor the quote-volume-floor note above warns against: an item that trades
+  1–3 units in *every* hour of the window never has a "deeper" hour to compare
+  against, so the check never fires and the item keeps its price — confirmed
+  against Mirror of Kalandra, Mirror Shard, The Doctor, The Apothecary,
+  Awakener's Orb, Hinekora's Lock and Voidborn Reliquary Key across the same 13
+  windows: unchanged in every one.
 - **A worse-evidenced chaos market does not outrank a better-evidenced divine
   one.** The item's own chaos market normally wins. It stops winning when the
   divine market traded at least **3× as many units** of the item *and* is itself
@@ -278,12 +321,41 @@ different (volume-based) confidence mechanism — see above.
 The `exchange/current/overview` routes (used for divination cards and as the
 stackable fallback) have no `count`. They carry `volumePrimaryValue` — that
 line's traded volume expressed in chaos — so `volumePrimaryValue / primaryValue`
-is the number of ITEMS behind the price. That figure is always a multiple of
-1/6, i.e. one traded unit; the valuator requires at least **0.5** (three units)
-before a line may win.
+is the number of ITEMS behind the price. A line may win by clearing EITHER of
+two floors: **10 traded units** (`MIN_EXCHANGE_UNITS`, the same bar
+`backend/v2/sell-side.mjs` uses for the reference rail) or **2000 chaos of
+turnover** (`MIN_EXCHANGE_TURNOVER_C`).
 
-The case that motivated it: **The Carrion Crow**, a card worth a few chaos, was
-listed at 1991c off a single trade. It is now honestly unpriced instead.
+The case that motivated replacing an earlier 0.5-unit floor: **The Trial** was
+listed at 1359c off a volume of 906, i.e. 0.67 units — two thirds of a single
+card traded in the whole window, enough under the old floor to enter a stash at
+7 divine per card.
+
+Why two floors and not just the unit count: a flat item count punishes
+expensive items systematically. **Father's Love** trades only ~4 times in the
+window while moving 41 607 chaos, because one card costs ~44 divine. A
+unit-only floor blanked exactly those lines — the same failure the
+`QUOTE_VOL_MIN` comment in `faustus.mjs` warns about ("an expensive X
+legitimately trades 1-3/hour while the chaos side is huge"). Units cannot tell
+"few trades because nobody wants it" from "few trades because each one is
+expensive"; total chaos moved can.
+
+The turnover floor may never vouch for a line **alone**, because turnover is
+units × price and the price is the number under test — an inflated price
+manufactures the turnover that backs it. The Trial at 1359c/0.67 units yields
+906 and is rejected, but the same 0.67 units at an inflated 3000c would yield
+2010 and pass. So the turnover branch additionally requires at least one
+COMPLETED trade (`MIN_EXCHANGE_TURNOVER_UNITS`). This is the same structural
+disease the cross-hour check above was built for.
+
+Measured live (Allflame, 916 lines across ten types): 189 lines fail the unit
+floor, 9 of them are rescued by turnover — Father's Love (8608c/41 607),
+The Miracle (3020c/11 074), Lucky Bastion (1918c/15 348), Pearls Before Swine,
+Choking Guilt, Brother's Gift, Outfoxed, Journey Tattoo of the Mind, Runegraft
+of the Angler. The most expensive line still rejected is The Sacrifice at 200c
+off 33 chaos of turnover — a fraction of one trade, the same shape as The
+Trial. Bulk markets are untouched: across Currency/Fragment/Scarab/Fossil/Oil
+essentially no genuinely liquid line falls below 10 units.
 
 ## Unique variants — matched by mod text, not by the variant string
 
