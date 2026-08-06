@@ -517,10 +517,14 @@ export function createFaustusPricer ({ league, deps = {} } = {}) {
       // removes the >100% lines but costs two others just as badly (Divine
       // Justice 22-26% -> 66%). Also not taken.
       //
-      // On the DIVINE side the full attestation stays, and it is load-bearing:
+      // On the DIVINE side an attestation stays, and it is load-bearing:
       // without it the coarse "1 div : N items" quantisation takes over and
       // Breach Scarab of the Marshal (really 1.26c) prices at 184c off a single
-      // 1-divine trade.
+      // 1-divine trade. Since 2026-08-05 it is the TURNOVER half only
+      // (isTurnoverAttested): the unit half rejected Father's Love for being 3
+      // units short while its turnover cleared the bar 11.8x, and a lone
+      // 153-chaos sale then priced a card worth ~8500. The Breach Scarab case
+      // still fails on turnover, so nothing it guarded came back.
       //
       // THE ENVELOPE HERE SPANS THE WHOLE UNION WINDOW, NOT ONE HOUR, and a
       // degenerate one is ignored. It used to be the newest informative hour

@@ -158,10 +158,19 @@ didn't happen to price in the current window.
   windows: unchanged in every one.
 - **A worse-evidenced chaos market does not outrank a better-evidenced divine
   one.** The item's own chaos market normally wins. It stops winning when the
-  divine market traded at least **3× as many units** of the item *and* is itself
-  **attested** — attested meaning at least 10 traded units AND 5000 chaos of
-  turnover on that side, the same bar the sell-side comparison uses. The bridged
-  price still has to pass the envelope below.
+  divine market traded at least **3× as many units** of the item *and* moved at
+  least **5000 chaos of turnover** on that side (`isTurnoverAttested`). The
+  bridged price still has to pass the envelope below.
+
+  That turnover bar is the sell-side comparison's, but **without its companion
+  10-unit floor**, which the bridge deliberately does not apply. The two ask
+  different questions — the comparison claims which currency pays a seller more,
+  the bridge decides which side sets the price — and a flat unit count punishes
+  whatever is expensive: Father's Love, a card worth ~44 divine, traded 7 of
+  itself for 305 divine and was rejected 3 units short of 10, so a single
+  153-chaos sale priced it at 153 instead of ~8500. Every bogus side in the
+  sell-side measurement table fails on turnover anyway, and three of them clear
+  the unit floor comfortably, so dropping it here costs no guard.
 
   The comparison is *relative*. It used to be an absolute bar ("the chaos side
   traded fewer than 10 units"), which never asked which of the two sides was the
