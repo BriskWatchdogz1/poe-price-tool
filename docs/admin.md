@@ -214,6 +214,10 @@ In `docker-compose.yml` under `environment:` as a commented-out template:
 | `POE_TRADE_AUDIT` | on | `0` disables the trade rate-limit bookkeeping (the two `[trade-audit]` lines). Observation only — it never influences pacing |
 | `POE_TRADE_AUDIT_THRESHOLD` | `0.8` | fraction of a rate-limit window that triggers the "getting tight" line |
 | `POE_DATA_STALE_TICKS` | `3` | how many missed checks make a source "stale" in the UI status line. Relative to `POE_DATA_REFRESH_MS` (3 × 24 h = 3 days), never an absolute duration |
+| `POE_ASK_CONFLICT_RATIO` | `4` | how far an exchange headline and the trade-site asks must diverge before the card marks them as disagreeing (`Exchange — asks disagree`). Measured against the ask MEDIAN when the headline is the higher one, against the CHEAPEST ask when it is the lower one |
+| `POE_ASK_CONFLICT_ABS_GAP_C` | `5` | absolute chaos gap required on top of that ratio, so near-floor items — where 1-chaos walls are endemic — do not trip it |
+| `POE_MIN_ASK_EVIDENCE` | `5` | minimum listing count before the asks may contradict the headline at all; below that the ask median is itself noise |
+| `POE_MIN_CONFLICT_HEADLINE_C` | `1` | headlines below this are never marked: the trade site cannot list under 1 chaos, so sub-chaos fungibles would trip on granularity alone |
 
 > **Per-deployment settings go in a (gitignored) `docker-compose.override.yml`** next to the
 > compose file — `git pull` never touches it, so they survive updates. Put your user list
