@@ -218,6 +218,9 @@ In `docker-compose.yml` under `environment:` as a commented-out template:
 | `POE_ASK_CONFLICT_ABS_GAP_C` | `5` | absolute chaos gap required on top of that ratio, so near-floor items — where 1-chaos walls are endemic — do not trip it |
 | `POE_MIN_ASK_EVIDENCE` | `5` | minimum listing count before the asks may contradict the headline at all; below that the ask median is itself noise |
 | `POE_MIN_CONFLICT_HEADLINE_C` | `1` | headlines below this are never marked: the trade site cannot list under 1 chaos, so sub-chaos fungibles would trip on granularity alone |
+| `POE_SESSID` | unset | POESESSID for a single user, as an alternative to `networth-users.json`. Only takes effect together with `POE_NETWORTH_ACCOUNT` |
+| `POE_NETWORTH_ACCOUNT` | unset | account name in full `Name#1234` form belonging to `POE_SESSID`; the short name alone gets a 403 |
+| `POE_NETWORTH_USER` | first entry of `POE_USERS` | which user the `POE_SESSID`/`POE_NETWORTH_ACCOUNT` pair belongs to |
 
 > **Per-deployment settings go in a (gitignored) `docker-compose.override.yml`** next to the
 > compose file — `git pull` never touches it, so they survive updates. Put your user list
