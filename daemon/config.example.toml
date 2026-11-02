@@ -9,7 +9,8 @@
 # desktop shortcut, or the software of a programmable input device. Then hover
 # an item, press the key, and it appears in the browser.
 #
-# A `key = "..."` entry is ignored; the daemon does not read one.
+# A leftover `key = "..."` entry is ignored: the daemon reads it only to print
+# a note that it is deprecated and has no effect.
 
 # Backend address. Local: http://127.0.0.1:8788. Behind a reverse proxy with
 # enforced HTTPS, use the https URL.
@@ -17,6 +18,15 @@ backend_url = "http://127.0.0.1:8788"
 
 # User namespace — must be in the backend's POE_USERS list.
 user = "player1"
+
+# What a copied PoE item looks like. The game writes the item-class line in the
+# CLIENT's language, so this follows your game language, not the daemon:
+#   English client -> "Item Class: "
+#   German client  -> "Gegenstandsklasse: "
+# Clipboard contents starting with none of these are ignored silently (every
+# Ctrl+C in the game lands here). Listing several is fine and costs nothing —
+# useful if you switch the client language.
+item_prefixes = ["Item Class: "]
 
 # Window class used to detect PoE (substring, case-insensitive) — used for
 # the CHAT MACROS focus gate below (price check itself is clipboard-driven

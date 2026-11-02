@@ -1,6 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { lastHour, rateXperQuote, createFaustusPricer, isInformativeMarket } from './faustus.mjs'
+import { isTooOld } from './faustus-age.mjs'
 
 const CHAOS = 'Metadata/Items/Currency/CurrencyRerollRare'
 const DIVINE = 'Metadata/Items/Currency/CurrencyModValues'
@@ -823,4 +824,223 @@ test('guard: an expensive item that legitimately trades 1-3 units every hour, wi
   }
   const d = await btPricer(byHour, now).detailByName()
   assert.equal(d.get('Broken Truce')?.chaos, 100000, 'a consistently thin but expensive market must keep its price')
+})
+
+// ---------------------------------------------------------------------------
+// detail.at — WHICH HOUR a price was observed in
+//
+// The union walk takes the newest hour in which a market was informative, so
+// two prices from the same refresh tick can be hours apart. Without this stamp
+// nothing downstream can tell them apart, which is how a card whose market had
+// moved on could sit next to a card whose market had not, both labelled the
+// same (see faustus-age.mjs for the two live cards).
+// ---------------------------------------------------------------------------
+
+test('detail.at names the hour the winning market came from, per item', async () => {
+  const d = await createFaustusPricer({ league: 'Standard', deps: makeDeps() }).detailByName()
+  // Item A traded in the newest hour AND in the older one; the newest wins, and
+  // the stamp has to follow the market that won, not the walk that found it.
+  assert.equal(d.get('Item A').chaos, 10)
+  assert.equal(d.get('Item A').at, HOUR_NEW)
+  // Item B only ever traded in the older hour. Same map, same tick, one hour
+  // older — and that is exactly the difference the store could not express.
+  assert.equal(d.get('Item B').chaos, 50)
+  assert.equal(d.get('Item B').at, HOUR_OLD)
+  assert.notEqual(d.get('Item A').at, d.get('Item B').at,
+    'two prices from one refresh must be able to carry different ages')
+})
+
+test('a bridged price inherits the DIVINE market hour, because that is the observation', async () => {
+  // Item Y has no chaos market at all and is priced through its divine one. The
+  // age of a price is the age of the market it came from — quoting the chaos
+  // market's hour there would time-stamp a number that market never produced.
+  const d = await createFaustusPricer({ league: 'Standard', deps: makeDeps() }).detailByName()
+  assert.equal(d.get('Item Y').chaos, 200)
+  assert.equal(d.get('Item Y').at, HOUR_NEW)
+})
+
+test('Chaos Orb carries no hour: 1 is a definition, not an observation', async () => {
+  const d = await createFaustusPricer({ league: 'Standard', deps: makeDeps() }).detailByName()
+  assert.equal(d.get('Chaos Orb').chaos, 1)
+  assert.equal(d.get('Chaos Orb').at, undefined)
+})
+
+test('the range is ONE hour of the walk, not the span of the walked hours', async () => {
+  // The reading this pins down, because the card prints it and a reader can
+  // take it either way: min/max describe the hour the price came from. The
+  // union window is walked to FIND that hour, never to blend several. Here the
+  // newest hour spans 100..110c while an older hour spans 100..900c, and the
+  // range must be the newest hour's alone.
+  const X = 'Metadata/Items/Currency/CurrencyDual'
+  const names = { byId: new Map([[CHAOS, 'Chaos Orb'], [DIVINE, 'Divine Orb'], [X, 'Dual Item']]) }
+  const newest = [mk([X, CHAOS], { [X]: 1, [CHAOS]: 100 }, { [X]: 1, [CHAOS]: 110 }, { [X]: 10, [CHAOS]: 1050 })]
+  const older = [mk([X, CHAOS], { [X]: 1, [CHAOS]: 100 }, { [X]: 1, [CHAOS]: 900 }, { [X]: 20, [CHAOS]: 4000 })]
+  const d = await createFaustusPricer({
+    league: 'Standard',
+    deps: {
+      now: () => NOW,
+      baseNames: names,
+      fetchHour: async id => {
+        if (id === HOUR_NEW) return { next_change_id: id + 1, markets: newest }
+        if (id === HOUR_OLD) return { next_change_id: id + 1, markets: older }
+        return null
+      }
+    }
+  }).detailByName()
+  assert.deepEqual([d.get('Dual Item').min, d.get('Dual Item').max], [100, 110])
+  assert.equal(d.get('Dual Item').at, HOUR_NEW)
+})
+
+// ---------------------------------------------------------------------------
+// B20 — the four measurements of 2026-08-13 (Allflame), tool against the
+// in-game Currency Exchange at the same minute:
+//
+//   card                    tool     in-game sell        in-game buy   bid?
+//   Imperfect Memories       19c     21c   (21:1)            38c       yes
+//   The Chosen            206.6c    147c  (147:1)           180c       yes
+//   Imperial Legacy         ~4.6c    1 chaos per 14      1c            NO STOCK
+//   The Fathomless Depths     15c    1 chaos per 2       -             NO STOCK
+//
+// The pattern is BINARY: where a bid exists the tool sits at 0.9-1.4x, where
+// the exchange reports "No Stock" it sits 30-70x high. Nothing this tool
+// fetches carries a bid, an ask or stock — the digest has matched trades only
+// (market_pair, lowest/highest_ratio, volume_traded) — so "no bid" is not
+// observable here, and these tests do NOT pretend to reproduce the digests
+// behind those four numbers. They are RECONSTRUCTIONS of the CHEAPEST market
+// each headline could have come from, i.e. exactly the evidence the guards in
+// faustus.mjs demand and no more. What they pin is how little that is.
+//
+// They pin CURRENT behaviour, including where it is wrong. A fix for B20 is
+// expected to flip the two "No Stock" cases to unpriced — see docs/bugs.md.
+// ---------------------------------------------------------------------------
+const B20 = {
+  imperialLegacy: 'Metadata/Items/DivinationCards/DivinationCardImperialLegacy',
+  fathomless: 'Metadata/Items/DivinationCards/DivinationCardFathomlessDepths',
+  imperfectMemories: 'Metadata/Items/DivinationCards/DivinationCardImperfectMemories',
+  chosen: 'Metadata/Items/DivinationCards/DivinationCardTheChosen'
+}
+const b20Names = {
+  byId: new Map([
+    [CHAOS, 'Chaos Orb'], [DIVINE, 'Divine Orb'],
+    [B20.imperialLegacy, 'Imperial Legacy'],
+    [B20.fathomless, 'The Fathomless Depths'],
+    [B20.imperfectMemories, 'Imperfect Memories'],
+    [B20.chosen, 'The Chosen']
+  ])
+}
+// byHour: { <unix hour>: markets[] }. Everything else is absent -> step back.
+const b20Pricer = (byHour, nowSec = NOW) => createFaustusPricer({
+  league: 'Standard',
+  deps: {
+    now: () => nowSec,
+    baseNames: b20Names,
+    fetchHour: async id => (byHour[id] ? { next_change_id: id + 1, markets: byHour[id] } : null)
+  }
+})
+
+test('B20: 50 chaos in ONE of eight hours is the whole bar — 11 cards for 50 chaos price a card the exchange has no bid for', async () => {
+  // Imperial Legacy, tool ~4.6c against 14 cards per chaos (0.071c) in game.
+  // QUOTE_VOL_MIN[CHAOS] = 50 is the only ABSOLUTE evidence bar on the direct
+  // chaos path, and 50 chaos is under half a divine: at the tool's own price
+  // that is eleven pieces of a card nobody is bidding on.
+  const m = mk([B20.imperialLegacy, CHAOS],
+    { [B20.imperialLegacy]: 1, [CHAOS]: 4 }, { [B20.imperialLegacy]: 1, [CHAOS]: 5 },
+    { [B20.imperialLegacy]: 11, [CHAOS]: 50 })
+  const d = await b20Pricer({ [HOUR_NEW]: [m] }).detailByName()
+  assert.ok(approx(d.get('Imperial Legacy').chaos, 50 / 11),
+    'the reported ~4.6c needs nothing but the quote floor exactly met')
+  // 64x the side a seller actually collects (1 chaos per 14 cards).
+  assert.ok(d.get('Imperial Legacy').chaos / (1 / 14) > 60)
+
+  // One chaos less and the same market is not evidence at all — the bar is a
+  // step, and the two sides of it are 4.5c and unpriced.
+  const thin = mk([B20.imperialLegacy, CHAOS],
+    { [B20.imperialLegacy]: 1, [CHAOS]: 4 }, { [B20.imperialLegacy]: 1, [CHAOS]: 5 },
+    { [B20.imperialLegacy]: 11, [CHAOS]: 49 })
+  const d2 = await b20Pricer({ [HOUR_NEW]: [thin] }).detailByName()
+  assert.equal(d2.get('Imperial Legacy'), undefined)
+})
+
+test('B20: the cross-hour check is a UNIT count, so it is blind at the cheap end — 11 pieces outrank an hour with 700', async () => {
+  // The same 11-cards-for-50-chaos hour, this time with the card's REAL market
+  // one hour older: 700 cards for 50 chaos = 0.071c, the in-game sell side.
+  // THIN_X_UNITS is 10 PIECES, and 11 pieces of a 0.07c card — 0.8 chaos of
+  // merchandise — already count as "not thin", so the deeper hour is never
+  // consulted. This is the mirror image of the lesson the same repo learned
+  // three times at the expensive end (sell-side.mjs isTurnoverAttested,
+  // valuator.mjs MIN_EXCHANGE_TURNOVER_C): a flat piece count measures how
+  // cheap an item is, not how well evidenced it is.
+  const winner = { [B20.imperialLegacy]: 1, [CHAOS]: 4 }
+  const winnerHi = { [B20.imperialLegacy]: 1, [CHAOS]: 5 }
+  const real = mk([B20.imperialLegacy, CHAOS],
+    { [B20.imperialLegacy]: 14, [CHAOS]: 1 }, { [B20.imperialLegacy]: 14, [CHAOS]: 1 },
+    { [B20.imperialLegacy]: 700, [CHAOS]: 50 })
+
+  const priced = await b20Pricer({
+    [HOUR_NEW]: [mk([B20.imperialLegacy, CHAOS], winner, winnerHi, { [B20.imperialLegacy]: 11, [CHAOS]: 50 })],
+    [HOUR_OLD]: [real]
+  }).detailByName()
+  assert.ok(approx(priced.get('Imperial Legacy').chaos, 50 / 11),
+    '11 pieces beat 700 pieces at 1/64 of the price, because 11 >= THIN_X_UNITS')
+
+  // Two pieces fewer and the very same window is read the other way round.
+  const unpriced = await b20Pricer({
+    [HOUR_NEW]: [mk([B20.imperialLegacy, CHAOS], winner, winnerHi, { [B20.imperialLegacy]: 9, [CHAOS]: 50 })],
+    [HOUR_OLD]: [real]
+  }).detailByName()
+  assert.equal(unpriced.get('Imperial Legacy'), undefined,
+    'below the piece count the deeper hour is consulted and the price is discarded')
+})
+
+test('B20: a market with no other hour has no deeper hour to be checked against — 4 cards for 60 chaos stand', async () => {
+  // The Fathomless Depths, tool 15c against 2 cards per chaos (0.5c) in game.
+  // Here the winning hour IS thin by the unit count (4 < 10), so the
+  // cross-hour check triggers — and abstains, because a card nobody bids on
+  // does not trade in the other seven hours either. That abstention is
+  // deliberate (it is what keeps Mirror of Kalandra priced); the point is that
+  // a no-bid market and a genuinely rare one look identical from here.
+  const winner = mk([B20.fathomless, CHAOS],
+    { [B20.fathomless]: 1, [CHAOS]: 14 }, { [B20.fathomless]: 1, [CHAOS]: 16 },
+    { [B20.fathomless]: 4, [CHAOS]: 60 })
+  const d = await b20Pricer({ [HOUR_NEW]: [winner] }).detailByName()
+  assert.equal(d.get('The Fathomless Depths').chaos, 15, 'the reported 15c, off 60 chaos in one hour')
+  assert.ok(15 / 0.5 === 30) // 30x the in-game sell side
+
+  // Give the same card ONE ordinary hour and the existing guard does fire.
+  const withReal = await b20Pricer({
+    [HOUR_NEW]: [winner],
+    [HOUR_OLD]: [mk([B20.fathomless, CHAOS],
+      { [B20.fathomless]: 2, [CHAOS]: 1 }, { [B20.fathomless]: 2, [CHAOS]: 1 },
+      { [B20.fathomless]: 200, [CHAOS]: 100 })]
+  }).detailByName()
+  assert.equal(withReal.get('The Fathomless Depths'), undefined,
+    'the cross-hour check needs a market that trades at all — which is exactly what "No Stock" means it does not')
+})
+
+test('B20: the two cards WITH a bid come out of the identical path, and nothing in the digest separates them from the two without', async () => {
+  // Imperfect Memories: 19c against an in-game sell of 21 and buy of 38 — the
+  // tool sits 10 % BELOW the side a seller collects, which is why a systematic
+  // market-side offset cannot be the explanation (B17).
+  const im = mk([B20.imperfectMemories, CHAOS],
+    { [B20.imperfectMemories]: 1, [CHAOS]: 18 }, { [B20.imperfectMemories]: 1, [CHAOS]: 20 },
+    { [B20.imperfectMemories]: 40, [CHAOS]: 760 })
+  const d = await b20Pricer({ [HOUR_NEW]: [im] }).detailByName()
+  assert.equal(d.get('Imperfect Memories').chaos, 19)
+  assert.ok(19 < 21, 'below the bid — no side offset produces that')
+
+  // The Chosen: 206.6c, the hour spanning 142..300, against 147/180 in game.
+  // Same shape as Imperial Legacy above — one hour, one volume-weighted
+  // average — and the only thing that differs is how much moved (2066 chaos
+  // against 50). That difference is not a rule anywhere in this file.
+  const tc = mk([B20.chosen, CHAOS],
+    { [B20.chosen]: 1, [CHAOS]: 142 }, { [B20.chosen]: 1, [CHAOS]: 300 },
+    { [B20.chosen]: 10, [CHAOS]: 2066 })
+  const d2 = await b20Pricer({ [HOUR_NEW]: [tc] }).detailByName()
+  assert.ok(approx(d2.get('The Chosen').chaos, 206.6))
+  assert.deepEqual([d2.get('The Chosen').min, d2.get('The Chosen').max], [142, 300])
+  // What is wrong with THIS one is its age, not its evidence: the observation
+  // is carried and the valuator's gate (B17) is what retires it.
+  const at = d2.get('The Chosen').at
+  assert.equal(at, HOUR_NEW)
+  assert.equal(isTooOld(at, { now: (at + 3600 + 7 * 3600) * 1000, maxMs: 6 * 3600 * 1000 }), true)
 })

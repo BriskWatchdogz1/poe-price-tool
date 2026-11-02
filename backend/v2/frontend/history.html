@@ -79,6 +79,43 @@
     /* Falling stretch of the curve — the direction must read between the dots,
        not only on them. */
     .tline.dn{stroke:var(--crit);}
+    /* The C:D rate over the same window, on its OWN min/max (sparkline manner)
+       with two small edge labels. Pale and dashed so it stays behind the curve
+       it explains — and deliberately without a second value axis: a plot with
+       axes on both sides is read wrong more often than it is read. */
+    .rline{fill:none; stroke:var(--divine); stroke-width:1.25; stroke-dasharray:4 4; opacity:.4;}
+    .ratelbl{fill:var(--divine); opacity:.6; font-size:10px; font-family:var(--mono);}
+    /* The (i) at the top of the plot: closed it is a labelled pill, open it is
+       four sentences.
+
+       It used to be a bare 18px circle holding one glyph, and nobody who did
+       not already know found it. The reason is in the palette, not in the eye:
+       every surface here is near-black, so a border sits at 1.1:1 against the
+       box behind it (1.14 for this one) and a panel fill at 1.09 — on this page
+       a border is texture, never the affordance. What makes .seg button and
+       .allmods findable is their LABEL at ~5:1 plus real padding, and a control
+       whose entire content was an 11.5px glyph had none of that.
+
+       So it now wears exactly that shape: bordered pill, --panel fill, --muted
+       label, the same radius and padding as the buttons above it. No signal
+       colour and no new vocabulary — the word does the finding. The badge keeps
+       the (i) meaning, the caret is the ▾ that .whoami and .modbar already use
+       for "this opens", rotated when it is open. The native marker stays off so
+       there is not a second triangle beside the first. */
+    .unitinfo{margin:0 0 8px;}
+    .unitinfo > summary{display:inline-flex; align-items:center; gap:7px; font:inherit; font-size:12px;
+      color:var(--muted); background:var(--panel); border:1px solid var(--border); border-radius:8px;
+      padding:5px 11px; cursor:pointer; user-select:none; list-style:none;}
+    .unitinfo > summary::-webkit-details-marker{display:none;}
+    .unitinfo > summary::marker{content:'';}
+    .unitinfo .ico{flex:none; width:15px; height:15px; border-radius:50%; border:1px solid currentColor;
+      font-size:10.5px; line-height:13px; text-align:center;}
+    .unitinfo .caret{flex:none; font-size:10px; transition:transform .2s;}
+    .unitinfo[open] > summary{color:var(--text); border-color:var(--chaos-deep);}
+    .unitinfo[open] .caret{transform:rotate(180deg);}
+    .unitinfo > summary:hover{color:var(--chaos); border-color:var(--chaos-deep);}
+    .unitinfo > summary:focus-visible{outline:2px solid var(--chaos); outline-offset:2px;}
+    .unitinfo p{margin:8px 0 2px; max-width:78ch; font-size:12.5px; line-height:1.6; color:var(--muted);}
   </style>
 </head>
 <body>
@@ -87,26 +124,27 @@
   <aside class="rail">
     <div class="logo">
       <span class="sq"></span>
-      <div><b>Trade Console</b><span>Path of Exile</span></div>
+      <div><b>Trade Console</b><span data-i18n="app.subtitle">Path of Exile</span></div>
       <div class="navlinks">
-        <button class="whoami" id="whoami" type="button" title="Switch user" hidden>
+        <button class="whoami" id="whoami" type="button" title="Switch user" data-i18n-title="nav.switchUser" hidden>
           <span id="whoamiName">—</span><span class="caret">▾</span>
         </button>
-        <a class="backlink" href="/">Price Check</a>
-        <a class="backlink" href="/networth.html">Net Worth</a>
-        <span class="backlink on" aria-current="page">History</span>
+        <a class="backlink" href="/" data-i18n="nav.pricecheck">Price Check</a>
+        <a class="backlink" href="/networth.html" data-i18n="nav.networth">Net Worth</a>
+        <span class="backlink on" aria-current="page" data-i18n="nav.history">History</span>
+        <a class="backlink" href="/settings.html" data-i18n="nav.settings">Settings</a>
       </div>
     </div>
 
     <div class="leaguebar">
-      <label for="leagueSel">League</label>
-      <select id="leagueSel" aria-label="Active league"><option>Standard</option></select>
+      <label for="leagueSel" data-i18n="rail.league">League</label>
+      <select id="leagueSel" aria-label="Active league" data-i18n-aria="rail.leagueAria"><option>Standard</option></select>
     </div>
 
     <div class="cd">
-      <div class="cap">Chaos → Divine</div>
-      <div class="rate"><span class="v" id="cdValue">—</span><span class="u">chaos / div</span></div>
-      <div class="conv"><span class="d">1 Divine</span> = <span class="c" id="cdConv">—</span> Chaos</div>
+      <div class="cap" data-i18n="rail.cdCap">Chaos → Divine</div>
+      <div class="rate"><span class="v" id="cdValue">—</span><span class="u" data-i18n="rail.cdUnit">chaos / div</span></div>
+      <div class="conv"><span class="d" data-i18n="rail.cdOneDivine">1 Divine</span> = <span class="c" id="cdConv">—</span> <span data-i18n="rail.cdChaos">Chaos</span></div>
       <svg class="spark" viewBox="0 0 240 34" preserveAspectRatio="none" aria-hidden="true">
         <defs><linearGradient id="sg" x1="0" x2="0" y1="0" y2="1">
           <stop offset="0" stop-color="#e4bb52" stop-opacity=".28"/><stop offset="1" stop-color="#e4bb52" stop-opacity="0"/>
@@ -115,26 +153,38 @@
         <path id="cdLine" d="M0,24 L240,11" fill="none" stroke="#e4bb52" stroke-width="1.5"/>
         <circle id="cdDot" cx="240" cy="11" r="2.4" fill="#e4bb52"/>
       </svg>
-      <div class="foot"><span>live ratio</span><span class="up" id="cdTrend">—</span></div>
+      <div class="foot"><span data-i18n="rail.cdLive">live ratio</span><span class="up" id="cdTrend">—</span></div>
     </div>
 
     <!-- R6 page rail content: what the shown window actually covers. -->
     <div class="railtabs cov" id="covBox" hidden>
-      <h3>This window</h3>
-      <div class="covrow"><span>Range</span><span id="covRange">—</span></div>
-      <div class="covrow"><span>Recorded</span><span id="covRec">—</span></div>
-      <div class="covrow"><span>Events</span><span id="covEv">—</span></div>
-      <div class="covrow"><span>Net change</span><span id="covNet">—</span></div>
-      <label class="fld covfld">Count as an event from
+      <h3 data-i18n="hi.window">This window</h3>
+      <div class="covrow"><span data-i18n="hi.covRange">Range</span><span id="covRange">—</span></div>
+      <div class="covrow"><span data-i18n="hi.covRecorded">Recorded</span><span id="covRec">—</span></div>
+      <div class="covrow"><span data-i18n="hi.covEvents">Events</span><span id="covEv">—</span></div>
+      <div class="covrow"><span data-i18n="hi.covNet">Net change</span><span id="covNet">—</span></div>
+      <!-- The rate belongs next to the net change, not somewhere else: a net
+           change in divine that went down while the chaos total went up is only
+           readable if the rate of the same window is on screen. -->
+      <div class="covrow"><span data-i18n="hi.covRate">C:D rate</span><span id="covRate">—</span></div>
+      <label class="fld covfld"><span data-i18n="hi.minLabel">Count as an event from</span>
         <select id="minSel">
-          <option value="0">everything recorded</option>
-          <option value="0.5">0.5 div</option>
-          <option value="1" selected>1 div</option>
-          <option value="3">3 div</option>
-          <option value="10">10 div</option>
+          <option value="0" data-i18n="hi.minAll">everything recorded</option>
+          <option value="0.5" data-i18n="hi.minDiv05">0.5 div</option>
+          <option value="1" selected data-i18n="hi.minDiv1">1 div</option>
+          <option value="3" data-i18n="hi.minDiv3">3 div</option>
+          <option value="10" data-i18n="hi.minDiv10">10 div</option>
         </select>
       </label>
-      <p class="covnote">Events are stock movements — what came in and what went
+      <!-- Only ONE note stands here permanently, and it is about the LIST.
+           How the divine figures are converted used to stand here too, word for
+           word what the (i) at the chart says on request — the button exists so
+           that explanation is not permanent, so having both defeated it. The
+           one sentence the rail carried alone (a chaos total can rise and the
+           window still be a net loss) moved into hi.unitInfo; nothing was
+           dropped. The C:D rate row above is a measurement, not prose, and
+           stays where the net change can be read against it. -->
+      <p class="covnote" data-i18n="hi.covNote">Events are stock movements — what came in and what went
         out. Price moves are in the curve, not in the list.</p>
     </div>
   </aside>
@@ -142,13 +192,13 @@
   <!-- MAIN -->
   <main class="main">
     <div class="mhead">
-      <h1>History</h1>
-      <span class="conn" id="conn"><span class="cdot"></span><span id="connlbl">connecting…</span></span>
+      <h1 data-i18n="hi.heading">History</h1>
+      <span class="conn" id="conn"><span class="cdot"></span><span id="connlbl" data-i18n="conn.connecting">connecting…</span></span>
     </div>
     <div class="statusline" id="appStatus" role="status" hidden></div>
 
     <div class="hbar">
-      <div class="seg" id="rangeSeg" role="group" aria-label="Time range">
+      <div class="seg" id="rangeSeg" role="group" aria-label="Time range" data-i18n-aria="hi.rangeAria">
         <button type="button" data-r="1h">1h</button>
         <button type="button" data-r="6h">6h</button>
         <button type="button" data-r="24h" class="on">24h</button>
@@ -160,18 +210,31 @@
     </div>
 
     <div class="chartbox">
-      <svg id="chart" viewBox="0 0 1000 260" preserveAspectRatio="none" role="img" aria-label="Net worth over time">
+      <!-- The one question this chart provokes — "why did it drop when I sold
+           nothing?" — answered where it is asked, at the value axis, and only
+           ON REQUEST. Native <details>, the same disclosure the unpriced block
+           on the Net Worth page and the admin samples use: keyboard-operable
+           and named by its summary without a line of JavaScript. A permanent
+           paragraph over the chart would be read twice and then never again.
+           On request is not the same as hidden, though: the summary carries a
+           visible label, the way the unpriced disclosure does. -->
+      <details class="unitinfo" id="unitInfo">
+        <summary aria-label="How the divine figures are calculated" data-i18n-aria="hi.unitInfoAria"><span class="ico" aria-hidden="true">i</span><span data-i18n="hi.unitInfoBtn">Divine figures</span><span class="caret" aria-hidden="true">▾</span></summary>
+        <p data-i18n="hi.unitInfo">Each point is converted with the C:D rate it had at that moment, never
+          with today’s — that is why the past no longer changes when the rate moves.</p>
+      </details>
+      <svg id="chart" viewBox="0 0 1000 260" preserveAspectRatio="none" role="img" aria-label="Net worth over time" data-i18n-aria="hi.chartAria">
         <defs><linearGradient id="hgrad" x1="0" x2="0" y1="0" y2="1">
           <stop offset="0" stop-color="#52c8ae" stop-opacity=".22"/>
           <stop offset="1" stop-color="#52c8ae" stop-opacity="0"/>
         </linearGradient></defs>
         <g id="chartBody"></g>
       </svg>
-      <p class="chartempty" id="chartEmpty" hidden>Collecting data…</p>
+      <p class="chartempty" id="chartEmpty" data-i18n="hi.collecting" hidden>Collecting data…</p>
     </div>
 
     <div class="evhead">
-      <h2>What moved</h2>
+      <h2 data-i18n="hi.whatMoved">What moved</h2>
       <span class="note" id="evNote"></span>
     </div>
     <div class="events" id="events"></div>
@@ -183,12 +246,13 @@
 <div class="idgate" id="idgate" hidden>
   <div class="idcard">
     <div class="idlogo"><span class="sq"></span></div>
-    <h2>Who are you?</h2>
-    <p>Used only for routing (your own league). No password.</p>
+    <h2 data-i18n="idgate.title">Who are you?</h2>
+    <p data-i18n="idgate.hintLeague">Used only for routing (your own league). No password.</p>
     <div class="idbtns" id="idbtns"></div>
   </div>
 </div>
 
+<script src="i18n.js"></script>
 <script src="shell.js"></script>
 <script type="module" src="history.js"></script>
 </body>

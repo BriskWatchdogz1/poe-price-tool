@@ -7,7 +7,13 @@
 // which one).
 import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
+import { quietEnv } from './test-quiet-env.mjs'
 
+// The full set that keeps a booted server off the network. One list, imported:
+// every file that wrote it out by hand left something out, and what kept being
+// left out was the switch a WebSocket needs (test-quiet-env.mjs, docs/bugs.md
+// B25). Applied FIRST — anything this file sets below overrides it on purpose.
+quietEnv()
 process.env.PORT = '0'
 process.env.POE_FAUSTUS_DISABLED = '1'
 process.env.POE_CORPSE_DISABLED = '1'

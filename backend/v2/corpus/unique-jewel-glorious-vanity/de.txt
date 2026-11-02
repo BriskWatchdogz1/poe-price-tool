@@ -1,0 +1,19 @@
+Gegenstandsklasse: Juwelen
+Seltenheit: Einzigartig
+Glorreiche Eitelkeit
+Immerwährendes Juwel
+--------
+Begrenzt auf: 1 Historisches
+Radius: Groß
+--------
+Gegenstandsstufe: 84
+--------
+{ Einzigartiger Modifikator }
+Gebadet im Blut der 901(100-8000), die im Namen von Doryani(Ahuana-Xibaqua) geopfert wurden
+Passive im Radius wurden von den Vaal erobert
+(Eroberte passive Fertigkeiten können nicht durch andere Juwelen modifiziert werden)
+Historisch
+--------
+Sie wähnten sich selbst als den Höhepunkt der Zivilisation, doch dieser Zenit stürzte ihr Reich.
+--------
+Platziere das Juwel in einer zugewiesenen Fassung im Fertigkeitenbaum. Mit Rechtsklick kannst du es aus seiner Fassung entfernen.

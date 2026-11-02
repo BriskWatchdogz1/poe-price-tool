@@ -25,6 +25,14 @@
 //   cd is stored PER POINT on purpose: reconstructing the divine value of an
 //   old point with today's ratio would fake movement that never happened.
 //
+//   AND EVERY READER HAS TO HONOUR IT, which is where this used to fall apart:
+//   the field was served (series() as the third column) and then not used —
+//   the history page divided every chaos figure it printed by the rate of the
+//   NEWEST point, so axis, tooltips, event rows and the window net were all
+//   re-valued whenever the rate ticked. events() therefore stamps each bucket
+//   with its own `cd` as well, and the page values a point at the rate it was
+//   recorded at.
+//
 // PRIVACY: only the local routing name (`u`, same key the store already uses)
 // is written. No accountName, and the POESESSID cookie never comes near this
 // module.
@@ -60,6 +68,19 @@ const DEFAULT_MAX_POINTS = 180                           // downsample cap per s
 //                old one when the item is gone entirely (removed units can only
 //                be valued at the price they had).
 // priceShare is therefore the revaluation of the stock that was already there.
+//
+// QUANTITY MEANS STOCK, NOT PRICED STOCK. The breakdown the diff runs on holds
+// every name that is IN THE STASH — the priced rows with their value, and the
+// unpriced names at a value of zero (all of them: the recorder folds the stored
+// tabs, not the snapshot's capped display list). Without the second half the
+// diff could only see the priced rows, and then an item that merely lost its
+// price left that set and read as an item leaving the stash; getting a price
+// back read as one arriving. Live case, six hours of an evening nobody played
+// (2026-08-14, Allflame): The Card Sharp +3/+12.6c at 09:37 and −3/−12.6c at
+// 10:16, Weeping Essence of Contempt +7/+18.8c at 05:37 and −7/−18.8c at 06:16
+// — mirror images to the decimal, on an untouched stash. See docs/bugs.md B2.
+// With the unpriced names in the map both directions come out as what they are:
+// quantity delta 0, the whole value change on the price side.
 //
 // The remainder `r` is not cosmetic: it is computed as (total delta − shown
 // items) so the panel always adds up to the header number. Nothing is silently
@@ -201,8 +222,64 @@ export function createNetworthHistory (filePath, {
 
     // Appends ONE point unless the last one for this user is younger than
     // minIntervalMs. Returns true when a point was actually recorded.
-    async append (user, { totalChaos, cdRatio, items } = {}) {
+    //
+    // `syncComplete === false` refuses the point outright. The snapshot handed
+    // in is the union of whatever the per-tab store happens to hold, and the
+    // refresher fills that store ONE TAB PER TICK — so between the moment the
+    // store is emptied (a fresh install, or pruneTabs after a tab list that
+    // came back short) and the moment the round-robin has been past every live
+    // tab, `totalChaos` is a sum over a strict subset of the account. Recorded,
+    // that is a dip in the curve that no stock movement explains and that
+    // nothing afterwards can tell apart from a real one. Averaging or
+    // interpolating it away later would only smear it; the point simply must
+    // not be written. Callers that cannot tell (tests, a manual replay) omit
+    // the flag and are unaffected.
+    // `unpriced` is the list of names that ARE in the stash but carry no price
+    // this minute (`{name, count}` where count is PIECES). It never adds a chaos
+    // to the point — it exists so the diff can tell "gone" from "still here,
+    // just not priced". A caller that omits it gets the old reading, in which
+    // the two are the same thing.
+    //
+    // IT HAS TO BE ALL OF THEM. The snapshot's own `unpriced` is capped at 100
+    // names for the page it is drawn on, and a name below that cut reads as gone
+    // here exactly as if the list had not been handed in at all — half a proof
+    // is not a proof. The server therefore folds the stored tabs uncapped
+    // (aggregate.mjs, unpricedStock) instead of forwarding the display list.
+    //
+    // `tabsChanged === true` says the snapshot was summed over a DIFFERENT SET
+    // OF STASH TABS than the one the last point saw — a tab was pruned out of
+    // the store, or one the store had never read has just been read for the
+    // first time. Neither is a stock movement, and both look exactly like one:
+    // every name in the tab appears or disappears at once, at its full stock and
+    // its full value. So the point is refused and the previous breakdown is
+    // FORGOTTEN, which is the same thing this function already does for a
+    // caller that hands in no items at all: the next point is then the first one
+    // on the new set and carries no delta, instead of carrying a delta against a
+    // stash that was measured differently.
+    //
+    // It refuses ONE point, not the series: the caller compares against the set
+    // it last SAW, so a tab that stays gone is unchanged from the next call on
+    // and recording continues (see recordNetworthHistory in server.mjs). This is
+    // the same balance `syncComplete` strikes — never stop for ever over a tab
+    // that will not come back.
+    async append (user, { totalChaos, cdRatio, items, unpriced, tabsChanged, syncComplete } = {}) {
       if (!user || typeof totalChaos !== 'number' || !Number.isFinite(totalChaos)) return false
+      if (syncComplete === false) return false
+      if (tabsChanged === true) {
+        // Before the throttle on purpose: the breakdown has to be dropped even
+        // when this call would not have written a point anyway, or the next one
+        // a minute later would diff across the change all the same.
+        lastItems.delete(user)
+        if (itemsFile.delete(user)) {
+          // …and out of the sidecar as well, or a restart would adopt it again:
+          // it is still anchored on the newest point, which is exactly the test
+          // loadLastItems applies. Never fatal — the sidecar can cost a delta,
+          // it can never falsify one.
+          itemsFile.writable = hist.writable
+          await itemsFile.save().catch(() => {})
+        }
+        return false
+      }
       const at = now()
       const last = hist.lastAt(user)
       if (last != null && (at - last) < minIntervalMs) return false
@@ -214,19 +291,25 @@ export function createNetworthHistory (filePath, {
       // anchor values shown in the panel).
       const prevPoint = lastPointOf(user)
       const prevItems = lastItems.get(user)
-      let curItems = items ? foldItems(items) : null
+      let curItems = items ? foldItems(items, unpriced) : null
       // Brake BEFORE the delta and before the total is used: a corrected item
       // must not appear in the panel as a price move, and the point's total has
       // to match the breakdown it is recorded with (see price-guard.mjs).
+      let released = null
       if (guard && curItems && prevItems && prevPoint) {
-        const g = guard.apply(user, prevItems, curItems, prevPoint.c)
-        if (g.adjust !== 0) {
-          curItems = g.items
-          point.c = round1(point.c + g.adjust)
-        }
+        // cdRatio: the arrival bar's floor is denominated in divine and needs
+        // this point's own rate. sourceOf: which feed priced each name, so a
+        // brake that fires says WHERE the number came from instead of leaving
+        // the next reader with the dead end the Scavenger night was.
+        const g = guard.apply(user, prevItems, curItems, prevPoint.c, {
+          cdRatio: point.cd, sourceOf: foldSources(items)
+        })
+        curItems = g.items
+        if (g.adjust !== 0) point.c = round1(point.c + g.adjust)
+        for (const n of (g.notes || [])) if (n.released) (released ||= new Set()).add(n.name)
       }
       if (curItems && prevItems && prevPoint) {
-        const d = buildDelta(prevItems, curItems, prevPoint, point.c)
+        const d = buildDelta(withoutReleased(prevItems, released), curItems, prevPoint, point.c)
         if (d) point.d = d
       }
       // No items handed in -> forget the old breakdown, otherwise the NEXT
@@ -314,16 +397,30 @@ export function createNetworthHistory (filePath, {
     // moves are deliberately dropped — they are what made the old panel a wall
     // of ±2c rows, and they are already in the curve's own height.
     //
+    // "Losing a price" is one of those price moves and not a movement of stock,
+    // which is why the breakdown the rows are derived from counts unpriced
+    // names as stock at zero (see foldItems). Before that, an item whose price
+    // flickered off and back on produced a departure and an arrival that were
+    // mirror images to the decimal, on a stash nobody had touched.
+    //
     // Derived from the stored deltas, so nothing new needs recording. Each
     // stored row is [name, dq, dv, priceShare], where dv - priceShare is the
     // part of the value change the quantity carries — that is what a stock
     // movement is worth.
     //
-    //   { range, events: [{ at, from, points, c, items: [[name, dq, chaos]], v }],
+    //   { range, events: [{ at, from, points, c, cd, items: [[name, dq, chaos]], v }],
     //     total, coverageMs, bucketMs }
     //
     // `v` is the event's summed stock value, the number the list sorts and
     // colours by. Events below EVENT_MIN_CHAOS never make the list.
+    //
+    // `cd` is the C:D rate OF THAT EVENT, taken from the same point the bucket
+    // is stamped with (like `c`). Without it the page had nothing but the
+    // newest rate of the series to print a two-week-old movement in divine
+    // with, so every historical figure moved with every rate tick — the exact
+    // thing storing `cd` per point exists to prevent (see the file header). It
+    // is 0 when that point carried no rate; the reader then falls back to the
+    // nearest point that has one rather than to "now".
     //
     // BUCKETING: raw points arrive about every 2.5 minutes, so a busy day
     // produced ~100 markers whose dots overlapped into a chain — the "too many
@@ -367,9 +464,10 @@ export function createNetworthHistory (filePath, {
         // every time the window slides forward a minute.
         const key = Math.floor((at - p.at) / bucket)
         let b = buckets.get(key)
-        if (!b) { b = { at: p.at, from: p.at, points: 0, c: p.c, sums: new Map() }; buckets.set(key, b) }
+        if (!b) { b = { at: p.at, from: p.at, points: 0, c: p.c, cd: p.cd, sums: new Map() }; buckets.set(key, b) }
         b.at = p.at   // the bucket is stamped with its LAST point…
         b.c = p.c     // …and carries the stock as of that point
+        b.cd = p.cd   // …and the rate that point was recorded at
         b.points++
         for (const [name, dq, dv, priceShare] of p.d.i) {
           if (!dq) continue
@@ -391,7 +489,7 @@ export function createNetworthHistory (filePath, {
         }
         if (!rows.length) continue
         rows.sort((x, y) => Math.abs(y[2]) - Math.abs(x[2]))
-        out.push({ at: b.at, from: b.from, points: b.points, c: b.c, items: rows, v: round1(v) })
+        out.push({ at: b.at, from: b.from, points: b.points, c: b.c, cd: Number(b.cd) || 0, items: rows, v: round1(v) })
       }
       return { range, events: out, total: out.length, coverageMs, retentionMs, bucketMs: bucket, minChaos: round1(minValue) }
     },
@@ -480,24 +578,146 @@ export function createNetworthHistory (filePath, {
   return hist
 }
 
-// items[] (snapshot rows: {name, qty, chaosTotal}) -> Map(name -> [qty, chaos]).
+// Did the set of stash tabs a user's snapshot is summed over change since the
+// last time this was asked? That is the question `append({ tabsChanged })`
+// needs answered, and it lives here rather than in the caller so the recorder
+// and its tests read the same rule out of one place.
+//
+// WHY THE SNAPSHOT'S OWN TABS AND NOT THE REFRESHER'S COVERAGE FLAG: coverage
+// is counted over the LIVE tab list, and both ways a tab can leave the snapshot
+// take it out of that list in the same moment — `pruneTabs` deletes stored tabs
+// precisely because the live list no longer names them. So coverage reads
+// `complete` straight across the change it would have to catch. The snapshot
+// knows which tabs its total was built from; that is the set worth comparing.
+//
+// ASKED, NOT RECORDED. The memory is updated on every call, including the ones
+// whose point is refused: the question is "is this different from last time",
+// and a difference that persists has to be answered ONCE and then be over.
+// Otherwise a tab deleted in game — or one that never becomes readable — would
+// stop the series for good, which is the failure mode this whole gate has to
+// avoid more than it has to avoid a wrong delta.
+export function createTabSetWatch () {
+  const seen = new Map()
+  const sizeOf = sig => (sig ? sig.split(',').length : 0)
+  return {
+    look (user, snap) {
+      const sig = (snap?.tabs || []).map(t => t.index).sort((a, b) => a - b).join(',')
+      const prev = seen.get(user)
+      seen.set(user, sig)
+      return {
+        changed: prev !== undefined && prev !== sig,
+        tabs: sizeOf(sig),
+        before: prev === undefined ? null : sizeOf(prev)
+      }
+    }
+  }
+}
+
+// items[] (snapshot rows: {name, qty, chaosTotal}) + unpriced[] ({name, count},
+// the stored tabs' uncapped fold) -> Map(name -> [qty, chaos]).
+//
 // Rows of the same item in several tabs / at several prices collapse into one
 // entry: the player asks "what came in", not "in which tab did it land".
-export function foldItems (items) {
+//
+// UNPRICED NAMES BELONG IN HERE, at a value of zero. They are stock — the
+// player owns them, they are in the stash, and the only thing missing is a
+// number for them. Leaving them out made the map a list of PRICED items, and a
+// diff of two such lists cannot tell an item that left from one whose price
+// went away (see the header). Zero is the honest value: the same "unpriced
+// never enters the sum as 0" rule aggregate.mjs states, read the other way
+// round — it contributes nothing to any total, and it is not silently absent.
+//
+// A name that is priced in one tab and unpriced in another lands in one entry
+// with the pieces of both and only the value of the priced ones, so its unit
+// price comes out averaged over the whole stock. That is the one case this
+// fold cannot separate; it needs a name whose valuation route answers for one
+// stash entry and not for another, which no route does today.
+export function foldItems (items, unpriced) {
   const map = new Map()
-  if (!Array.isArray(items)) return map
-  for (const it of items) {
-    const name = it && typeof it.name === 'string' ? it.name : null
-    if (!name) continue
-    const q = Number(it.qty)
-    const v = Number(it.chaosTotal)
-    if (!Number.isFinite(v)) continue
-    const cur = map.get(name) || [0, 0]
-    cur[0] += Number.isFinite(q) ? q : 0
-    cur[1] += v
-    map.set(name, cur)
+  if (Array.isArray(items)) {
+    for (const it of items) {
+      const name = it && typeof it.name === 'string' ? it.name : null
+      if (!name) continue
+      const q = Number(it.qty)
+      const v = Number(it.chaosTotal)
+      if (!Number.isFinite(v)) continue
+      const cur = map.get(name) || [0, 0]
+      cur[0] += Number.isFinite(q) ? q : 0
+      cur[1] += v
+      map.set(name, cur)
+    }
+  }
+  if (Array.isArray(unpriced)) {
+    for (const u of unpriced) {
+      const name = u && typeof u.name === 'string' ? u.name : null
+      if (!name) continue
+      // `count` is PIECES, the same unit `qty` carries on a priced row.
+      const q = Number(u.count)
+      const cur = map.get(name) || [0, 0]
+      cur[0] += Number.isFinite(q) && q > 0 ? q : 0
+      map.set(name, cur)
+    }
   }
   return map
+}
+
+// items[] -> Map(name -> price source), for the price guard's log line only.
+// Never stored: this is about being able to say "that number came from Faustus"
+// while the incident is still on screen, not about keeping a second series.
+// A name valued from several tabs normally shares one source; when it does not,
+// all of them are named (sorted, so the line is stable) rather than one picked.
+export function foldSources (items) {
+  const seen = new Map()
+  if (!Array.isArray(items)) return new Map()
+  for (const it of items) {
+    const name = it && typeof it.name === 'string' ? it.name : null
+    const src = it && typeof it.source === 'string' && it.source ? it.source : null
+    if (!name || !src) continue
+    const set = seen.get(name) || new Set()
+    set.add(src)
+    seen.set(name, set)
+  }
+  return new Map([...seen].map(([name, set]) => [name, [...set].sort().join('+')]))
+}
+
+// The previous breakdown AS THE SERIES KNEW IT, for the names the price guard
+// has just released (its notes carry `released`).
+//
+// A withheld arrival stands in the recorded points at NO value while its hold
+// lasts (price-guard.mjs), so the previous breakdown holds it at 0. Diffed
+// straight, the acceptance therefore reads as `dv` with `dq === 0`: a pure
+// price move on stock that was already there. It was not already there — not as
+// far as this series is concerned, which counted nothing for it — and booking
+// it that way costs twice over:
+//
+//   - events() drops rows without a quantity change (they are in the curve's
+//     own height), so a find worth twenty divine appears in no list at all and
+//     then jumps into the trend line unexplained; and
+//   - stockMove() reads the same row as "no stock moved", which is the single
+//     condition findSpikeRanges uses to tell an artefact from real wealth. A
+//     find that is picked up, released, and traded away again inside the spike
+//     window is then deleted from the history as a price artefact — the brake
+//     poisoning the evidence its own cleanup runs on.
+//
+// So the name is diffed against "not there": quantity delta = the whole stock,
+// value delta = its whole value, price share = 0. An inflow, stamped at the
+// point where the series could first count it. Nothing else about the point
+// changes, and the remainder still adds up to the header number, because
+// packDelta derives it from the point's own total.
+//
+// AND THIS IS NOT THE SAME CASE as an item that merely lost its price, even
+// though both stand in the previous breakdown at a value of zero. The
+// difference is not in the map, it is in what happened: a withheld arrival
+// ENTERED the stash and was only valued late, so its acceptance is a stock
+// movement the series owes the player. An item whose price went away never
+// went anywhere. Which of the two a zero is, is decided by the guard's own
+// `released` notes and by nothing that could be read back out of the value —
+// that is why `apply` reports a release it corrects nothing for.
+function withoutReleased (prevMap, released) {
+  if (!released || !released.size) return prevMap
+  const out = new Map(prevMap)
+  for (const name of released) out.delete(name)
+  return out
 }
 
 // Diff of two folded item maps -> the stored `d` object. `curTotal` is the
@@ -513,7 +733,12 @@ export function buildDelta (prevMap, curMap, prevPoint, curTotal) {
     const dq = q1 - q0
     if (Math.abs(dv) < DELTA_NOISE_CHAOS && dq === 0) continue
     // Unit price the quantity change is valued at: today's, unless the item is
-    // gone (then the units can only be valued at the price they had).
+    // gone from the stash (then the units can only be valued at the price they
+    // had). An item that is still there but has no price today has a `pRef` of
+    // ZERO — v1 is 0 over a positive q1 — which is what puts the whole value
+    // change on the price side and keeps it out of the events list. That is the
+    // point: nothing moved, the tool just stopped being able to say what it is
+    // worth.
     const pRef = q1 > 0 ? v1 / q1 : (q0 > 0 ? v0 / q0 : 0)
     const priceShare = dv - dq * pRef
     rows.push([name, round1(dq), round1(dv), round1(priceShare)])

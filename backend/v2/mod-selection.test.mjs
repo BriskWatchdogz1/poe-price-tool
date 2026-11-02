@@ -14,12 +14,30 @@
 import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { WebSocket } from 'ws'
+import { quietEnv } from './test-quiet-env.mjs'
 
+// The full set that keeps a booted server off the network. One list, imported:
+// every file that wrote it out by hand left something out, and what kept being
+// left out was the switch a WebSocket needs (test-quiet-env.mjs, docs/bugs.md
+// B25). Applied FIRST — anything this file sets below overrides it on purpose.
+quietEnv()
+// PRICING IS ON HERE, DELIBERATELY, and it is the one switch of the quiet set
+// this file turns back off: a manual search is the subject of this file. Nothing leaves
+// the machine for it — `fetch` is stubbed in this file, and the runner's guard
+// (test-net-guard.mjs) blocks anything that is not loopback anyway. Written out
+// rather than left implicit, because "this file prices" used to be visible only
+// as the ABSENCE of a line.
+delete process.env.POE_PRICE_CHECK_DISABLED
 process.env.PORT = '0'
 process.env.POE_FAUSTUS_DISABLED = '1'
 process.env.POE_CORPSE_DISABLED = '1'
 process.env.POE_DATA_REFRESH_DISABLED = '1'
 process.env.POE_REFERENCE_DISABLED = '1'
+// …and the reference warm-up a WS CONNECTION sets off, which the boot switch
+// above does not cover: every connection below opens a room whose league has a
+// cold cache, and that used to be two poe.ninja requests per run (docs/bugs.md
+// B12). Measured, not assumed — see server-no-network.test.mjs.
+process.env.POE_REFERENCE_ON_CONNECT_DISABLED = '1'
 process.env.POE_NETWORTH_AUTOSYNC = '0'
 // Dedicated rooms so these tests don't share state with any other suite.
 process.env.POE_USERS = 'seluser,replayuser'

@@ -1,0 +1,649 @@
+{
+  "_comment": [
+    "APT's own pseudo entries — computed filter rows, not game text. Recognisable",
+    "by the TRAILING SPACE in the matcher string (not in the ref): '# Crafted",
+    "Modifiers ', '+#% total to Fire Resistance '. They have no counterpart in the",
+    "game data at all, so the generator cannot derive them; they are maintained by",
+    "hand HERE, next to it, and go into the same coverage check.",
+    "The trailing space carries meaning and belongs in the value.",
+    "126 entries, the same number in the local and in the current upstream set —",
+    "they practically never change. Keys are the ENGLISH matcher string, values are",
+    "one entry per language code. 'ru' and 'ko' are taken verbatim from the sets APT",
+    "itself ships, which is what makes them the yardstick for the cross-check; 'de'",
+    "is hand written against the German client's own vocabulary (client_strings.js).",
+    "A pseudo matcher without an entry for the target language produces no matcher",
+    "and is listed in full by the generator."
+  ],
+  "matchers": {
+    "# Crafted Modifiers ": {
+      "de": "# Meisteranfertigungs-Modifikatoren ",
+      "ru": "# ремесленных свойств ",
+      "ko": "# 제작을 통한 속성 부여 "
+    },
+    "# Crafted Prefix Modifiers ": {
+      "de": "# Meisteranfertigungs-Präfix-Modifikatoren ",
+      "ru": "# ремесленных свойств-префиксов ",
+      "ko": "# 제작을 통한 접두어 속성 부여 "
+    },
+    "# Crafted Suffix Modifiers ": {
+      "de": "# Meisteranfertigungs-Suffix-Modifikatoren ",
+      "ru": "# ремесленных свойств-суффиксов ",
+      "ko": "# 제작을 통한 접미어 속성 부여 "
+    },
+    "# Empty Modifiers ": {
+      "de": "# leere Modifikatoren ",
+      "ru": "# пустых свойств ",
+      "ko": "# 빈 속성 부여 "
+    },
+    "# Empty Prefix Modifiers ": {
+      "de": "# leere Präfix-Modifikatoren ",
+      "ru": "# пустых свойств-префиксов ",
+      "ko": "# 빈 접두어 속성 부여 "
+    },
+    "# Empty Suffix Modifiers ": {
+      "de": "# leere Suffix-Modifikatoren ",
+      "ru": "# пустых свойств-суффиксов ",
+      "ko": "# 빈 접미어 속성 부여 "
+    },
+    "# Enchant Modifiers ": {
+      "de": "# Verzauberungs-Modifikatoren ",
+      "ru": "# зачарованных свойств ",
+      "ko": "# 인챈트 속성 부여 "
+    },
+    "# Fractured Modifiers ": {
+      "de": "# brüchige Modifikatoren ",
+      "ru": "# расколотых свойств ",
+      "ko": "# 분열된 속성 부여 "
+    },
+    "# Implicit Modifiers ": {
+      "de": "# implizite Modifikatoren ",
+      "ru": "# собственных свойств ",
+      "ko": "# 고정 속성 부여 "
+    },
+    "# Life Regenerated per Second ": {
+      "de": "# Leben-Regeneration pro Sekunde ",
+      "ru": "Регенерация # здоровья в секунду ",
+      "ko": "초당 생명력 재생 #% "
+    },
+    "# Modifiers ": {
+      "de": "# Modifikatoren ",
+      "ru": "# свойств ",
+      "ko": "# 속성 부여 "
+    },
+    "# Notable Passive Skills ": {
+      "de": "# bedeutende passive Fertigkeiten ",
+      "ru": "# Значимое пассивное умение ",
+      "ko": "# 주요 패시브 스킬 "
+    },
+    "# Prefix Modifiers ": {
+      "de": "# Präfix-Modifikatoren ",
+      "ru": "# свойств-префиксов ",
+      "ko": "# 접두어 속성 부여 "
+    },
+    "# Suffix Modifiers ": {
+      "de": "# Suffix-Modifikatoren ",
+      "ru": "# свойств-суффиксов ",
+      "ko": "# 접미어 속성 부여 "
+    },
+    "# total Elemental Resistances ": {
+      "de": "# Elementarwiderstände gesamt ",
+      "ru": "всего # сопротивления стихиям ",
+      "ko": "총 원소 저항력 # "
+    },
+    "# total Resistances ": {
+      "de": "# Widerstände gesamt ",
+      "ru": "всего # сопротивления ",
+      "ko": "총 저항 # "
+    },
+    "#% Base Defence Percentile ": {
+      "de": "#% Basisverteidigungs-Perzentil ",
+      "ru": "#% процента базовой защиты ",
+      "ko": "#% 기본 방어 백분위수 "
+    },
+    "#% chance for dropped Maps to convert to Atlas Memories ": {
+      "de": "#% Chance, dass fallengelassene Karten zu Atlaserinnerungen werden ",
+      "ru": "#% шанс преобразования выпавших карт в воспоминания Атласа ",
+      "ko": "떨어진 지도가 #%의 확률로 아틀라스 기억으로 변환 "
+    },
+    "#% chance for dropped Maps to convert to Conqueror Maps ": {
+      "de": "#% Chance, dass fallengelassene Karten zu Eroberer-Karten werden ",
+      "ru": "#% шанс преобразования выпавших карт в карты Завоевателей ",
+      "ko": "떨어진 지도가 #%의 확률로 정복자 지도로 변환 "
+    },
+    "#% chance for dropped Maps to convert to Elder Maps ": {
+      "de": "#% Chance, dass fallengelassene Karten zu Ältesten-Karten werden ",
+      "ru": "#% шанс преобразования выпавших карт в карты Древнего ",
+      "ko": "떨어진 지도가 #%의 확률로 엘더 지도로 변환 "
+    },
+    "#% chance for dropped Maps to convert to Maven Invitations ": {
+      "de": "#% Chance, dass fallengelassene Karten zu Einladungen der Seherin werden ",
+      "ru": "#% шанс преобразования выпавших карт в приглашения Мейвен ",
+      "ko": "떨어진 지도가 #%의 확률로 메이븐의 초대로 변환 "
+    },
+    "#% chance for dropped Maps to convert to Scarabs ": {
+      "de": "#% Chance, dass fallengelassene Karten zu Skarabäen werden ",
+      "ru": "#% шанс выпадения карт в виде скарабеев ",
+      "ko": "떨어진 지도가 #%의 확률로 갑충석으로 변환 "
+    },
+    "#% chance for dropped Maps to convert to Shaper Maps ": {
+      "de": "#% Chance, dass fallengelassene Karten zu Schöpfer-Karten werden ",
+      "ru": "#% шанс преобразования выпавших карт в карты Создателя ",
+      "ko": "떨어진 지도가 #%의 확률로 쉐이퍼 지도로 변환 "
+    },
+    "#% chance for dropped Maps to convert to Unique Maps ": {
+      "de": "#% Chance, dass fallengelassene Karten zu einzigartigen Karten werden ",
+      "ru": "#% шанс преобразования выпавших карт в уникальные карты ",
+      "ko": "떨어진 지도가 #%의 확률로 고유 지도로 변환 "
+    },
+    "#% increased Cold Spell Damage ": {
+      "de": "#% erhöhter Kältezauberschaden ",
+      "ru": "#% увеличение урона от холода чарами ",
+      "ko": "냉기 주문 피해 #% 증가 "
+    },
+    "#% increased Fire Spell Damage ": {
+      "de": "#% erhöhter Feuerzauberschaden ",
+      "ru": "#% увеличение урона от огня чарами ",
+      "ko": "화염 주문 피해 #% 증가 "
+    },
+    "#% increased Lightning Spell Damage ": {
+      "de": "#% erhöhter Blitzzauberschaden ",
+      "ru": "#% увеличение урона от молнии чарами ",
+      "ko": "번개 주문 피해 #% 증가 "
+    },
+    "#% of Life Regenerated per Second ": {
+      "de": "#% Leben-Regeneration pro Sekunde ",
+      "ru": "Регенерация #% здоровья в секунду ",
+      "ko": "초당 생명력 재생의 #% "
+    },
+    "#% total increased maximum Energy Shield ": {
+      "de": "#% erhöhter maximaler Energieschild gesamt ",
+      "ru": "Всего #% повышения энергетического щита ",
+      "ko": "에너지 보호막 최대치 총 #% 증가 "
+    },
+    "#% total increased Physical Damage ": {
+      "de": "#% erhöhter physischer Schaden gesamt ",
+      "ru": "Всего +#% к увеличению физического урона ",
+      "ko": "물리 피해 총 #% 증가 "
+    },
+    "+# total maximum Energy Shield ": {
+      "de": "+# maximaler Energieschild gesamt ",
+      "ru": "Всего +# к максимуму энергетического щита ",
+      "ko": "에너지 보호막 최대치 총 +# "
+    },
+    "+# total maximum Life ": {
+      "de": "+# maximales Leben gesamt ",
+      "ru": "Всего +# к максимуму здоровья ",
+      "ko": "생명력 최대치 총 +# "
+    },
+    "+# total maximum Mana ": {
+      "de": "+# maximales Mana gesamt ",
+      "ru": "Всего +# к максимуму маны ",
+      "ko": "마나 최대치 총 +# "
+    },
+    "+# total to all Attributes ": {
+      "de": "+# zu allen Attributen gesamt ",
+      "ru": "Всего +# ко всем характеристикам ",
+      "ko": "모든 능력치 총 +# "
+    },
+    "+# total to Dexterity ": {
+      "de": "+# zu Geschicklichkeit gesamt ",
+      "ru": "Всего +# к ловкости ",
+      "ko": "민첩 총 +# "
+    },
+    "+# total to Intelligence ": {
+      "de": "+# zu Intelligenz gesamt ",
+      "ru": "Всего +# к интеллекту ",
+      "ko": "지능 총 +# "
+    },
+    "+# total to Level of Socketed Aura Gems ": {
+      "de": "+# zur Stufe eingefasster Aura-Gemmen gesamt ",
+      "ru": "Всего +# к уровню размещённых камней аур ",
+      "ko": "장착한 오라 스킬 젬 레벨 총 +# "
+    },
+    "+# total to Level of Socketed Bow Gems ": {
+      "de": "+# zur Stufe eingefasster Bogen-Gemmen gesamt ",
+      "ru": "Всего +# к уровню размещённых камней луков ",
+      "ko": "장착한 활 스킬 젬 레벨 총 +# "
+    },
+    "+# total to Level of Socketed Chaos Gems ": {
+      "de": "+# zur Stufe eingefasster Chaos-Gemmen gesamt ",
+      "ru": "Всего +# к уровню размещённых камней хаоса ",
+      "ko": "장착한 카오스 스킬 젬 레벨 총 +# "
+    },
+    "+# total to Level of Socketed Cold Gems ": {
+      "de": "+# zur Stufe eingefasster Kälte-Gemmen gesamt ",
+      "ru": "Всего +# к уровню размещённых камней холода ",
+      "ko": "장착한 냉기 스킬 젬 레벨 총 +# "
+    },
+    "+# total to Level of Socketed Curse Gems ": {
+      "de": "+# zur Stufe eingefasster Fluch-Gemmen gesamt ",
+      "ru": "Всего +# к уровню размещённых камней проклятий ",
+      "ko": "장착한 저주 스킬 젬 레벨 총 +# "
+    },
+    "+# total to Level of Socketed Dexterity Gems ": {
+      "de": "+# zur Stufe eingefasster Geschicklichkeits-Gemmen gesamt ",
+      "ru": "Всего +# к уровню размещённых камней ловкости ",
+      "ko": "장착한 민첩 스킬 젬 레벨 총 +# "
+    },
+    "+# total to Level of Socketed Elemental Gems ": {
+      "de": "+# zur Stufe eingefasster Elementar-Gemmen gesamt ",
+      "ru": "Всего +# к уровню размещённых камней стихий ",
+      "ko": "장착한 원소 스킬 젬 레벨 총 +# "
+    },
+    "+# total to Level of Socketed Fire Gems ": {
+      "de": "+# zur Stufe eingefasster Feuer-Gemmen gesamt ",
+      "ru": "Всего +# к уровню размещённых камней огня ",
+      "ko": "장착한 화염 스킬 젬 레벨 총 +# "
+    },
+    "+# total to Level of Socketed Gems ": {
+      "de": "+# zur Stufe eingefasster Gemmen gesamt ",
+      "ru": "Всего +# к уровню размещённых камней ",
+      "ko": "장착된 스킬 젬 레벨 총 +# "
+    },
+    "+# total to Level of Socketed Golem Gems ": {
+      "de": "+# zur Stufe eingefasster Golem-Gemmen gesamt ",
+      "ru": "Всего +# к уровню размещённых камней големов ",
+      "ko": "장착한 골렘 스킬 젬 레벨 총 +# "
+    },
+    "+# total to Level of Socketed Intelligence Gems ": {
+      "de": "+# zur Stufe eingefasster Intelligenz-Gemmen gesamt ",
+      "ru": "Всего +# к уровню размещённых камней интеллекта ",
+      "ko": "장착한 지능 스킬 젬 레벨 총 +# "
+    },
+    "+# total to Level of Socketed Lightning Gems ": {
+      "de": "+# zur Stufe eingefasster Blitz-Gemmen gesamt ",
+      "ru": "Всего +# к уровню размещённых камней молнии ",
+      "ko": "장착한 번개 스킬 젬 레벨 총 +# "
+    },
+    "+# total to Level of Socketed Melee Gems ": {
+      "de": "+# zur Stufe eingefasster Nahkampf-Gemmen gesamt ",
+      "ru": "Всего +# к уровню размещённых камней ближнего боя ",
+      "ko": "장착한 근접 공격 스킬 젬 레벨 총 +# "
+    },
+    "+# total to Level of Socketed Minion Gems ": {
+      "de": "+# zur Stufe eingefasster Kreaturen-Gemmen gesamt ",
+      "ru": "Всего +# к уровню размещённых камней приспешников ",
+      "ko": "장착한 소환수 스킬 젬 레벨 총 +# "
+    },
+    "+# total to Level of Socketed Movement Gems ": {
+      "de": "+# zur Stufe eingefasster Bewegungs-Gemmen gesamt ",
+      "ru": "Всего +# к уровню размещённых камней передвижения ",
+      "ko": "장착한 이동 스킬 젬 레벨 총 +# "
+    },
+    "+# total to Level of Socketed Projectile Gems ": {
+      "de": "+# zur Stufe eingefasster Projektil-Gemmen gesamt ",
+      "ru": "Всего +# к уровню размещённых камней снарядов ",
+      "ko": "장착한 투사체 스킬 젬 레벨 총 +# "
+    },
+    "+# total to Level of Socketed Skill Gems ": {
+      "de": "+# zur Stufe eingefasster Fertigkeitengemmen gesamt ",
+      "ru": "Всего +# к уровню размещённых камней умений ",
+      "ko": "장착한 스킬 젬 레벨 총 +# "
+    },
+    "+# total to Level of Socketed Spell Gems ": {
+      "de": "+# zur Stufe eingefasster Zauber-Gemmen gesamt ",
+      "ru": "Всего +# к уровню размещённых камней чар ",
+      "ko": "장착한 주문 스킬 젬 레벨 총 +# "
+    },
+    "+# total to Level of Socketed Strength Gems ": {
+      "de": "+# zur Stufe eingefasster Stärke-Gemmen gesamt ",
+      "ru": "Всего +# к уровню размещённых камней силы ",
+      "ko": "장착한 힘 스킬 젬 레벨 총 +# "
+    },
+    "+# total to Level of Socketed Support Gems ": {
+      "de": "+# zur Stufe eingefasster Unterstützungsgemmen gesamt ",
+      "ru": "Всего +# к уровню размещённых камней поддержки ",
+      "ko": "장착한 보조 스킬 젬 레벨 총 +# "
+    },
+    "+# total to Level of Socketed Vaal Gems ": {
+      "de": "+# zur Stufe eingefasster Vaal-Gemmen gesamt ",
+      "ru": "Всего +# к уровню размещённых камней ваал ",
+      "ko": "장착한 바알 스킬 젬 레벨 총 +# "
+    },
+    "+# total to Level of Socketed Warcry Gems ": {
+      "de": "+# zur Stufe eingefasster Kampfschrei-Gemmen gesamt ",
+      "ru": "Всего +# к уровню размещённых камней боевых кличей ",
+      "ko": "장착한 함성 스킬 젬 레벨 총 +# "
+    },
+    "+# total to Strength ": {
+      "de": "+# zu Stärke gesamt ",
+      "ru": "Всего +# к силе ",
+      "ko": "힘 총 +# "
+    },
+    "+#% Global Critical Strike Chance ": {
+      "de": "+#% globale kritische Trefferchance ",
+      "ru": "+#% Global Critical Strike Chance ",
+      "ko": "일반 치명타 확률 +#% "
+    },
+    "+#% Global Critical Strike Multiplier ": {
+      "de": "+#% globaler Multiplikator für kritische Treffer ",
+      "ru": "+#% Global Critical Strike Multiplier ",
+      "ko": "일반 치명타 피해 배율 +#% "
+    },
+    "+#% total Attack Speed ": {
+      "de": "+#% Angriffsgeschwindigkeit gesamt ",
+      "ru": "Всего +#% к скорости атаки ",
+      "ko": "총 공격 속도 +#% "
+    },
+    "+#% total Cast Speed ": {
+      "de": "+#% Zaubergeschwindigkeit gesamt ",
+      "ru": "Всего +#% к скорости сотворения чар ",
+      "ko": "총 시전 속도 +#% "
+    },
+    "+#% total Critical Strike Chance for Spells ": {
+      "de": "+#% kritische Trefferchance für Zauber gesamt ",
+      "ru": "Всего +#% к шансу критического удара чарами ",
+      "ko": "총 주문 치명타 확률 +#% "
+    },
+    "+#% total Elemental Resistance ": {
+      "de": "+#% Elementarwiderstand gesamt ",
+      "ru": "Всего +#% сопротивления стихиям ",
+      "ko": "원소 저항력 총 +#% "
+    },
+    "+#% total Resistance ": {
+      "de": "+#% Widerstand gesamt ",
+      "ru": "Всего +#% сопротивления ",
+      "ko": "총 저항 +#% "
+    },
+    "+#% total to all Elemental Resistances ": {
+      "de": "+#% zu allen Elementarwiderständen gesamt ",
+      "ru": "Всего +#% к сопротивлению всем стихиям ",
+      "ko": "모든 원소 저항력 총 +#% "
+    },
+    "+#% total to Chaos Resistance ": {
+      "de": "+#% zu Chaoswiderstand gesamt ",
+      "ru": "Всего +#% к сопротивлению хаосу ",
+      "ko": "카오스 저항 총 +#% "
+    },
+    "+#% total to Cold Resistance ": {
+      "de": "+#% zu Kältewiderstand gesamt ",
+      "ru": "Всего +#% к сопротивлению холоду ",
+      "ko": "냉기 저항 총 +#% "
+    },
+    "+#% total to Fire Resistance ": {
+      "de": "+#% zu Feuerwiderstand gesamt ",
+      "ru": "Всего +#% к сопротивлению огню ",
+      "ko": "화염 저항 총 +#% "
+    },
+    "+#% total to Lightning Resistance ": {
+      "de": "+#% zu Blitzwiderstand gesamt ",
+      "ru": "Всего +#% к сопротивлению молнии ",
+      "ko": "번개 저항 총 +#% "
+    },
+    "Adds # to # Damage ": {
+      "de": "Fügt # bis # Schaden hinzu ",
+      "ru": "Добавляет от # до # урона ",
+      "ko": "# 피해에 # 추가 "
+    },
+    "Adds # to # Damage to Attacks ": {
+      "de": "Fügt Angriffen # bis # Schaden hinzu ",
+      "ru": "Добавляет от # до # урона к атакам ",
+      "ko": "공격 시 # 피해에 # 추가 "
+    },
+    "Adds # to # Damage to Spells ": {
+      "de": "Fügt Zaubern # bis # Schaden hinzu ",
+      "ru": "Добавляет от # до # урона к чарам ",
+      "ko": "주문 시전 시 # 피해에 # 추가 "
+    },
+    "Adds # to # Elemental Damage ": {
+      "de": "Fügt # bis # Elementarschaden hinzu ",
+      "ru": "Добавляет от # до # урона от стихий ",
+      "ko": "# 원소 피해에 # 추가 "
+    },
+    "Adds # to # Elemental Damage to Attacks ": {
+      "de": "Fügt Angriffen # bis # Elementarschaden hinzu ",
+      "ru": "Добавляет от # до # урона от стихий к атакам ",
+      "ko": "공격 시 # 원소 피해에 # 추가 "
+    },
+    "Adds # to # Elemental Damage to Spells ": {
+      "de": "Fügt Zaubern # bis # Elementarschaden hinzu ",
+      "ru": "Добавляет от # до # урона от стихий к чарам ",
+      "ko": "주문 시전 시 # 원소 피해에 # 추가 "
+    },
+    "Eater of Worlds Implicit Modifier (#) ": {
+      "de": "Impliziter Modifikator des Weltenfressers (#) ",
+      "ru": "Собственное свойство Пожирателя миров (#) ",
+      "ko": "세계 포식자 고정 속성 (#) "
+    },
+    "Has # Influences ": {
+      "de": "Hat # Einflüsse ",
+      "ru": "Имеет # влияний ",
+      "ko": "# 영향력이 부여되어 있습니다 "
+    },
+    "Has Crusader Influence ": {
+      "de": "Hat Kreuzritter-Einfluss ",
+      "ru": "Имеет влияние Крестоносца ",
+      "ko": "십자군 영향력이 부여되어 있습니다 "
+    },
+    "Has Elder Influence ": {
+      "de": "Hat Ältesten-Einfluss ",
+      "ru": "Имеет влияние Древнего ",
+      "ko": "엘더 영향력이 부여되어 있습니다 "
+    },
+    "Has Hunter Influence ": {
+      "de": "Hat Jäger-Einfluss ",
+      "ru": "Имеет влияние Охотника ",
+      "ko": "사냥꾼 영향력이 부여되어 있습니다 "
+    },
+    "Has Logbook Area: Battleground Graves ": {
+      "de": "Hat Logbuch-Gebiet: Schlachtfeld-Gräber ",
+      "ru": "Содержит область журнала: Захоронение на поле боя ",
+      "ko": "다음 일지 지역 보유: 전장 무덤 "
+    },
+    "Has Logbook Area: Bluffs ": {
+      "de": "Hat Logbuch-Gebiet: Klippen ",
+      "ru": "Содержит область журнала: Откосы ",
+      "ko": "다음 일지 지역 보유: 절벽 "
+    },
+    "Has Logbook Area: Cemetery ": {
+      "de": "Hat Logbuch-Gebiet: Totenacker ",
+      "ru": "Содержит область журнала: Погост ",
+      "ko": "다음 일지 지역 보유: 공동묘지 "
+    },
+    "Has Logbook Area: Desert Ruins ": {
+      "de": "Hat Logbuch-Gebiet: Wüstenruinen ",
+      "ru": "Содержит область журнала: Пустынные руины ",
+      "ko": "다음 일지 지역 보유: 사막 폐허 "
+    },
+    "Has Logbook Area: Dried Riverbed ": {
+      "de": "Hat Logbuch-Gebiet: Ausgetrocknetes Flussbett ",
+      "ru": "Содержит область журнала: Высохшее русло ",
+      "ko": "다음 일지 지역 보유: 말라붙은 강바닥 "
+    },
+    "Has Logbook Area: Forest Ruins ": {
+      "de": "Hat Logbuch-Gebiet: Waldruinen ",
+      "ru": "Содержит область журнала: Развалины в лесу ",
+      "ko": "다음 일지 지역 보유: 숲 폐허 "
+    },
+    "Has Logbook Area: Karui Wargraves ": {
+      "de": "Hat Logbuch-Gebiet: Karui-Kriegsgräber ",
+      "ru": "Содержит область журнала: Могилы воинов каруи ",
+      "ko": "다음 일지 지역 보유: 카루이 전쟁 무덤 "
+    },
+    "Has Logbook Area: Mountainside ": {
+      "de": "Hat Logbuch-Gebiet: Berghang ",
+      "ru": "Содержит область журнала: Горный склон ",
+      "ko": "다음 일지 지역 보유: 산비탈 "
+    },
+    "Has Logbook Area: Rotting Temple ": {
+      "de": "Hat Logbuch-Gebiet: Verrottender Tempel ",
+      "ru": "Содержит область журнала: Гниющий храм ",
+      "ko": "다음 일지 지역 보유: 썩어가는 사원 "
+    },
+    "Has Logbook Area: Sarn Slums ": {
+      "de": "Hat Logbuch-Gebiet: Armenviertel von Sarn ",
+      "ru": "Содержит область журнала: Трущобы Сарна ",
+      "ko": "다음 일지 지역 보유: 사안 빈민가 "
+    },
+    "Has Logbook Area: Scrublands ": {
+      "de": "Hat Logbuch-Gebiet: Buschland ",
+      "ru": "Содержит область журнала: Заросли кустарника ",
+      "ko": "다음 일지 지역 보유: 관목지 "
+    },
+    "Has Logbook Area: Shipwreck Reef ": {
+      "de": "Hat Logbuch-Gebiet: Schiffswrack-Riff ",
+      "ru": "Содержит область журнала: Риф разбитых кораблей ",
+      "ko": "다음 일지 지역 보유:  난파선 암초 "
+    },
+    "Has Logbook Area: Utzaal Outskirts ": {
+      "de": "Hat Logbuch-Gebiet: Randgebiet von Utzaal ",
+      "ru": "Содержит область журнала: Окраины Утцааля ",
+      "ko": "다음 일지 지역 보유: 웃자알 외곽 "
+    },
+    "Has Logbook Area: Vaal Temple ": {
+      "de": "Hat Logbuch-Gebiet: Vaal-Tempel ",
+      "ru": "Содержит область журнала: Храм ваал ",
+      "ko": "다음 일지 지역 보유: 바알 사원 "
+    },
+    "Has Logbook Area: Volcanic Island ": {
+      "de": "Hat Logbuch-Gebiet: Vulkaninsel ",
+      "ru": "Содержит область журнала: Вулканический остров ",
+      "ko": "다음 일지 지역 보유: 화산섬 "
+    },
+    "Has Redeemer Influence ": {
+      "de": "Hat Erlöserin-Einfluss ",
+      "ru": "Имеет влияние Избавительницы ",
+      "ko": "대속자 영향력이 부여되어 있습니다 "
+    },
+    "Has Room: Splinter Research Lab (Tier 1) ": {
+      "de": "Hat Raum: Splitter-Forschungslabor (Stufe 1) ",
+      "ru": "Содержит комнату: Лаборатория изучения осколков (ур. 1) ",
+      "ko": "다음의 방 보유: 파편 연구소 (1등급) "
+    },
+    "Has Shaper Influence ": {
+      "de": "Hat Schöpfer-Einfluss ",
+      "ru": "Имеет влияние Создателя ",
+      "ko": "쉐이퍼 영향력이 부여되어 있습니다 "
+    },
+    "Has Warlord Influence ": {
+      "de": "Hat Kriegsfürst-Einfluss ",
+      "ru": "Имеет влияние Вождя ",
+      "ko": "전쟁군주 영향력이 부여되어 있습니다 "
+    },
+    "Mirrored Tablet has # Islands ": {
+      "de": "Gespiegelte Tafel hat # Inseln ",
+      "ru": "Зеркальная табличка имеет # островков ",
+      "ko": "복제 서판이 섬 #개 보유 "
+    },
+    "More Currency: #% ": {
+      "de": "Mehr Währung: #% ",
+      "ru": "Больше валюты: #% ",
+      "ko": "화폐 더 많음: #% "
+    },
+    "More Divination Cards: #% ": {
+      "de": "Mehr Weissagungskarten: #% ",
+      "ru": "Больше гадальных карт: #% ",
+      "ko": "점술 카드 더 많음: #% "
+    },
+    "More Maps: #% ": {
+      "de": "Mehr Karten: #% ",
+      "ru": "Больше карт: #% ",
+      "ko": "지도 더 많음: #% "
+    },
+    "More Scarabs: #% ": {
+      "de": "Mehr Skarabäen: #% ",
+      "ru": "Больше скарабеев: #% ",
+      "ko": "갑충석 더 많음: #% "
+    },
+    "Non-Unique Monsters (Blood-Filled Vessel): # ": {
+      "de": "Nicht einzigartige Monster (Blutgefülltes Gefäß): # ",
+      "ru": "Неуникальные монстры (Наполненный кровью сосуд): # ",
+      "ko": "비-고유 몬스터 (피 담긴 그릇): # "
+    },
+    "Quality (Attack Modifiers): #% ": {
+      "de": "Qualität (Angriffs-Modifikatoren): #% ",
+      "ru": "Качество (свойства атак): #% ",
+      "ko": "퀄리티 (공격 속성 부여): #% "
+    },
+    "Quality (Attribute Modifiers): #% ": {
+      "de": "Qualität (Attribut-Modifikatoren): #% ",
+      "ru": "Качество (свойства характеристик): #% ",
+      "ko": "퀄리티 (능력치 속성 부여): #% "
+    },
+    "Quality (Caster Modifiers): #% ": {
+      "de": "Qualität (Zauber-Modifikatoren): #% ",
+      "ru": "Качество (свойства чар): #% ",
+      "ko": "퀄리티 (시전 속성 부여): #% "
+    },
+    "Quality (Critical Modifiers): #% ": {
+      "de": "Qualität (Modifikatoren für kritische Treffer): #% ",
+      "ru": "Качество (свойства критического удара): #% ",
+      "ko": "퀄리티 (치명타 속성 부여): #% "
+    },
+    "Quality (Currency): #% ": {
+      "de": "Qualität (Währung): #% ",
+      "ru": "Качество (валюта): #% ",
+      "ko": "퀄리티 (화폐): #% "
+    },
+    "Quality (Defence Modifiers): #% ": {
+      "de": "Qualität (Verteidigungs-Modifikatoren): #% ",
+      "ru": "Качество (свойства защиты): #% ",
+      "ko": "퀄리티 (방어 속성 부여): #% "
+    },
+    "Quality (Divination Cards): #% ": {
+      "de": "Qualität (Weissagungskarten): #% ",
+      "ru": "Качество (гадальные карты): #% ",
+      "ko": "퀄리티 (점술 카드): #% "
+    },
+    "Quality (Elemental Damage Modifiers): #% ": {
+      "de": "Qualität (Elementarschadens-Modifikatoren): #% ",
+      "ru": "Качество (свойства стихийного урона): #% ",
+      "ko": "퀄리티 (원소 피해 속성 부여): #% "
+    },
+    "Quality (Life and Mana Modifiers): #% ": {
+      "de": "Qualität (Leben- und Mana-Modifikatoren): #% ",
+      "ru": "Качество (свойства здоровья и маны): #% ",
+      "ko": "퀄리티 (생명력과 마나 속성 부여): #% "
+    },
+    "Quality (Pack Size): #% ": {
+      "de": "Qualität (Monstergruppengröße): #% ",
+      "ru": "Качество (размер групп монстров): #% ",
+      "ko": "퀄리티 (무리 규모): #% "
+    },
+    "Quality (Physical and Chaos Damage Modifiers): #% ": {
+      "de": "Qualität (Modifikatoren für physischen Schaden und Chaosschaden): #% ",
+      "ru": "Качество (свойства физического урона и урона хаосом): #% ",
+      "ko": "퀄리티 (물리 및 카오스 피해 속성 부여): #% "
+    },
+    "Quality (Prefix Modifiers): #% ": {
+      "de": "Qualität (Präfix-Modifikatoren): #% ",
+      "ru": "Качество (свойства-префиксы): #% ",
+      "ko": "퀄리티 (접두어 속성): #% "
+    },
+    "Quality (Rarity): #% ": {
+      "de": "Qualität (Seltenheit): #% ",
+      "ru": "Качество (редкость): #% ",
+      "ko": "퀄리티 (희귀도): #% "
+    },
+    "Quality (Resistance Modifiers): #% ": {
+      "de": "Qualität (Widerstands-Modifikatoren): #% ",
+      "ru": "Качество (свойства сопротивлений): #% ",
+      "ko": "퀄리티 (저항 속성 부여): #% "
+    },
+    "Quality (Scarabs): #% ": {
+      "de": "Qualität (Skarabäen): #% ",
+      "ru": "Качество (скарабеи): #% ",
+      "ko": "퀄리티 (갑충석): #% "
+    },
+    "Quality (Speed Modifiers): #% ": {
+      "de": "Qualität (Geschwindigkeits-Modifikatoren): #% ",
+      "ru": "Качество (свойства скорости): #% ",
+      "ko": "퀄리티 (속도 속성 부여): #% "
+    },
+    "Quality (Suffix Modifiers): #% ": {
+      "de": "Qualität (Suffix-Modifikatoren): #% ",
+      "ru": "Качество (свойства-суффиксы): #% ",
+      "ko": "퀄리티 (접미어 속성): #% "
+    },
+    "Searing Exarch Implicit Modifier (#) ": {
+      "de": "Impliziter Modifikator des Brennenden Exarchen (#) ",
+      "ru": "Собственное свойство Пламенного экзарха (#) ",
+      "ko": "작열의 총주교 고정 속성 (#) "
+    },
+    "Unique Monsters (Blood-Filled Vessel): # ": {
+      "de": "Einzigartige Monster (Blutgefülltes Gefäß): # ",
+      "ru": "Уникальные монстры (Наполненный кровью сосуд): # ",
+      "ko": "고유 몬스터 (피 담긴 그릇): # "
+    }
+  }
+}

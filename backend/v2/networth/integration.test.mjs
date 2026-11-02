@@ -8,9 +8,15 @@ import { rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import WebSocket from 'ws'
+import { quietEnv } from '../test-quiet-env.mjs'
 
 const NW_STORE = join(tmpdir(), `ppt-nw-int-${process.pid}.json`)
 
+// The full set that keeps a booted server off the network, applied before the
+// dynamic import below — server.mjs reads the environment at module load. One
+// list, imported: every file that wrote it out by hand left something out, and
+// what kept being left out was the switch a WebSocket needs (test-quiet-env.mjs).
+quietEnv()
 process.env.PORT = '0'
 process.env.POE_FAUSTUS_DISABLED = '1'
 process.env.POE_CORPSE_DISABLED = '1'

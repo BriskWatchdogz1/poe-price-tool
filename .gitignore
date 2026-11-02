@@ -27,9 +27,13 @@ backend/v2/engine.bundle.mjs
 # Runtime: stores + per-machine overrides (deploy: ./config:/config mount)
 config/
 docker-compose.override.yml
+# deploy/host-update.sh's own directory (WORK_DIR): a SIBLING of the config
+# directory, so on a server that follows the README it lands right here, next to
+# the checkout's config/. Lock and staging files, nothing to track.
+config.host-update/
 
-# --- Local only, NOT in the public repo ---
-# Development/planning lives on locally but doesn't belong in a ship-ready tool.
+# --- Development-only files ---
+# These exist on developer machines but are not part of the repository.
 #
 # The TESTS used to be ignored here. They are tracked now: a fresh clone ran
 # `npm test` and got "# tests 0" with exit code 0 — green, and nothing checked.
@@ -44,11 +48,10 @@ docs/superpowers/
 docs/design-new-ui-and-multiuser.md
 docs/setup-and-operations.md
 docs/ui-overhaul.md
-# The files below still exist on disk. These rules are the only reason they are
-# absent from the repository, so "this file is obsolete" argues for keeping the
-# rule, not for deleting it — dropping these entries once tracked all six on the
-# next `git add -A`. The systemd unit carries a private Documentation= URL naming
-# an internal host and must never be published.
+# Development-only files that exist on developer machines but are not part of
+# the repository. These rules are the only reason they are absent; keep them
+# even when a file looks obsolete — dropping these entries once tracked all six
+# on the next `git add -A`.
 #
 # Dead v1 backend (replaced by backend/v2/) — incl. its tests, which npm test
 # does not run either (the script targets backend/v2 only)

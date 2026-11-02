@@ -12,6 +12,7 @@ import {
   round1
 } from '../ninja.mjs'
 import { VALUATION_ROUTES } from './kinds.mjs'
+import { isTooOld, maxAgeMs as defaultMaxAgeMs } from './faustus-age.mjs'
 
 // All exchange overview types that carry a stackable's price on poe.ninja
 // (item/overview 404s for most of these today). Merged ONCE per valuator into
@@ -297,6 +298,15 @@ export function createValuator ({ league, deps = {} }) {
   const faustusStore = d.faustusStore || null
   const faustusTtlMs = (typeof d.faustusTtlMs === 'number' && d.faustusTtlMs > 0)
     ? d.faustusTtlMs : DEFAULT_FAUSTUS_TTL_MS
+  // How old the OBSERVATION behind one price may be. Distinct from the TTL
+  // above and not a duplicate of it: the TTL asks "is the whole map still being
+  // refreshed", this asks "is THIS number still describing the market". A
+  // refresher that ticked five minutes ago can hand out an eight-hour-old
+  // observation for a quiet market — see networth/faustus-age.mjs for the two
+  // live cards that made the difference visible.
+  const faustusMaxAgeMs = (typeof d.faustusMaxAgeMs === 'number' && d.faustusMaxAgeMs > 0)
+    ? d.faustusMaxAgeMs : defaultMaxAgeMs()
+  const nowMs = typeof d.now === 'function' ? d.now : Date.now
   async function fromFaustus (name) {
     if (!faustusStore) return null
     if (typeof faustusStore.league === 'function' && faustusStore.league() !== league) return null
@@ -304,7 +314,17 @@ export function createValuator ({ league, deps = {} }) {
     // silently broke), treat Faustus as absent -> null -> the ninja fallback in
     // the fungible chain takes over, instead of serving frozen prices forever.
     if (typeof faustusStore.isFresh === 'function' && !faustusStore.isFresh(faustusTtlMs)) return null
-    return faustusStore.getPrice(name) // already null when not a number / absent
+    const v = faustusStore.getPrice(name) // already null when not a number / absent
+    if (v == null) return null
+    // Per-item age gate. An observation older than the limit is not served as a
+    // current price: null here hands the item to the SAME poe.ninja fallback the
+    // chain already uses for a name Faustus never quoted, at no extra request
+    // (those overviews are fetched per league|type and cached, see ninja.mjs).
+    // An unknown hour (store written before `hours` existed) is not "old" —
+    // isTooOld says so — so a deploy does not blank a whole store.
+    if (typeof faustusStore.getHour === 'function' &&
+        isTooOld(faustusStore.getHour(name), { now: nowMs(), maxMs: faustusMaxAgeMs })) return null
+    return v
   }
 
   // Corpse store (Task 5): background-filled name->chaos cache for itemised
@@ -319,11 +339,11 @@ export function createValuator ({ league, deps = {} }) {
     return corpseStore.getPrice(name)
   }
 
-  // Middle stage of the fungible chain: poe.ninja's stash currency overview
-  // (Currency / Fragment only) -> chaosEquivalent by display name. null when the
-  // overview didn't load or the name isn't in it (essences/scarabs/etc. live on
-  // the exchange overview instead and legitimately miss here -> caller falls
-  // through to fromExchangeMap).
+  // Last stage of the fungible chain (after Faustus and fromExchangeMap):
+  // poe.ninja's stash currency overview (Currency / Fragment only) ->
+  // chaosEquivalent by display name. null when the overview didn't load or the
+  // name isn't in it (essences/scarabs/etc. live on the exchange overview and
+  // legitimately miss here -> the chain ends honestly unpriced).
   // An EXACT 1.0 from this endpoint is a placeholder, not a price: it reports
   // chaosEquivalent 1.0 whenever a currency lacks real pay/receive data. Measured
   // against the exchange overview for this league, 28 of 38 currencies came back

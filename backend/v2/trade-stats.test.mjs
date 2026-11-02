@@ -3,7 +3,7 @@
 // (the DB is missing exactly this one of the 26 Socketed-<tag>-Gems stats).
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { createTradeStatIndex, normalizeStatText } from './trade-stats.mjs'
+import { createTradeStatIndex, normalizeStatText, signlessStatText } from './trade-stats.mjs'
 
 // Miniature catalogue in the real shape GGG serves (result[].entries[]).
 const CATALOGUE = {
@@ -77,4 +77,60 @@ test('a fetch error degrades quietly (null) and enters a cooldown instead of a f
 test('an HTTP error (e.g. 429) does not throw, it returns null', async () => {
   const idx = createTradeStatIndex({ fetchImpl: async () => ({ ok: false, status: 429 }) })
   assert.equal(await idx.resolve('+2 to Level of Socketed Physical Gems', 'implicit'), null)
+})
+
+// --- the entry point for a text that came out of the de->en pair table -------
+//
+// That table is built from GGG's own description lines, where a literal sign
+// belongs to the placeholder it stands in front of and is swallowed with it
+// (render() in lang-statdesc.mjs). So the English text arriving from there
+// reads "# to maximum Life" where the catalogue writes "+# to maximum Life" —
+// same stat, one character apart, for the whole class of flat additive mods.
+
+test('signlessStatText drops a sign only where it belongs to a placeholder', () => {
+  assert.equal(signlessStatText('+# to maximum Life'), '# to maximum Life')
+  assert.equal(signlessStatText('Minions have +#% to Chaos Resistance'), 'Minions have #% to Chaos Resistance')
+  assert.equal(signlessStatText('# to # Added Fire Damage'), '# to # Added Fire Damage')
+})
+
+test('resolveMatcherForm: the signless form of a catalogue entry still resolves', async () => {
+  const idx = createTradeStatIndex({ fetchImpl: okFetch() })
+  assert.equal(await idx.resolveMatcherForm('# to maximum Life', 'implicit'), 'implicit.stat_3299347043')
+  assert.equal(await idx.resolveMatcherForm('# to Level of Socketed Physical Gems', 'implicit'), 'implicit.stat_516565950')
+})
+
+test('resolveMatcherForm: a text that DOES carry its sign is decided exactly, not loosely', async () => {
+  const idx = createTradeStatIndex({ fetchImpl: okFetch() })
+  assert.equal(await idx.resolveMatcherForm('+# to maximum Life', 'explicit'), 'explicit.stat_3299347043')
+})
+
+test('resolveMatcherForm: two entries that differ ONLY in the sign resolve to nothing', async () => {
+  // Signed and unsigned side by side: the signless key cannot tell them apart,
+  // so it must not answer at all. Guessing one of two trade ids is the failure
+  // this whole path is built to avoid.
+  const ambiguous = { result: [{ label: 'Implicit', entries: [
+    { id: 'implicit.stat_signed', text: '+# Foo' },
+    { id: 'implicit.stat_plain', text: '# Foo' },
+  ] }] }
+  const idx = createTradeStatIndex({ fetchImpl: async () => ({ ok: true, json: async () => ambiguous }) })
+  // The plain text is still an EXACT hit and stays resolvable...
+  assert.equal(await idx.resolveMatcherForm('# Foo', 'implicit'), 'implicit.stat_plain')
+  // ...but a text that only exists in the signed form does not fall back onto
+  // the plain one through the loose key.
+  assert.equal(await idx.resolveMatcherForm('# Bar', 'implicit'), null)
+})
+
+test('resolveMatcherForm: the type still separates identical wordings', async () => {
+  const idx = createTradeStatIndex({ fetchImpl: okFetch() })
+  assert.equal(await idx.resolveMatcherForm('# to maximum Life', 'explicit'), 'explicit.stat_3299347043')
+  assert.equal(await idx.resolveMatcherForm('# to maximum Life', 'implicit'), 'implicit.stat_3299347043')
+})
+
+test('resolve() is unchanged by the second entry point — the English path is a no-op', async () => {
+  const idx = createTradeStatIndex({ fetchImpl: okFetch() })
+  // Signless input is NOT resolvable through resolve(): that function still
+  // compares the item's own text against the catalogue, character for
+  // character, exactly as before.
+  assert.equal(await idx.resolve('2 to Level of Socketed Physical Gems', 'implicit'), null)
+  assert.equal(await idx.resolve('+2 to Level of Socketed Physical Gems', 'implicit'), 'implicit.stat_516565950')
 })

@@ -3,18 +3,50 @@
 // banned (long Retry-After), a GLOBAL `rate-limit` banner must go out to ALL
 // rooms — instead of cards hanging silently in "queued/searching" forever.
 // Short (routine) Retry-Afters below the threshold must NOT raise a banner.
+// Since B14 the same gate also stops the net-worth refresher, which is checked
+// at the bottom — this file is where the gate and its consumers meet.
 import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { WebSocket } from 'ws'
+import { quietEnv } from './test-quiet-env.mjs'
 
 // Env MUST be set before the import (top-level await reads it at load time).
+// The full set that keeps a booted server off the network. One list, imported:
+// every file that wrote it out by hand left something out, and what kept being
+// left out was the switch a WebSocket needs (test-quiet-env.mjs, docs/bugs.md
+// B25). Applied FIRST — anything this file sets below overrides it on purpose.
+quietEnv()
+// PRICING IS ON HERE, DELIBERATELY, and it is the one switch of the quiet set
+// this file turns back off: the banner is raised BY a rate-limited price job. Nothing leaves
+// the machine for it — `fetch` is stubbed in this file, and the runner's guard
+// (test-net-guard.mjs) blocks anything that is not loopback anyway. Written out
+// rather than left implicit, because "this file prices" used to be visible only
+// as the ABSENCE of a line.
+delete process.env.POE_PRICE_CHECK_DISABLED
+// And this one, for the same reason and with the same protection: the net-worth refresher is what has to be seen pausing.
+delete process.env.POE_NETWORTH_AUTOSYNC
 process.env.PORT = '0'
 process.env.POE_FAUSTUS_DISABLED = '1'
 process.env.POE_CORPSE_DISABLED = '1'
 process.env.POE_DATA_REFRESH_DISABLED = '1'
 process.env.POE_REFERENCE_DISABLED = '1'
+// …and the reference warm-up a WS CONNECTION sets off, which the boot switch
+// above does not cover: every connection below opens a room whose league has a
+// cold cache, and that used to be two poe.ninja requests per run (docs/bugs.md
+// B12). Measured, not assumed — see server-no-network.test.mjs.
+process.env.POE_REFERENCE_ON_CONNECT_DISABLED = '1'
 process.env.POE_USERS = 'player1,player2'
 process.env.POE_RATE_LIMIT_BANNER_MIN_SEC = '60' // threshold pinned explicitly
+// A writable store, so the background refresher is actually STARTED here: the
+// B14 test below asserts on the object the server wired the ban gate into, and
+// a null refresher would let it pass by accident. No credentials are configured,
+// so its ticks load an empty user list and send nothing.
+const tmpStoreDir = mkdtempSync(join(tmpdir(), 'ppt-rlban-'))
+process.env.POE_NETWORTH_STORE = join(tmpStoreDir, 'networth-store.json')
+process.env.POE_NETWORTH_CONFIG = join(tmpStoreDir, 'networth-users.json')
 
 let mod
 let base
@@ -26,7 +58,9 @@ before(async () => {
 
 after(async () => {
   mod.clearRateLimit()
+  mod.networthRefresher?.stop()
   await new Promise((resolve) => mod.server.close(resolve))
+  rmSync(tmpStoreDir, { recursive: true, force: true })
 })
 
 // Connects as <user> and collects every message received.
@@ -119,6 +153,35 @@ test('rateLimitSeconds recognizes BOTH wordings — a real GGG ban AND client-si
   // the like would stall the queue for nothing).
   assert.equal(mod.rateLimitSeconds('Invalid regex for mod info line'), null, 'not a rate limit -> null')
   assert.equal(mod.rateLimitSeconds('cookie expired'), null, 'not a rate limit -> null')
+})
+
+// ---------------------------------------------------------------------------
+// B14: the same gate holds the NET-WORTH refresher. The two paths used to be
+// gated separately, on the reading that each spends a budget of its own; what
+// ended that reading is a ban reported to apply to the whole ADDRESS. Checked
+// here, where the wiring is assembled — how the refresher behaves once the gate
+// is up is networth/refresher-status.test.mjs.
+// ---------------------------------------------------------------------------
+test('a real trade ban pauses the net-worth refresher, and the status says it was a trade ban', () => {
+  assert.equal(mod.tradeBanPause(), false, 'no ban -> nothing paused')
+  assert.ok(mod.networthRefresher, 'no refresher was started — this test would prove nothing')
+  assert.deepEqual(mod.networthRefresher.statusFor('player1', 'whatever'), { state: 'ok' })
+
+  mod.noteRateLimit(3600)
+  const pause = mod.tradeBanPause()
+  assert.ok(pause && typeof pause.until === 'number', 'the gate hands over an end time, not a bare stop')
+  assert.equal(pause.until, mod.rateLimitMsg().until, 'the same `until` pump() gates on — one ban, one clock')
+
+  const st = mod.networthRefresher.statusFor('player1', 'whatever')
+  assert.equal(st.state, 'cooldown')
+  assert.equal(st.tradeBan, true, 'a stash 429 and a trade ban must not read the same')
+  assert.equal(st.mine, undefined, 'a trade ban belongs to the address, not to one session')
+  assert.equal(st.until, pause.until)
+
+  mod.clearRateLimit()
+  assert.equal(mod.tradeBanPause(), false)
+  assert.deepEqual(mod.networthRefresher.statusFor('player1', 'whatever'), { state: 'ok' },
+    'the pause lifts with the ban, without a restart and without a timer of its own')
 })
 
 test('ban gate: pump() holds the queue while a ban is active (no further requests to GGG)', async () => {

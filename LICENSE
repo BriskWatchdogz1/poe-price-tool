@@ -1,16 +1,7 @@
-This repository combines two MIT-licensed works under a single dual-attribution
-license: the vendored Awakened PoE Trade renderer (`renderer/`, engine parsing
-and trade integration) and everything else — backend, hotkey daemon and
-Net-Worth tracker — original to this project. Both are MIT; the
-terms below apply to the whole repository, with copyright held jointly as
-listed.
-
 MIT License
 
-Copyright (c) 2020 Alexander Drozdov (renderer/ — vendored Awakened PoE Trade
-engine, kept verbatim where possible)
-Copyright (c) 2026 poe-price-tool contributors (everything else: backend,
-hotkey daemon, Net-Worth tracker, and documentation)
+Copyright (c) 2020 Alexander Drozdov
+Copyright (c) 2026 poe-price-tool contributors
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

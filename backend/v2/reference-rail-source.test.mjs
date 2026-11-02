@@ -10,10 +10,17 @@ import { mkdtemp, rm, readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import vm from 'node:vm'
+import { quietEnv } from './test-quiet-env.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const dir = await mkdtemp(join(tmpdir(), 'refrailsrc-'))
 
+// The full set that keeps a booted server off the network. One list, imported:
+// every file that wrote it out by hand left something out, and what kept being
+// left out was the switch a WebSocket needs (test-quiet-env.mjs, docs/bugs.md
+// B25). Applied FIRST — anything this file sets below overrides it on purpose.
+quietEnv()
 process.env.PORT = '0'
 process.env.POE_CORPSE_DISABLED = '1'
 process.env.POE_NETWORTH_AUTOSYNC = '0'
@@ -119,13 +126,24 @@ const railRender = await (async () => {
   const to = src.indexOf('function applyReference')
   assert.ok(from > 0 && to > from, 'source-attribution block found in app.js')
   const body = src.slice(from, to)
-  const factory = new Function(`
+  // The attribution texts go through the string table since the German UI
+  // (frontend/i18n.js), so the real table is loaded here rather than stubbed —
+  // with the default language that IS the English wording asserted below.
+  const i18nCtx = vm.createContext({ window: {} })
+  vm.runInContext(await readFile(join(here, 'frontend/i18n.js'), 'utf8'), i18nCtx, { filename: 'i18n.js' })
+  const factory = new Function('I18n', `
     const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]))
     const sparkSvg = () => ''
+    const T = (k, p) => I18n.t(k, p)
+    // A row's name goes through the localized-name table (I18n.itemName) the
+    // same way its attribution texts go through t(). Same one-liner as app.js;
+    // with no table loaded it is the identity, which is the English wording
+    // asserted below.
+    const INAME = (ref, fallback) => I18n.itemName(ref) || fallback || ref
     ${body}
     return { refSources, refSection, refFooter }
   `)
-  return factory()
+  return factory(i18nCtx.window.I18n)
 })()
 
 const stamp = (h, m) => new Date(2026, 6, 31, h, m, 0, 0).getTime()

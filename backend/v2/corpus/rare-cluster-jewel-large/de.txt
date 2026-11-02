@@ -1,0 +1,29 @@
+Gegenstandsklasse: Juwelen
+Seltenheit: Selten
+Dorniger Narbe
+Großes Cluster-Juwel
+--------
+Immaterialität: 14%
+--------
+Anforderungen:
+Stufe: 54
+--------
+Gegenstandsstufe: 82
+--------
+Fügt 12 passive Fertigkeiten hinzu (enchant)
+(Hinzugefügte passive Fertigkeiten fallen nicht in den Radius von anderen Juwelen) (enchant)
+(Alle hinzugefügten passiven Fertigkeiten sind klein, sofern nicht anders angegeben) (enchant)
+2 hinzugefügte passive Fertigkeiten sind Juwelenfassungen (enchant)
+Hinzugefügte kleine passive Fertigkeiten gewähren: Kreaturen verursachen 10% erhöhten Schaden (enchant)
+(Kleine passive Fertigkeiten beinhalten alle Passive außer bedeutende passive Fertigkeiten, Meisterschaften, Schlüsselfertigkeiten und Juwelenfassungen) (enchant)
+--------
+{ Präfix-Modifikator "Potenter" (Level: 2) }
+Hinzugefügte kleine passive Fertigkeiten haben 25% erhöhte Wirkung
+{ Präfix-Modifikator "Blitzender" (Level: 3) — Defensiven, Energieschild }
+Hinzugefügte kleine passive Fertigkeiten gewähren auch: +5(4-5) zu maximalem Energieschild
+{ Suffix-Modifikator "des Verwüstens" (Level: 2) — Angriff, Zauberer, Geschwindigkeit, Kreatur }
+Hinzugefügte kleine passive Fertigkeiten gewähren auch: Kreaturen haben 2% erhöhte Angriffs- und Zaubergeschwindigkeit
+{ Suffix-Modifikator "der Verirrten" (Level: 3) — Chaos, Widerstand }
+Hinzugefügte kleine passive Fertigkeiten gewähren auch: +3% zu Chaoswiderstand
+--------
+Platziere das Juwel in einer zugewiesenen großen Juwelenfassung im Fertigkeitenbaum. Hinzugefügte Passive interagieren nicht mit dem Radius eines Juwels. Mit Rechtsklick kannst du es aus seiner Fassung entfernen.

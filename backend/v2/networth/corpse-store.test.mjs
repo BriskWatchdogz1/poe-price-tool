@@ -2,7 +2,7 @@
 // atomic persist, league-guarded. Mirrors faustus-store's discipline.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createCorpseStore } from './corpse-store.mjs'
@@ -85,4 +85,45 @@ test('load tolerates a corrupt / outdated file -> empty store', async () => {
   await s2.load()
   assert.deepEqual(s2.data.entries, {})
   await cleanup()
+})
+
+test('setPrice for a different league drops the entries of the old league', async () => {
+  const { p, s, cleanup } = await fresh({ ttlMs: 6 * HOUR })
+  const t = 3_000_000
+  await s.setPrice('Old League', 'Forest Tiger', 42, t)
+  await s.setPrice('Old League', 'Rock Golem', 7, t)
+  await s.setPrice('New League', 'Cave Bear', 9, t + 1000)
+  // Without the clear, the old prices would be served as New League prices for
+  // up to the TTL: the valuator's guard compares the single league field only.
+  assert.equal(s.league(), 'New League')
+  assert.equal(s.getPrice('Forest Tiger', t + 2000), null)
+  assert.equal(s.get('Rock Golem'), null)
+  assert.equal(s.getPrice('Cave Bear', t + 2000), 9)
+  const onDisk = JSON.parse(await readFile(p, 'utf8'))
+  assert.deepEqual(Object.keys(onDisk.entries), ['Cave Bear'])
+  await cleanup()
+})
+
+test('setPrice in the same league keeps the other entries', async () => {
+  const { s, cleanup } = await fresh({ ttlMs: 6 * HOUR })
+  const t = 4_000_000
+  await s.setPrice('Standard', 'Forest Tiger', 42, t)
+  await s.setPrice('Standard', 'Rock Golem', 7, t + 1000)
+  assert.equal(s.getPrice('Forest Tiger', t + 2000), 42)
+  assert.equal(s.getPrice('Rock Golem', t + 2000), 7)
+  await cleanup()
+})
+
+test('setPrice with no stored league (legacy file) keeps the entries', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'ppt-corpse-'))
+  const p = join(dir, 'corpse.json')
+  const t = 5_000_000
+  await writeFile(p, JSON.stringify({
+    schema_version: 1, updatedAt: t, league: null, entries: { 'Forest Tiger': { chaos: 42, at: t } }
+  }))
+  const s = createCorpseStore(p, { ttlMs: 6 * HOUR })
+  await s.load()
+  await s.setPrice('Standard', 'Rock Golem', 7, t + 1000)
+  assert.equal(s.getPrice('Forest Tiger', t + 2000), 42)
+  await rm(dir, { recursive: true, force: true })
 })

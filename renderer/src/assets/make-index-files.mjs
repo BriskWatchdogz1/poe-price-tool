@@ -4,10 +4,22 @@ import fnv1a from '@sindresorhus/fnv1a'
 import fs from 'fs'
 import path from 'path'
 
-// English only: the backend loads data/en and nothing else (engine.ready({
-// lang: 'en' }) in server.mjs), so indices for the other locales were built
-// into the image and never read.
-const LANGUAGES = ['en']
+// The languages the backend can actually load: English (from upstream, always
+// there) and German (generated locally, so it may not exist yet). The other
+// locale dirs that upstream ships are never read by this tool and are left
+// alone — building indices for them only put dead weight in the image.
+//
+// A language without its ndjson is SKIPPED rather than fatal: renderer/public/
+// data/de currently holds only the hand-written client_strings.js, and neither
+// the Docker build (Dockerfile) nor `npm run update-apt-data` may fall over
+// because the German data set has not been generated on this machine.
+const CANDIDATE_LANGUAGES = ['en', 'de']
+const LANGUAGES = CANDIDATE_LANGUAGES.filter(lang => {
+  const complete = ['items.ndjson', 'stats.ndjson']
+    .every(f => fs.existsSync(`./public/data/${lang}/${f}`))
+  if (!complete) console.warn(`make-index-files: skipping "${lang}" — no items.ndjson/stats.ndjson under ./public/data/${lang}`)
+  return complete
+})
 
 for (const lang of LANGUAGES) {
   const lineStarts = {

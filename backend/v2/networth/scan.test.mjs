@@ -125,15 +125,49 @@ test('single tab error (rejected) -> that tab is skipped, the scan keeps going',
   await cleanup()
 })
 
-test('pruneTabs during the scan: vanished tabs are dropped', async () => {
+test('pruneTabs during the scan: vanished tabs are dropped once a second list agrees', async () => {
   const { s, cleanup } = await freshStore()
   // Up front: tabs 0,1,2 in the store (from an older scan).
   for (const i of [0, 1, 2]) await s.setTab('player1', i, { index: i, name: `T${i}`, items: [], unpriced: [], counts: { priced: 0, unpriced: 0, skipped: 0 } })
   // The account now only has 0 and 2.
   const client = mockClient({ tabs: [{ index: 0, name: 'T0' }, { index: 2, name: 'T2' }], contents: {} })
   await scanTabs(base(client, s, { force: true }))
+  assert.deepEqual(s.tabList('player1').map(t => t.index), [0, 1, 2],
+    'the first shorter list only proposes the drop — see pruneTabs in store.mjs')
+  await scanTabs(base(client, s, { force: true }))
   assert.deepEqual(s.tabList('player1').map(t => t.index), [0, 2]) // tab 1 pruned
   // Meta was written.
   assert.deepEqual(s.getMeta('player1'), { accountName: 'acc', league: 'L', cdRatio: 200 })
+  await cleanup()
+})
+
+// The store is where the two unpriced numbers have to agree, because that is
+// where the page reads them from: `counts.unpriced` is stash ENTRIES, the rows'
+// `count` and `counts.unpricedPieces` are PIECES. A stack larger than one pulls
+// them apart, and a stack of zero — which normalize.mjs can never produce, but
+// which `?? 1` used to wave through — pulled them apart the other way.
+test('a scanned tab stores unpriced entries and unpriced PIECES as two numbers that both hold', async () => {
+  const { s, cleanup } = await freshStore()
+  const client = mockClient({
+    tabs: [{ index: 0, name: 'A' }],
+    contents: {
+      0: [
+        item('stackable', 'Mystery Frag', null, 5),  // one entry, five pieces
+        item('stackable', 'Mystery Frag', null, 2),  // …same name, folds into the row
+        item('unique', 'Unidentified Map (Tier 16)', null, 0) // a zero stack is still one piece
+      ]
+    }
+  })
+  await scanTabs(base(client, s))
+  const tab = s.getTab('player1', 0)
+  assert.equal(tab.counts.unpriced, 3)        // three stash entries
+  assert.equal(tab.counts.unpricedPieces, 8)  // 5 + 2 + 1
+  assert.equal(tab.unpriced.reduce((sum, u) => sum + u.count, 0), tab.counts.unpricedPieces,
+    'the stored rows must add up to the stored piece total — the page prints both')
+  // …and the snapshot the page actually receives says the same.
+  const snap = aggregate({ tabs: s.tabList('player1'), cdRatio: 200, league: 'L', accountName: 'acc' })
+  assert.equal(snap.counts.unpricedPieces, 8)
+  assert.equal(snap.tabs[0].unpricedPieces, 8)
+  assert.equal(snap.unpriced.reduce((sum, u) => sum + u.count, 0), 8)
   await cleanup()
 })

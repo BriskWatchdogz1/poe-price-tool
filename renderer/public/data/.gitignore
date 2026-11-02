@@ -1,1 +1,9 @@
 *.index.bin
+# Everything the language generator (lang-data-gen.mjs) produces. It is derived
+# from GGG's game data, and the whole point of generating it per installation
+# is that nobody redistributes that data: each operator processes only what GGG
+# served them. It is also regenerated on every patch, so carrying it in history
+# would be pure churn. data/en is different — that one comes from APT upstream.
+de/items.ndjson
+de/stats.ndjson
+*/text-pairs.ndjson

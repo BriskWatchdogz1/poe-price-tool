@@ -105,12 +105,47 @@ export function itemModTexts (ggg) {
 const hasMapTier = ggg => (Array.isArray(ggg?.properties) ? ggg.properties : [])
   .some(p => p && p.name === 'Map Tier')
 
+// …and that instance signal turned out NOT to be enough once the map stash
+// started delivering (B7). What arrives from there is a base line GGG has
+// DECORATED with the tier: the unpriced list read "Unidentified Map (Tier 16)
+// x40", and that label is literally `Unidentified ${typeLine}` (see
+// unidentifiedLabel below) — so `typeLine` is the string "Map (Tier 16)", not a
+// map base name at all.
+//
+// The bridge data agrees on the undecorated half: EVERY unique map in
+// items.ndjson carries `unique.base: "Map"` (Cortex, Hallowed Ground, Mao Kun,
+// Poorjoy's Asylum, The Vinktar Square, Whakawairua Tuahu — checked, all of
+// them), and the ITEM row `Map` has `craftable.category: "Map"`. So the base
+// join can resolve a unique map perfectly well; it just never gets the chance,
+// because it is handed "Map (Tier 16)" and looks up a name that does not exist.
+// The paragraph above is therefore wrong about WHY the join misses — it is the
+// decoration, not a gap in the data.
+//
+// Fix: when the direct join misses, drop a TRAILING PARENTHESISED decoration
+// and retry. Not a map-specific rule and not a name list: no base name in
+// items.ndjson contains a parenthesis at all (asserted in normalize.test.mjs),
+// so the retry can never shadow a real base, and it keeps working if GGG ever
+// decorates another base line the same way. The direct join still wins first,
+// so nothing that is priced today changes.
+//
+// The decoration is also the reason the tier is NOT lost: `baseType` keeps the
+// full "Map (Tier 16)", which is exactly the spelling poe.ninja's UniqueMap
+// overview carries in its own `baseType` — so the tiebreak in
+// valuator.mjs/fromItemOverview picks the line for the item's tier.
+const undecorateBase = s => String(s || '').replace(/\s*\([^()]*\)\s*$/, '')
+
 // Category for a unique: the base join wins, ALWAYS. Only when it yields
-// nothing (today: honestly unpriced) does the Map-Tier fallback get a say — so
-// every unique that is priced today keeps its exact category and value.
+// nothing (today: honestly unpriced) do the undecorated retry and then the
+// Map-Tier fallback get a say — so every unique that is priced today keeps its
+// exact category and value.
 function uniqueCategory (c) {
   const joined = c.index?.categoryOfBase(c.typeLine) ?? null
   if (joined != null) return joined
+  const bare = undecorateBase(c.typeLine)
+  if (bare && bare !== c.typeLine) {
+    const undecorated = c.index?.categoryOfBase(bare) ?? null
+    if (undecorated != null) return undecorated
+  }
   return hasMapTier(c.ggg) ? 'Map' : null
 }
 

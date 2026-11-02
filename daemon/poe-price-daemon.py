@@ -16,7 +16,8 @@ prices whatever lands in the clipboard.
 Optionally (config `[macros]` section), the daemon also binds evdev keys to
 chat commands: on press, it opens chat, types the command layout-aware via
 ydotool, and sends it — e.g. F5 -> "/hideout". No `[macros]` section -> the
-daemon runs price-check only (no evdev needed at all).
+daemon runs price-check only: no input device is opened (the python-evdev
+module must still be installed, the import is unconditional).
 
 Why a daemon instead of "just" a shortcut? For the macros, it checks PoE
 focus (so the key doesn't interfere outside the game) and copes with USB
@@ -117,6 +118,19 @@ class PriceDaemon:
         self.backend_url = str(cfg["backend_url"]).strip()
         self.user = str(cfg["user"]).strip()
 
+        # Which clipboard contents count as a PoE item. The game writes the
+        # item-class line in the CLIENT's language ("Item Class: " on English,
+        # "Gegenstandsklasse: " on German), so this must not live in the code --
+        # a second hardcoded line would be the same mistake again, in German.
+        # A list, so one config can cover a client whose language is switched.
+        prefixes = cfg.get("item_prefixes") or ["Item Class: "]
+        if isinstance(prefixes, str):  # tolerate a single string in the config
+            prefixes = [prefixes]
+        self.item_prefixes = [str(p) for p in prefixes if str(p)]
+        if not self.item_prefixes:
+            raise SystemExit("[poe-price-daemon] item_prefixes is set but empty — "
+                             "nothing would ever be posted")
+
         # Chat macros (optional): key -> chat command, e.g. F5 -> "/hideout".
         # No [macros] section in the config -> self.macros stays empty and the
         # daemon runs price-check only (graceful, no crash).
@@ -192,7 +206,7 @@ class PriceDaemon:
             return
         # Chat macros: fire on PRESS (value==1); macros trigger only while
         # PoE is focused (keeps macro keys inert everywhere else). Price
-        # check no longer goes through evdev at all — see poll_clipboard().
+        # check does not use an input device — see poll_clipboard().
         if ev.value == 1 and ev.code in self.macros:
             if self.is_poe_focused():
                 self.do_macro(self.macros[ev.code])
@@ -240,6 +254,9 @@ class PriceDaemon:
         env = dict(os.environ)
         env["PPT_BACKEND_URL"] = self.backend_url
         env["PPT_USER"] = self.user
+        # Newline-separated: prefixes contain spaces and colons, a newline is
+        # the only separator an item-class line can never contain.
+        env["PPT_ITEM_PREFIXES"] = "\n".join(self.item_prefixes)
         try:
             p = subprocess.Popen([self.post_handler], stdin=subprocess.PIPE, text=True, env=env)
             p.stdin.write(content)  # item text is small -> won't block; post.sh reads it at once
@@ -252,7 +269,7 @@ class PriceDaemon:
 def find_keyboards(keycodes):
     """Devices exposing a macro key (they may live on different physical
     keyboards, e.g. a hardware macro keypad plus the F5-F9 row). Only relevant
-    for macros — price check no longer needs evdev at all."""
+    for macros — without a [macros] section no device is opened."""
     kbs = []
     for path in evdev.list_devices():
         try:

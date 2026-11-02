@@ -179,3 +179,48 @@ test('marker density follows the range', async () => {
   assert.equal(b('7d'), 6 * 3600e3)
   assert.equal(b('14d'), 12 * 3600e3)
 })
+
+// --- Each event carries its own rate ----------------------------------------
+// The page prints these movements in DIVINE. Without a rate per event it had
+// only the newest one to convert them with, so a two-week-old row was re-valued
+// every time the rate ticked — the same defect storing `cd` per point exists to
+// prevent (see the file header of history.mjs).
+test('an event is stamped with the C:D rate of the point it is stamped with', async () => {
+  let clock = 1_700_000_000_000
+  const h = createNetworthHistory('/nonexistent/history.ndjson', { now: () => clock, minIntervalMs: 0 })
+  h.writable = false
+  const add = async (chaos, cdRatio, qty) => {
+    clock += 60_000
+    await h.append('player1', { totalChaos: chaos, cdRatio, items: [{ name: 'Divine Orb', qty, chaosTotal: chaos }] })
+  }
+  // Ten divine arrive at a rate of 173…
+  await add(17300, 173, 100)
+  await add(19030, 173, 110)
+  // …and ten more, three days later, at a rate of 195.
+  clock += 3 * 24 * 3600e3
+  await add(21450, 195, 110)
+  await add(23400, 195, 120)
+
+  const r = h.events('player1', 14 * 24 * 3600e3, { at: clock, range: '14d' })
+  assert.equal(r.events.length, 2, 'two buckets, three days apart')
+  assert.deepEqual(r.events.map(e => e.cd), [173, 195])
+  // Both movements were ten divine when they happened, and both still are.
+  assert.deepEqual(r.events.map(e => Math.round(e.v / e.cd)), [10, 10])
+  // Valued at the newest rate — what the page used to do — the older one
+  // shrinks to nine, for a purchase that was over and done with.
+  assert.equal(Math.round(r.events[0].v / 195), 9)
+})
+
+test('a point recorded without a rate hands back 0, and never a substitute', async () => {
+  let clock = 1_700_000_000_000
+  const h = createNetworthHistory('/nonexistent/history.ndjson', { now: () => clock, minIntervalMs: 0 })
+  h.writable = false
+  const add = async (chaos, cdRatio, qty) => {
+    clock += 60_000
+    await h.append('player1', { totalChaos: chaos, cdRatio, items: [{ name: 'Divine Orb', qty, chaosTotal: chaos }] })
+  }
+  await add(17300, 173, 100)
+  await add(19030, 0, 110)
+  const r = h.events('player1', 24 * 3600e3, { at: clock, minDivine: 0 })
+  assert.equal(r.events.at(-1).cd, 0, 'the endpoint states the gap; the reader decides what to do with it')
+})

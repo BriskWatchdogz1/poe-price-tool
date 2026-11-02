@@ -1,4 +1,5 @@
-import { buildHighlight, HIGHLIGHT_MAX_DEFAULT } from './highlight.js'
+import { buildHighlight, highlightInputs, HIGHLIGHT_MAX_DEFAULT } from './highlight.js'
+import { syncStatusLine, autosyncSummary } from './networth-sync.js'
 import { tabLabel, orderedTabs, migrateTabNames, tabState, nextTabState } from './tabs.js'
 
 /* Net Worth — Vanilla frontend, standalone page.
@@ -11,9 +12,14 @@ import { tabLabel, orderedTabs, migrateTabNames, tabState, nextTabState } from '
  * (drag-reorderable), collapsible category overview, list/grouped toggle,
  * kind chips, search, value threshold. Snapshot shape (backend, unchanged):
  *   snapshot.items[]  = { name, kind, tab, tabIndex, qty, chaosEach, chaosTotal }
- *   snapshot.tabs[]   = { index, name, chaos, items }  (sorted by index = in-game order)
+ *   snapshot.tabs[]   = { index, name, chaos, items, priced, unpriced, unpricedPieces, skipped }
+ *                       (sorted by index = in-game order)
  *   snapshot.categories = { kind: { chaos, items } }
- *   snapshot.unpriced[] = { name, kind, count } */
+ *   snapshot.unpriced[] = { name, kind, count, tabIndex }  (one row per name+tab)
+ * Units are NOT interchangeable: `items` counts grouped display ROWS,
+ * `priced`/`unpriced`/`skipped` count GGG stash ENTRIES, and `count`/`qty`/
+ * `unpricedPieces` count PIECES (summed stack sizes). Never print two of them
+ * under one word. */
 'use strict'
 
 // ---- DOM handles -----------------------------------------------------------
@@ -64,35 +70,47 @@ const historyList      = document.getElementById('historyList')
 const esc = s => String(s == null ? '' : s)
   .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')
 const cap = s => s ? s[0].toUpperCase() + s.slice(1) : s
-const fmt = n => Number(n ?? 0).toLocaleString('en-US')
+// i18n shorthands — i18n.js is a classic script loaded before this module.
+const I18n = window.I18n
+const T = (k, p) => I18n.t(k, p)
+// Plural pick (key + One/Other) — a count of one must not read "1 names".
+const TN = (k, n, p) => I18n.tn(k, n, p)
+// An item name to PRINT. Every row on this page travels under its ENGLISH
+// reference name — that is what the value join, the trade link and the
+// Stash-Highlight token generator are keyed by — so the translation happens
+// here, at the last possible moment, and nowhere else. No hit -> English.
+const INAME = n => I18n.itemName(n) || n
+// Search matches what the user READS as well as what the row is keyed by: on a
+// German page, typing the German name has to find the row.
+const nameHit = (n, q) => String(n).toLowerCase().includes(q) || String(INAME(n)).toLowerCase().includes(q)
+// Number formatting follows the language, not the browser's locale.
+const fmt = n => Number(n ?? 0).toLocaleString(I18n.locale())
 // Rounding to whole chaos turns every cheap currency into a bare "0 c" — an
 // Armourer's Scrap at 0.15c read as worthless even though 27 of them are 4c.
 // Below 1c keep enough precision to stay meaningful; from 1c up, whole numbers.
 const fmtC = (n) => {
   const v = Number(n) || 0
   if (v !== 0 && Math.abs(v) < 1) {
-    return v.toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: Math.abs(v) < 0.1 ? 3 : 2 })
+    return v.toLocaleString(I18n.locale(), { minimumFractionDigits: 1, maximumFractionDigits: Math.abs(v) < 0.1 ? 3 : 2 })
   }
-  return Math.round(v).toLocaleString('en-US')
+  return Math.round(v).toLocaleString(I18n.locale())
 }
 
-const KIND_LABEL = {
-  stackable: 'Currency & Stackables', unique: 'Uniques',
-  divcard: 'Divination Cards', beast: 'Beasts', incubator: 'Incubators',
-  vial: 'Vials', gem: 'Gems', corpse: 'Corpses'
-}
 const CAT_ORDER = ['unique', 'stackable', 'divcard', 'gem', 'beast', 'incubator', 'vial', 'corpse']
+// Category names. A kind the snapshot carries but this list does not know
+// (a new backend category) falls back to its raw id — visible, not hidden.
+const kindLabel = k => CAT_ORDER.includes(k) ? T('kind.' + k) : cap(k)
 
 function money (v, cdRatio) {
   const n = Number(v) || 0
   if (cdRatio > 0 && n >= cdRatio) {
-    return `<span class="val div">${(n / cdRatio).toLocaleString('en-US', { maximumFractionDigits: 1 })}<span class="u"> div</span></span>`
+    return `<span class="val div">${(n / cdRatio).toLocaleString(I18n.locale(), { maximumFractionDigits: 1 })}<span class="u"> div</span></span>`
   }
   return `<span class="val">${fmtC(n)}<span class="u"> c</span></span>`
 }
 function moneyShort (v, cdRatio) {
   const n = Number(v) || 0
-  if (cdRatio > 0 && n >= cdRatio) return `${(n / cdRatio).toLocaleString('en-US', { maximumFractionDigits: n / cdRatio >= 100 ? 0 : 1 })}d`
+  if (cdRatio > 0 && n >= cdRatio) return `${(n / cdRatio).toLocaleString(I18n.locale(), { maximumFractionDigits: n / cdRatio >= 100 ? 0 : 1 })}d`
   return `${fmtC(n)}c`
 }
 
@@ -108,7 +126,7 @@ function tradeUrl (name, kind, league) {
   return `https://www.pathofexile.com/trade/search/${encodeURIComponent(league || '')}?q=${encodeURIComponent(JSON.stringify(q))}`
 }
 function tradeBtn (name, kind, league) {
-  return `<a class="tradebtn" href="${esc(tradeUrl(name, kind, league))}" target="_blank" rel="noopener noreferrer" title="Open on pathofexile.com/trade">${TRADE_ICON}</a>`
+  return `<a class="tradebtn" href="${esc(tradeUrl(name, kind, league))}" target="_blank" rel="noopener noreferrer" title="${esc(T('nw.tradeTitle'))}">${TRADE_ICON}</a>`
 }
 
 // ---- Persisted UI state ------------------------------------------------------
@@ -286,10 +304,42 @@ updateTabModeButtons()
 // by a native checkbox: a checkbox has two clickable states, and its third
 // (indeterminate) one cannot be reached by clicking at all.
 const TAB_STATE_MARK = { on: '✓', off: '', ignored: '✕' }
-const TAB_STATE_HINT = {
-  on: 'counted. Click to exclude.',
-  off: 'excluded, but All / None / Only w/ value may switch it back on. Click to ignore it permanently.',
-  ignored: 'permanently ignored — All / None / Only w/ value leave it alone. Click to count it again.'
+const tabStateHint = st => T({ on: 'nw.tabHintOn', off: 'nw.tabHintOff', ignored: 'nw.tabHintIgnored' }[st])
+
+// What actually came out of this tab, for the row's tooltip. A tab worth 0c
+// used to read the same whether GGG returned nothing at all or returned a full
+// tab that the classifier dropped (rare gear, non-unique maps) — the whole
+// reason the empty map stash could not be judged from this page. The three
+// counts come straight from the per-tab store (backend counts.*), so "0
+// priced · 0 unpriced · 0 skipped" now says "nothing arrived" outright.
+// All three are GGG ENTRY counts and have to stay comparable. `t.priced` is the
+// stored one; `t.items` beside it counts grouped display ROWS (thirty Divine
+// Orbs from three stash entries are one row), and printing that next to two
+// entry counts made a full currency tab read "1 priced · 0 unpriced · 0
+// skipped". Older snapshots carry only `items` — then it is still the best
+// number available.
+function tabPricedCount (t) { return Number(t.priced ?? t.items) || 0 }
+function tabCountsHint (t) {
+  const priced = tabPricedCount(t)
+  const unpriced = Number(t.unpriced) || 0
+  const skipped = Number(t.skipped) || 0
+  if (!priced && !unpriced && !skipped) return T('nw.tabNothingArrived')
+  return T('nw.tabCounts', { priced, unpriced, skipped })
+}
+
+// …and the same distinction WITHOUT hovering, for the two cases where the row
+// is otherwise mute. Symbols only, no words: the row's title says it in the
+// user's language, this just makes the two zero-value cases look different.
+//   ∅   nothing arrived from this tab at all
+//   ⨯N  N items arrived and were dropped by the classifier (rare gear, maps)
+// Anything the tab actually contributed already shows as its value.
+function tabZeroMark (t) {
+  const priced = tabPricedCount(t)
+  const unpriced = Number(t.unpriced) || 0
+  const skipped = Number(t.skipped) || 0
+  if (priced || unpriced) return ''
+  if (skipped) return `<span class="tmark">⨯${fmtC(skipped)}</span>`
+  return '<span class="tmark">∅</span>'
 }
 
 function renderSide () {
@@ -300,7 +350,7 @@ function renderSide () {
   const onCount = disp.filter(isTabOn).length
   const ignCount = disp.filter(isTabIgnored).length
   sideCountEl.textContent = disp.length
-    ? `${onCount}/${disp.length}${ignCount ? ` · ${ignCount} ignored` : ''}`
+    ? T('nw.sideCount', { on: onCount, total: disp.length }) + (ignCount ? T('nw.sideIgnored', { n: ignCount }) : '')
     : ''
   tabListEl.innerHTML = disp.length
     ? disp.map(t => {
@@ -308,13 +358,14 @@ function renderSide () {
         const val = vals.get(t.index) || 0
         const label = tabLabel(t)
         return `<div class="tabrow st-${st}" draggable="true" data-idx="${esc(t.index)}"` +
-          ` role="button" tabindex="0" title="${esc(label)} — ${esc(TAB_STATE_HINT[st])}">` +
+          ` role="button" tabindex="0" title="${esc(label)} — ${esc(tabCountsHint(t))} — ${esc(tabStateHint(st))}">` +
           `<span class="dragh" aria-hidden="true">⋮⋮</span>` +
           `<span class="tri" data-tab="${esc(t.index)}" aria-hidden="true">${TAB_STATE_MARK[st]}</span>` +
           `<span class="tn">${esc(label)}</span>` +
+          tabZeroMark(t) +
           `<span class="tv">${moneyShort(val, currentSnapshot.cdRatio)}</span></div>`
       }).join('')
-    : '<p class="sidetip">No tabs with priced items yet.</p>'
+    : `<p class="sidetip">${esc(T('nw.noTabs'))}</p>`
   resetOrderBtn.hidden = loadOrder().length === 0
 }
 
@@ -433,11 +484,11 @@ function renderBars () {
   barsEl.innerHTML = cats.length
     ? cats.map(([k, v]) => {
         const pct = total > 0 ? (v.chaos / total * 100) : 0
-        return `<div class="bar"><div class="l"><span>${esc(KIND_LABEL[k] || cap(k))}</span>` +
+        return `<div class="bar"><div class="l"><span>${esc(kindLabel(k))}</span>` +
           `<b>${moneyShort(v.chaos, s.cdRatio)} <span class="pct">${pct.toFixed(pct < 10 ? 1 : 0)}%</span></b></div>` +
           `<div class="track"><div class="fill" style="width:${Math.min(100, pct).toFixed(1)}%"></div></div></div>`
       }).join('')
-    : '<div class="empty">nothing priced yet</div>'
+    : `<div class="empty">${esc(T('nw.nothingPriced'))}</div>`
 }
 ovToggle.addEventListener('click', () => overviewEl.classList.toggle('closed'))
 
@@ -446,8 +497,8 @@ function renderChips () {
   const items = (currentSnapshot && currentSnapshot.items) || []
   const presentSet = new Set(items.map(i => i.kind))
   const present = [...CAT_ORDER.filter(k => presentSet.has(k)), ...[...presentSet].filter(k => !CAT_ORDER.includes(k))]
-  chipsEl.innerHTML = `<button type="button" class="chip ${st.kinds.size === 0 ? 'on' : ''}" data-k="">All</button>` +
-    present.map(k => `<button type="button" class="chip ${st.kinds.has(k) ? 'on' : ''}" data-k="${esc(k)}">${esc(KIND_LABEL[k] || cap(k))}</button>`).join('')
+  chipsEl.innerHTML = `<button type="button" class="chip ${st.kinds.size === 0 ? 'on' : ''}" data-k="">${esc(T('kind.all'))}</button>` +
+    present.map(k => `<button type="button" class="chip ${st.kinds.has(k) ? 'on' : ''}" data-k="${esc(k)}">${esc(kindLabel(k))}</button>`).join('')
 }
 chipsEl.addEventListener('click', e => {
   const b = e.target.closest('.chip')
@@ -493,7 +544,7 @@ function currentThresholdChaos () {
 function passesTabKindSearch (it, tabIdxOn) {
   if (!tabIdxOn.has(it.tabIndex)) return false
   if (st.kinds.size && !st.kinds.has(it.kind)) return false
-  if (st.q && !String(it.name).toLowerCase().includes(st.q)) return false
+  if (st.q && !nameHit(it.name, st.q)) return false
   return true
 }
 function filteredItems () {
@@ -512,21 +563,35 @@ function hiddenBelowThreshold () {
 }
 
 // ---- List view ----------------------------------------------------------------
-const COLS = [['name', 'Item', ''], ['tab', 'Tab', ''], ['qty', 'Qty', 'r'], ['chaosEach', 'Each', 'r'], ['chaosTotal', 'Total', 'r']]
+// The SOURCE column names the feed a row's price came from (`faustus`,
+// `exchange`, `exchange:DivinationCard`, `ninja:currency`, `item:<type>`,
+// `corpse:trade`, `chaos`). The value has ridden along in the snapshot since
+// the price guard needed it for its log line, but the page never showed it —
+// so a wrong number on screen could not be traced to the feed that produced
+// it without reading the store by hand. That is precisely what happened to the
+// four divination cards of docs/bugs.md B20, whose source is unknown to this
+// day. A row served by an older backend has no source and prints an em dash;
+// the string itself is an identifier, not display text, so it is not
+// translated (see nw.colSource in i18n.js).
+const srcLabel = it => (typeof it.source === 'string' && it.source ? it.source : '—')
+const COLS = [['name', 'nw.colItem', ''], ['tab', 'nw.colTab', ''], ['qty', 'nw.colQty', 'r'],
+  ['chaosEach', 'nw.colEach', 'r'], ['chaosTotal', 'nw.colTotal', 'r'],
+  ['source', 'nw.colSource', '']]
 function renderList (rows) {
   const s = currentSnapshot
   const labels = tabLabelMap()
   const th = COLS.map(([k, l, align]) =>
-    `<th class="${align}" data-k="${k}">${esc(l)}${st.sortK === k ? `<span class="ar">${st.sortDir < 0 ? '▼' : '▲'}</span>` : ''}</th>`).join('')
+    `<th class="${align}" data-k="${k}">${esc(T(l))}${st.sortK === k ? `<span class="ar">${st.sortDir < 0 ? '▼' : '▲'}</span>` : ''}</th>`).join('')
   const body = rows.length
     ? rows.map(it => `<tr>` +
-        `<td><span class="iname"><span class="kb ${esc(it.kind)}">${esc(KIND_LABEL[it.kind] || it.kind)}</span>${esc(it.name)}${tradeBtn(it.name, it.kind, s.league)}</span></td>` +
+        `<td><span class="iname"><span class="kb ${esc(it.kind)}">${esc(kindLabel(it.kind))}</span>${esc(INAME(it.name))}${tradeBtn(it.name, it.kind, s.league)}</span></td>` +
         `<td class="tabcell">${esc(itemTabLabel(it, labels))}</td>` +
         `<td class="r">${fmtC(it.qty)}</td>` +
         `<td class="r">${money(it.chaosEach, s.cdRatio)}</td>` +
         `<td class="r">${money(it.chaosTotal, s.cdRatio)}</td>` +
+        `<td class="srccell">${esc(srcLabel(it))}</td>` +
       `</tr>`).join('')
-    : '<tr><td colspan="5" class="empty">No items match the current filters.</td></tr>'
+    : `<tr><td colspan="${COLS.length}" class="empty">${esc(T('nw.noMatch'))}</td></tr>`
   wrapEl.innerHTML = `<table><thead><tr>${th}</tr></thead><tbody>${body}</tbody></table>`
 }
 
@@ -538,26 +603,27 @@ function renderGrouped (rows) {
   rows.forEach(it => (cats[it.kind] = cats[it.kind] || []).push(it))
   const presentSet = new Set(Object.keys(cats))
   const order = [...CAT_ORDER.filter(k => presentSet.has(k)), ...[...presentSet].filter(k => !CAT_ORDER.includes(k))]
-  if (!order.length) { wrapEl.innerHTML = '<div class="empty">No items match the current filters.</div>'; return }
+  if (!order.length) { wrapEl.innerHTML = `<div class="empty">${esc(T('nw.noMatch'))}</div>`; return }
   // rows arrive already sorted by the active column (st.sortK/sortDir, applied in
   // render()); bucketing by kind preserves that order, so each group follows the
   // same column sort — no per-group re-sort.
   const gth = COLS.map(([kk, l, align]) =>
-    `<th class="${align}" data-k="${kk}">${esc(l)}${st.sortK === kk ? `<span class="ar">${st.sortDir < 0 ? '▼' : '▲'}</span>` : ''}</th>`).join('')
+    `<th class="${align}" data-k="${kk}">${esc(T(l))}${st.sortK === kk ? `<span class="ar">${st.sortDir < 0 ? '▼' : '▲'}</span>` : ''}</th>`).join('')
   wrapEl.innerHTML = order.map((k, idx) => {
     const g = cats[k]
     const tot = g.reduce((sum, it) => sum + it.chaosTotal, 0)
     const qtySum = g.reduce((sum, it) => sum + it.qty, 0)
     const body = g.map(it => `<tr>` +
-      `<td><span class="iname">${esc(it.name)}${tradeBtn(it.name, it.kind, s.league)}</span></td>` +
+      `<td><span class="iname">${esc(INAME(it.name))}${tradeBtn(it.name, it.kind, s.league)}</span></td>` +
       `<td class="tabcell">${esc(itemTabLabel(it, labels))}</td>` +
       `<td class="r">${fmtC(it.qty)}</td>` +
       `<td class="r">${money(it.chaosEach, s.cdRatio)}</td>` +
       `<td class="r">${money(it.chaosTotal, s.cdRatio)}</td>` +
+      `<td class="srccell">${esc(srcLabel(it))}</td>` +
     `</tr>`).join('')
     return `<div class="grp ${isGroupClosed(k, idx) ? 'closed' : ''}" data-kind="${esc(k)}"><div class="grph">` +
-      `<span class="chev">▾</span><span class="gtitle">${esc(KIND_LABEL[k] || cap(k))}</span>` +
-      `<span class="gcount">${fmtC(g.length)} items · ${fmtC(qtySum)} pcs</span>` +
+      `<span class="chev">▾</span><span class="gtitle">${esc(kindLabel(k))}</span>` +
+      `<span class="gcount">${esc(T('nw.groupCount', { items: fmtC(g.length), pcs: fmtC(qtySum) }))}</span>` +
       `<span class="gval">${money(tot, s.cdRatio)}</span></div>` +
       `<div class="grpbody"><table><thead><tr>${gth}</tr></thead><tbody>${body}</tbody></table></div></div>`
   }).join('')
@@ -595,47 +661,78 @@ wrapEl.addEventListener('click', e => {
 // prefixes the player does not own. Unwanted = ALL item names the game knows
 // (GET /item-names), plus everything from the snapshot that this list does not
 // know (unpriced entries, new bases). Costs characters, but it is correct.
-let itemNameUniverse = null   // string[] | null (not loaded yet)
+//
+// The names in it are the GAME CLIENT's, not the page's (B10). This block is
+// the one place on the page whose output is not read by a human: it is pasted
+// into the game's stash search, which matches the names the client PRINTS. So
+// it does not use INAME (the display table of GET /item-name-map) — it uses its
+// own answer from GET /item-names, which the server builds for the language the
+// game runs in. Same configured value today, a different question, and a
+// different failure mode: getting it wrong highlights the wrong stash slots and
+// can never touch a price.
+//
+// Both halves move together or not at all. Localizing the WANTED names while
+// leaving the universe English would shorten each name against the wrong
+// universe — the "14 slots instead of 9" failure the universe was introduced to
+// fix, back through the side door. Hence one endpoint, one language, one
+// object: `hlNames` is either fully loaded or absent, and while it is absent
+// every name on both sides stays English, which is what this page did before.
+let hlNames = null            // { names: string[], byRef: Record<string,string> } | null
 let itemNamesRequested = false
 
 function ensureItemNames () {
-  if (itemNameUniverse || itemNamesRequested) return
+  if (hlNames || itemNamesRequested) return
   itemNamesRequested = true
-  fetch('/item-names')
+  fetch('/item-names', { credentials: 'same-origin' })
     .then(r => r.ok ? r.json() : null)
     .then(j => {
       if (!Array.isArray(j?.names) || !j.names.length) return
-      itemNameUniverse = j.names
+      hlNames = { names: j.names, byRef: (j.byRef && typeof j.byRef === 'object') ? j.byRef : {} }
       render()   // first pass ran on the snapshot alone -> redraw more precisely
     })
     .catch(() => { /* endpoint missing (old container) -> snapshot fallback stays */ })
 }
+
+// Drop the table so the next render fetches it again (language switch). Both
+// halves go at once — a stale universe with fresh wanted names is exactly the
+// half state this whole block is built to make impossible.
+function forgetItemNames () { hlNames = null; itemNamesRequested = false }
 
 function renderHighlight (rows) {
   if (hlBox.hidden) return
   const s = currentSnapshot
   if (!s) return
   ensureItemNames()
-  const wantedNames = rows.map(r => r.name)
-  const wantedSet = new Set(wantedNames.map(n => String(n).toLowerCase()))
-  const universe = new Set(itemNameUniverse || [])
-  for (const it of (s.items || [])) universe.add(it.name)
-  for (const u of (s.unpriced || [])) universe.add(u.name)
-  const unwanted = [...universe].filter(n => n && !wantedSet.has(String(n).toLowerCase()))
+  // Both lists come out of ONE call, so they can only be in one language —
+  // deliberately NOT through INAME, see above. Snapshot names the data set does
+  // not know (our labels for unidentified uniques, newer bases) ride along as
+  // extraRefs and are translated by the same rule.
+  const { wanted, unwanted } = highlightInputs({
+    refs: rows.map(r => r.name),
+    extraRefs: [...(s.items || []), ...(s.unpriced || [])].map(x => x.name),
+    table: hlNames
+  })
   const maxLen = Math.max(10, Number(hlMax.value) || HIGHLIGHT_MAX_DEFAULT)
-  const r = buildHighlight(wantedNames, unwanted, { maxLen })
+  const r = buildHighlight(wanted, unwanted, { maxLen })
 
   hlText.value = r.text
   hlCopy.disabled = !r.text
   hlMeta.textContent = r.text
-    ? `${fmtC(r.used.length)}/${fmtC(r.used.length + r.dropped.length)} items · ${r.length}/${maxLen} chars`
-    : 'nothing selected — adjust the filters'
+    ? T('nw.hlMeta', { used: fmtC(r.used.length), total: fmtC(r.used.length + r.dropped.length), len: r.length, max: maxLen })
+    : T('nw.hlNothing')
 
   // No silent truncation: what did not fit and what inevitably matches too much
   // is spelled out. Otherwise the regex reads as "covers everything".
+  //
+  // The word guard (B21) is named only when something actually dropped out. It
+  // is why this count can read 6/9 where it read 9/9 before: fragments that
+  // avoid everyday English words are longer, and longer fragments fill the
+  // field sooner. Without the line the three missing entries look like a
+  // smaller selection instead of a price that was paid on purpose.
   const lines = []
-  if (r.dropped.length) lines.push(`<b>${fmtC(r.dropped.length)} no longer fit:</b> ${esc(r.dropped.join(', '))}`)
-  if (r.overmatching.length) lines.push(`<b>unavoidably matches similar items too:</b> ${esc(r.overmatching.join(', '))}`)
+  if (r.dropped.length) lines.push(`<b>${esc(T('nw.hlDropped', { n: fmtC(r.dropped.length) }))}</b> ${esc(r.dropped.join(', '))}`)
+  if (r.dropped.length && r.lengthened.length) lines.push(esc(T('nw.hlWordGuard', { n: fmtC(r.lengthened.length) })))
+  if (r.overmatching.length) lines.push(`<b>${esc(T('nw.hlOvermatch'))}</b> ${esc(r.overmatching.join(', '))}`)
   hlWarn.innerHTML = lines.join('<br>')
   hlWarn.hidden = !lines.length
 }
@@ -650,14 +747,14 @@ hlCopy.addEventListener('click', async () => {
   if (!hlText.value) return
   try {
     await navigator.clipboard.writeText(hlText.value)
-    hlCopy.textContent = 'copied'
+    hlCopy.textContent = T('nw.hlCopied')
   } catch {
     // The clipboard API needs https OR localhost — over plain http on the LAN
     // it does not work. Then at least select the text, so Ctrl+C is enough.
     hlText.select()
-    hlCopy.textContent = 'Ctrl+C'
+    hlCopy.textContent = T('nw.hlCtrlC')
   }
-  setTimeout(() => { hlCopy.textContent = 'Copy' }, 1200)
+  setTimeout(() => { hlCopy.textContent = T('nw.hlCopy') }, 1200)
 })
 
 // ---- Render driver --------------------------------------------------------------
@@ -666,12 +763,18 @@ function render () {
   if (!s) return
   const dir = st.sortDir
   const k = st.sortK
+  // Numbers compare as numbers, everything else as text — and a MISSING value
+  // compares as empty, not as the string "null": `source` is absent on rows
+  // written by a backend from before it was carried, and localeCompare(null)
+  // would have sorted those between "item:…" and "ninja:currency".
   const rows = filteredItems().sort((a, b) =>
-    typeof a[k] === 'string' ? a[k].localeCompare(b[k]) * (-dir) : (a[k] - b[k]) * dir)
+    (typeof a[k] === 'number' && typeof b[k] === 'number')
+      ? (a[k] - b[k]) * dir
+      : String(a[k] ?? '').localeCompare(String(b[k] ?? '')) * (-dir))
   const shownTotal = rows.reduce((sum, it) => sum + it.chaosTotal, 0)
-  statEl.innerHTML = `<b>${fmtC(rows.length)}</b> items shown · <b>${money(shownTotal, s.cdRatio)}</b>`
+  statEl.innerHTML = T('nw.stat_html', { n: fmtC(rows.length), value: money(shownTotal, s.cdRatio) })
   const hidden = hiddenBelowThreshold()
-  statHiddenEl.textContent = hidden ? `${fmtC(hidden)} hidden below threshold` : ''
+  statHiddenEl.textContent = hidden ? T('nw.statHidden', { n: fmtC(hidden) }) : ''
   if (st.view === 'list') renderList(rows); else renderGrouped(rows)
   renderUnpriced(s)
   // rows is sorted by the active column — with the default (total value
@@ -686,25 +789,63 @@ function render () {
 }
 
 // ---- Unpriced (grouped by name, collapsed by default via <details>) -------------
-// Follows the same category/search filters as the table: with the "Gems" chip
-// active, no divination cards may show up here. The tab filter does not apply —
-// unpriced entries are aggregated by name and carry no tab membership.
+// Follows the SAME filters as the table, tab selection included: unchecking a
+// tab used to leave its unpriced items on screen, because the block was fed a
+// name-merged list with no tab membership. Each snapshot row now belongs to
+// exactly one tab (`tabIndex`, like items[]); the rows that survive the filter
+// are re-merged by name for the display. Rows served by an older backend carry
+// no tabIndex — those stay visible rather than silently vanishing.
 function unpricedRows (s) {
-  return (s.unpriced || []).filter(u =>
-    (!st.kinds.size || st.kinds.has(u.kind)) &&
-    (!st.q || String(u.name).toLowerCase().includes(st.q)))
+  const tabIdxOn = onTabIndexSet(s)
+  const byName = new Map()
+  for (const u of (s.unpriced || [])) {
+    if (u.tabIndex != null && !tabIdxOn.has(u.tabIndex)) continue
+    if (st.kinds.size && !st.kinds.has(u.kind)) continue
+    if (st.q && !nameHit(u.name, st.q)) continue
+    const g = byName.get(u.name)
+    if (g) g.count += u.count
+    else byName.set(u.name, { name: u.name, kind: u.kind, count: u.count })
+  }
+  return [...byName.values()].sort((a, b) => b.count - a.count)
+}
+
+// THE SUMMARY LINE AND THE LIST HAVE TO BE THE SAME UNIT. They were not: each
+// row states PIECES (`×N`, the summed stack sizes) while the summary stated
+// counts.unpriced, which counts stash ENTRIES — both printed as "items". They
+// only look equal while every stack is one. A five-stack made the summary too
+// small; a row the account-wide 100-name cap kept out of the list made it too
+// big, which is how "40 unpriced items across 1 names" came to sit over a list
+// adding up to 39. So the summary now states pieces and names, both taken from
+// the rows on screen, and what the list cannot show is said out loud instead of
+// being folded into the headline.
+const unpricedShownPieces = rows => rows.reduce((sum, u) => sum + (Number(u.count) || 0), 0)
+
+// The faithful piece total for the CURRENT selection, or null when it cannot be
+// established — in which case nothing is claimed about what is missing. A kind
+// chip or a search term is not expressible in stash tabs, and a tab stored by a
+// backend that predates this number does not carry it.
+function unpricedPiecesInSelection (s) {
+  if (st.kinds.size || st.q) return null
+  const on = (s.tabs || []).filter(isTabOn)
+  if (!on.every(t => typeof t.unpricedPieces === 'number')) return null
+  return on.reduce((sum, t) => sum + t.unpricedPieces, 0)
 }
 
 function renderUnpriced (s) {
   const un = unpricedRows(s)
   unpricedBox.hidden = un.length === 0
   if (!un.length) return
-  const filtered = st.kinds.size > 0 || st.q
-  const totalUnpriced = filtered
-    ? un.reduce((sum, u) => sum + u.count, 0)
-    : (s.counts?.unpriced ?? un.reduce((sum, u) => sum + u.count, 0))
-  unpricedSummary.textContent = `${fmtC(totalUnpriced)} unpriced items across ${fmtC(un.length)} names (not counted)`
-  unpricedList.innerHTML = un.map(u => `<li>${esc(u.name)} ×${fmtC(u.count)} (${esc(KIND_LABEL[u.kind] || u.kind)})</li>`).join('')
+  const shown = unpricedShownPieces(un)
+  const inSelection = unpricedPiecesInSelection(s)
+  // Clamped: rows an older backend served without a tabIndex stay visible under
+  // every selection (see unpricedRows), so the rows can legitimately add up to
+  // more than the selected tabs do. That is not a shortfall to report.
+  const notListed = inSelection == null ? 0 : Math.max(0, inSelection - shown)
+  unpricedSummary.textContent =
+    T('nw.unpriced', { pcs: fmtC(shown), names: fmtC(un.length), nameWord: TN('nw.unpricedName', un.length) }) +
+    (notListed ? T('nw.unpricedMore', { n: fmtC(notListed) }) : '')
+  unpricedList.innerHTML = un.map(u =>
+    `<li>${esc(T('nw.unpricedRow', { name: INAME(u.name), n: fmtC(u.count), kind: kindLabel(u.kind) }))}</li>`).join('')
 }
 
 // ---- Top-level snapshot rendering -----------------------------------------------
@@ -712,7 +853,7 @@ function showNoResult (msg) {
   shellEl.hidden = true
   if (sideBoxEl) sideBoxEl.hidden = true
   noResultEl.hidden = false
-  noResultEl.textContent = msg || 'Building your snapshot in the background — this fills in automatically.'
+  noResultEl.textContent = msg || T('nw.building')
 }
 
 function renderSnapshot (s) {
@@ -739,31 +880,29 @@ function renderSnapshot (s) {
 }
 
 // Background auto-sync status line. Derived from snapshot.tabs[].syncedAt (the
-// backend stamps each tab when the refresher syncs it). "Fresh" = synced within
-// FRESH_MS — a purely cosmetic display threshold for this status line, not tied
-// to any server config value.
-const FRESH_MS = 10 * 60 * 1000
+// backend stamps each tab when the refresher syncs it). The counter says how
+// many tabs were synced within SYNCED_RECENTLY_MS; see networth-sync.js for why
+// that window is not scaled to the length of a full round.
 function renderAutoSync (s) {
   if (!autosyncEl) return
   // Plain text, no dot/prefix — the conn pill next to the title is the only
   // live indicator. Account, league + last scan hang on the title attribute
   // instead of taking up their own header block.
-  const at = s && s.at ? new Date(s.at).toLocaleString() : ''
+  const at = s && s.at ? new Date(s.at).toLocaleString(I18n.locale()) : ''
   const who = [s && s.accountName, s && s.league].filter(Boolean).join(' · ')
   autosyncEl.title = [who, at && `last scan ${at}`].filter(Boolean).join(' — ')
-  const tabs = ((s && s.tabs) || []).filter(t => typeof t.syncedAt === 'number')
-  if (!tabs.length) { autosyncEl.textContent = 'syncing in background'; return }
-  const now = Date.now()
-  const fresh = tabs.filter(t => now - t.syncedAt < FRESH_MS).length
-  const oldest = tabs.reduce((m, t) => Math.min(m, t.syncedAt), Infinity)
-  const mins = Math.max(0, Math.round((now - oldest) / 60000))
-  autosyncEl.textContent = `${fresh}/${tabs.length} tabs fresh · oldest synced ${mins} min ago`
+  const sum = autosyncSummary(s && s.tabs, Date.now())
+  if (!sum) { autosyncEl.textContent = T('nw.autosyncStarting'); return }
+  autosyncEl.textContent = T('nw.autosync', sum)
 }
 
 function renderHistory (items) {
   historyBox.hidden = !items.length
   historyList.innerHTML = items.slice().reverse().map(h =>
-    `<li>${esc(new Date(h.at).toLocaleString())} — ${fmt(h.totalDivine)} div (${fmt(h.totalChaos)}c) · ${esc(h.league)}</li>`).join('')
+    `<li>${esc(T('nw.historyRow', {
+      when: new Date(h.at).toLocaleString(I18n.locale()),
+      div: fmt(h.totalDivine), chaos: fmt(h.totalChaos), league: h.league
+    }))}</li>`).join('')
 }
 
 function renderError (message) {
@@ -771,33 +910,26 @@ function renderError (message) {
   errBox.textContent = message
 }
 
-// ---- Sync status (M2 status line) + sync-settings dialog --------------------
+// ---- Sync status (M2 status line) -------------------------------------------
 // The server sends `networth-sync-status` on connect and whenever the
 // refresher's state for this user changes (auth pause, cooldown, renewal).
 // The stored POESESSID never travels in any of these messages.
+//
+// The credential FORM is no longer here. It used to be a modal on this page;
+// it lives on the settings page now, together with the admin area, so there is
+// exactly one place where something gets configured. What stays here is the
+// status line and its one job: naming the state and pointing at the page that
+// fixes it.
 const appStatusEl = document.getElementById('appStatus')
-const settingsBtn = document.getElementById('settingsBtn')
-const setGate     = document.getElementById('setGate')
-const setState    = document.getElementById('setState')
-const setAccount  = document.getElementById('setAccount')
-const setSessid   = document.getElementById('setSessid')
-const setHint     = document.getElementById('setHint')
-const setErr      = document.getElementById('setErr')
-const setCancel   = document.getElementById('setCancel')
-const setSave     = document.getElementById('setSave')
 
-let syncStatus = null       // last { state, until? } from the server
+let syncStatus = null       // last networth-sync-status message from the server (whole message: `mine`/`tradeBan` pick the wording)
 let cooldownTimer = null    // clears the "rate-limited" line once `until` passes
 
 function statusLineText (st) {
-  if (!st) return ''
-  if (st.state === 'expired') return 'POESESSID expired — background sync paused. Open settings to renew.'
-  if (st.state === 'cooldown') {
-    const at = st.until ? new Date(st.until).toLocaleTimeString() : 'soon'
-    return `Rate-limited by GGG — sync resumes at ${at}.`
-  }
-  if (st.state === 'missing') return 'No credentials configured — open settings to add them.'
-  return '' // ok -> the slot stays empty and collapses
+  const line = syncStatusLine(st)
+  if (!line) return ''
+  if (!line.timed) return T(line.key)
+  return T(line.key, { at: line.until ? new Date(line.until).toLocaleTimeString(I18n.locale()) : T('nw.syncSoon') })
 }
 
 function applySyncStatus (st) {
@@ -813,103 +945,18 @@ function applySyncStatus (st) {
     const wait = Math.max(1000, st.until - Date.now() + 1000)
     cooldownTimer = setTimeout(() => { if (syncStatus && syncStatus.state === 'cooldown') applySyncStatus({ state: 'ok' }) }, wait)
   }
-  if (!setGate.hidden) renderSettingsState()
 }
 
-function settingsStateText (st) {
-  if (!st) return 'Background sync: state unknown.'
-  if (st.state === 'expired') return 'Background sync is paused — the stored POESESSID has expired. Paste a new one below.'
-  if (st.state === 'cooldown') {
-    const at = st.until ? new Date(st.until).toLocaleTimeString() : 'soon'
-    return `Background sync is rate-limited by GGG and resumes at ${at}. Credentials are fine.`
-  }
-  if (st.state === 'missing') return 'No credentials configured for this user yet. Enter account name and POESESSID to start syncing.'
-  return 'Background sync is running.'
-}
-
-function renderSettingsState () {
-  setState.textContent = settingsStateText(syncStatus)
-  setState.classList.toggle('warn', !!syncStatus && syncStatus.state !== 'ok')
-}
-
-// Non-blocking plausibility hint (NO hard format check — if GGG changes the
-// cookie format, the field must keep working). Live sessions have been 32 hex
-// chars for years; anything else is most likely a paste accident.
-function renderSessidHint () {
-  const v = setSessid.value.trim()
-  const odd = v.length > 0 && v.length !== 32
-  setHint.hidden = !odd
-  setHint.textContent = odd
-    ? `Heads-up: this value is ${v.length} characters — POESESSID cookies are usually 32. Saving is still allowed.`
-    : ''
-}
-setSessid.addEventListener('input', renderSessidHint)
-
-function openSettings () {
-  setErr.hidden = true; setErr.textContent = ''
-  setSessid.value = ''            // ALWAYS empty — the stored value is never shown
-  renderSessidHint()
-  setAccount.value = ''
-  renderSettingsState()
-  setGate.hidden = false
-  // Current accountName (never the poesessid) + fresh state from the server.
-  fetch('/networth/credentials')
-    .then(r => (r.ok ? r.json() : null))
-    .then(j => {
-      if (!j || setGate.hidden) return
-      if (j.accountName && !setAccount.value) setAccount.value = j.accountName
-      if (j.status) applySyncStatus(j.status)
-    })
-    .catch(() => { /* dialog still usable — save reports its own errors */ })
-  setAccount.focus()
-}
-
-function closeSettings () { setGate.hidden = true }
-
-async function saveSettings () {
-  setErr.hidden = true; setErr.textContent = ''
-  setSave.disabled = true
-  try {
-    const r = await fetch('/networth/credentials', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ accountName: setAccount.value, poesessid: setSessid.value })
-    })
-    const j = await r.json().catch(() => null)
-    if (!r.ok) {
-      setErr.textContent = (j && j.error) ? j.error : `Saving failed (HTTP ${r.status}).`
-      setErr.hidden = false
-      return
-    }
-    setSessid.value = ''          // never keep the value around after a save
-    renderSessidHint()
-    if (j && j.status) applySyncStatus(j.status)
-    closeSettings()
-  } catch {
-    setErr.textContent = 'Saving failed — server not reachable.'
-    setErr.hidden = false
-  } finally {
-    setSave.disabled = false
-  }
-}
-
-if (settingsBtn) settingsBtn.addEventListener('click', openSettings)
-// The status line is the other opener — but ONLY its sync message: every state
-// that one shows is fixed in the settings dialog. The data auto-update note in
-// the same slot is informational and must not open anything.
+// Clicking the SYNC message goes to the settings page — every state it can show
+// ("expired", "no credentials") is fixed there. The data auto-update note in
+// the same slot is informational and must not navigate anywhere.
 if (appStatusEl) {
   appStatusEl.addEventListener('click', e => {
     const hit = e.target && e.target.closest ? e.target.closest('[data-status-key]') : null
     if (hit && hit.dataset.statusKey !== 'sync') return
-    if (statusLineText(syncStatus)) openSettings()
+    if (statusLineText(syncStatus)) location.href = '/settings.html'
   })
 }
-setCancel.addEventListener('click', closeSettings)
-setSave.addEventListener('click', saveSettings)
-setGate.addEventListener('click', e => { if (e.target === setGate) closeSettings() })
-document.addEventListener('keydown', e => { if (e.key === 'Escape' && !setGate.hidden) closeSettings() })
-setSessid.addEventListener('keydown', e => { if (e.key === 'Enter') saveSettings() })
-setAccount.addEventListener('keydown', e => { if (e.key === 'Enter') saveSettings() })
 
 // ---- Identity (multi-user routing, no login) ------------------------------
 const idgate     = document.getElementById('idgate')
@@ -918,6 +965,7 @@ const whoami     = document.getElementById('whoami')
 const whoamiName = document.getElementById('whoamiName')
 
 let USERS = ['player1', 'player2']
+let USER_LANGS = {}   // user -> client language, from GET /users (POE_USER_LANGS)
 let currentUser = null
 
 function readCookie (name) {
@@ -936,7 +984,7 @@ function hideIdGate () { if (idgate) idgate.hidden = true }
 function pickUser (u) {
   if (!USERS.includes(u)) return
   currentUser = u
-  setUserCookie(u); hideIdGate(); showWhoami(u)
+  setUserCookie(u); I18n.applyUsers(USER_LANGS, u); hideIdGate(); showWhoami(u)
   if (ws) { try { ws.close() } catch {} ws = null }
   connect()
 }
@@ -951,9 +999,11 @@ async function initIdentity () {
     const r = await fetch('/users')
     const j = await r.json()
     if (Array.isArray(j.users) && j.users.length) USERS = j.users
-    if (j.appName) window.Shell.applyBrand(j.appName, 'Net Worth')
+    if (j.langs && typeof j.langs === 'object') USER_LANGS = j.langs
+    if (j.appName) window.Shell.applyBrand(j.appName, 'nav.networth')
   } catch { /* keep fallback list + fallback brand */ }
   const cookie = readCookie('ppt_user')
+  I18n.applyUsers(USER_LANGS, cookie)
   if (cookie && USERS.includes(cookie)) { currentUser = cookie; showWhoami(cookie); connect() }
   else showIdGate()
 }
@@ -969,11 +1019,11 @@ function connect () {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
   ws = new WebSocket(`${proto}//${location.host}/events`)
   ws.addEventListener('open', () => {
-    retry = 0; setConn('live', 'live')
+    retry = 0; setConn('live', T('conn.live'))
     sendSafe({ type: 'networth-history' })
   })
   ws.addEventListener('close', () => {
-    setConn('down', 'reconnecting…')
+    setConn('down', T('conn.reconnecting'))
     retry = Math.min(retry + 1, 6)
     setTimeout(connect, 400 * retry)
   })
@@ -999,11 +1049,12 @@ function connect () {
         renderHistory(msg.items || [])
         break
       case 'networth-sync-status':
-        applySyncStatus({ state: msg.state, until: msg.until })
+        applySyncStatus(msg)
         break
       case 'cd-ratio':     window.Shell.applyCdRatio(msg); break     // global rail tile
       case 'league-state': window.Shell.applyLeagueState(msg); break // global rail slot
       case 'data-status':  window.Shell.applyDataStatus(msg); break  // M2 data freshness
+      case 'release-status': window.Shell.applyReleaseStatus(msg); break // newer release -> status line
       case 'need-identity':
         if (Array.isArray(msg.users) && msg.users.length) USERS = msg.users
         if (whoami) whoami.hidden = true
@@ -1015,5 +1066,21 @@ function connect () {
 }
 
 window.Shell.initLeague(obj => sendSafe(obj))
+
+// Everything this page draws itself has to follow a language change: the whole
+// snapshot render (sidebar, bars, chips, table, unpriced) and the sync status
+// line.
+I18n.onChange(() => {
+  // The highlight universe was fetched for the language that was in force when
+  // the page loaded. A language switch is the one event that invalidates it —
+  // the SERVER still decides which language the new answer is in (that is the
+  // game's language, a different question from the page's), this only says
+  // "ask again". Without it the regex keeps yesterday's language until reload.
+  forgetItemNames()
+  if (currentSnapshot) renderSnapshot(currentSnapshot)
+  applySyncStatus(syncStatus)
+  if (noResultEl && !noResultEl.hidden) showNoResult()
+  if (conn.classList.contains('live')) setConn('live', T('conn.live'))
+})
 
 initIdentity()

@@ -6,7 +6,22 @@ import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import path from 'node:path'
 import { tmpdir } from 'node:os'
+import { quietEnv } from './test-quiet-env.mjs'
 
+// The full set that keeps a booted server off the network. One list, imported:
+// every file that wrote it out by hand left something out, and what kept being
+// left out was the switch a WebSocket needs (test-quiet-env.mjs, docs/bugs.md
+// B25). Applied FIRST — anything this file sets below overrides it on purpose.
+quietEnv()
+// PRICING IS ON HERE, DELIBERATELY, and it is the one switch of the quiet set
+// this file turns back off: the exchange price path is what this file measures. Nothing leaves
+// the machine for it — `fetch` is stubbed in this file, and the runner's guard
+// (test-net-guard.mjs) blocks anything that is not loopback anyway. Written out
+// rather than left implicit, because "this file prices" used to be visible only
+// as the ABSENCE of a line.
+delete process.env.POE_PRICE_CHECK_DISABLED
+// And this one, for the same reason and with the same protection: the Faustus store IS the price source under test here.
+delete process.env.POE_FAUSTUS_DISABLED
 process.env.PORT = '0'
 // Faustus stays ON here (unlike most other server.mjs-importing tests): the
 // store is populated directly via setPrices below and read back through
@@ -223,4 +238,82 @@ test('faustusRangeFor: range from the store, same league/freshness guards', asyn
   assert.deepEqual(mod.faustusRangeFor(mem, 'Standard'), { min: 10, max: 17 })
   assert.equal(mod.faustusRangeFor(astro, 'Standard'), null, 'no range stored -> null')
   assert.equal(mod.faustusRangeFor(mem, 'Allflame'), null, 'a foreign league never yields a range')
+})
+
+// --- age of the observation (exchangeAgeHours) -------------------------------
+//
+// The report this covers: the card said 206.6c for The Chosen while the in-game
+// Currency Exchange sold it at 147c, and a second card of the same league at
+// the same minute (Imperfect Memories, 19c against 21c in-game) came out of the
+// identical code path essentially right. What separates them is not the market
+// SIDE — a rate sitting between bid and ask would land ABOVE 21 for the second
+// card, not below it — but which hour the observation is from. So the card has
+// to be able to say that, and the valuation has to stop using a number that is
+// too old (networth/faustus-age.mjs).
+
+const HOUR_MS = 60 * 60 * 1000
+/** unix hour that CLOSED `h` hours ago, i.e. an observation `h` hours old. */
+const closedHoursAgo = h => Math.floor((Date.now() - (h + 1) * HOUR_MS) / 1000)
+
+test('faustusStaleHoursFor: silent while the price is as fresh as the pipeline allows', async () => {
+  // Default refresh is hourly, so a served price is never fresher than 2h:
+  // one hour of digest granularity plus one refresh interval. Labelling that
+  // would put a marker on every card and the marker would stop being read.
+  await mod.faustusStore.setPrices('Standard', { 'Memory of Reverence': 13.6 }, Date.now(), null, null,
+    { 'Memory of Reverence': closedHoursAgo(0) })
+  const mem = { name: 'Memory of Reverence', info: { refName: 'Memory of Reverence' } }
+  assert.equal(mod.faustusStaleHoursFor(mem, 'Standard'), null)
+
+  await mod.faustusStore.setPrices('Standard', { 'Memory of Reverence': 13.6 }, Date.now(), null, null,
+    { 'Memory of Reverence': closedHoursAgo(1.5) })
+  assert.equal(mod.faustusStaleHoursFor(mem, 'Standard'), null, 'still inside the unavoidable lag')
+})
+
+test('faustusStaleHoursFor: past the lag it names the whole hours, and the league guard holds', async () => {
+  await mod.faustusStore.setPrices('Standard', { 'Memory of Reverence': 13.6 }, Date.now(), null, null,
+    { 'Memory of Reverence': closedHoursAgo(4) })
+  const mem = { name: 'Memory of Reverence', info: { refName: 'Memory of Reverence' } }
+  assert.equal(mod.faustusStaleHoursFor(mem, 'Standard'), 4)
+  assert.equal(mod.faustusStaleHoursFor(mem, 'Allflame'), null, 'a foreign league says nothing')
+})
+
+test('faustusStaleHoursFor: no stored hour -> no claim about the age', async () => {
+  await mod.faustusStore.setPrices('Standard', { 'Memory of Reverence': 13.6 })
+  const mem = { name: 'Memory of Reverence', info: { refName: 'Memory of Reverence' } }
+  assert.equal(mod.faustusStaleHoursFor(mem, 'Standard'), null)
+})
+
+test('faustusChaosFor: an observation past the age gate is not served as a price', async () => {
+  // Same gate the net-worth valuator applies, on purpose: a card and the net
+  // worth that disagree about one item are worse than either being wrong alone.
+  // Default POE_FAUSTUS_MAX_AGE_HOURS is 6.
+  const box = { name: "Valdo's Puzzle Box", info: { refName: "Valdo's Puzzle Box" } }
+  await mod.faustusStore.setPrices('Standard', { "Valdo's Puzzle Box": 55.5 }, Date.now(), null, null,
+    { "Valdo's Puzzle Box": closedHoursAgo(5) })
+  assert.equal(mod.faustusChaosFor(box, 'Standard'), 55.5, 'inside the gate: unchanged')
+
+  await mod.faustusStore.setPrices('Standard', { "Valdo's Puzzle Box": 55.5 }, Date.now(), null, null,
+    { "Valdo's Puzzle Box": closedHoursAgo(9) })
+  assert.equal(mod.faustusChaosFor(box, 'Standard'), null,
+    'past the gate the item routes like one Faustus never quoted')
+})
+
+test('withExchangeMain: the age rides along as exchangeAgeHours, and is absent when fresh', () => {
+  const aged = mod.withExchangeMain(tradeResult(), 206.6, CD, { min: 142, max: 300 }, 'The Chosen', 6)
+  assert.equal(aged.exchangeAgeHours, 6)
+  assert.deepEqual(aged.exchangeRange, { low: 142, high: 300 })
+
+  // Fresh, and everything the server can hand over that is NOT a positive
+  // number of hours: no field at all, never a "0 h old" that reads like a
+  // guarantee of freshness the source cannot give.
+  for (const v of [null, undefined, 0, -1, NaN, '3']) {
+    const fresh = mod.withExchangeMain(tradeResult(), 206.6, CD, null, 'The Chosen', v)
+    assert.equal('exchangeAgeHours' in fresh, false, `${String(v)} produced an age field`)
+  }
+})
+
+test('no Faustus value: the age never appears on a trade-priced card', () => {
+  const base = tradeResult({ tradeKind: 'search', currency: 'chaos', priceLow: 1, priceHigh: 5 })
+  const r = mod.withExchangeMain(base, null, CD, null, 'The Trial', 7)
+  assert.deepEqual(r, base, 'no exchange headline, so nothing to date')
 })

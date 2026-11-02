@@ -1,0 +1,15 @@
+Item Class: Belts
+Rarity: Unique
+The Tides of Time
+Vanguard Belt
+--------
+Requirements:
+Level: 78
+--------
+Item Level: 87
+--------
+{ Implicit Modifier — Defences, Armour, Evasion }
++310(260-320) to Armour and Evasion Rating
+--------
+{ Unique Modifier — Life — 20% Increased }
+100% increased Life Recovery from Flasks

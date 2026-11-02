@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { buildHighlight, shortestToken, HIGHLIGHT_MAX_DEFAULT } from './highlight.js'
+import { buildHighlight, highlightInputs, shortestToken, HIGHLIGHT_MAX_DEFAULT } from './highlight.js'
 
 // Real case from the fragment tab: the valuable scarabs should light up in the
 // stash, the whole cheap rest should not.
@@ -158,4 +158,187 @@ test('the cap bites honestly when more precise tokens no longer fit', () => {
   assert.equal(r.used.length + r.dropped.length, SCREENSHOT_WANTED.length, 'nothing disappears silently')
   const re = new RegExp(r.text.slice(1, -1), 'i')
   for (const w of r.used) assert.ok(re.test(w), `${w} is listed as "used" but does not light up`)
+})
+
+// ---------------------------------------------------------------------------
+// B21: the game searches the WHOLE item text, flavour text included.
+//
+// Reproduced in game 2026-08-13 with these nine divination cards. The generated
+// regex was "awr|ne be|mono|ial l|tuna|rker |oml|yos|some" and twelve slots lit
+// up, six of them cards nobody asked for — every one of them because its
+// FLAVOUR TEXT contains "some".
+// ---------------------------------------------------------------------------
+const CARDS = ['Mawr Blaidd', 'Divine Beauty', 'Monochrome', 'Imperial Legacy',
+  'The Fortunate', 'Darker Half', 'The Fathomless Depths', 'Matryoshka', 'Something Dark']
+
+// The six false hits, with the flavour text that produced them — copied from
+// the in-game reading, shortened only where the sentence continues. These are
+// the ONLY flavour texts this repository has; they are evidence, not a data
+// set, and nothing here may pretend they cover the game.
+const FLAVOUR = [
+  ['Boon of Justice', 'Some gifts are obligations while others are simply opportunities.'],
+  ["Demigod's Wager", 'Sometimes you need to make your own luck.'],
+  ['Disdain', "but you'll see more than some see in a lifetime."],
+  ['Forbidden Power', 'Some things should not be used. Some power is too great a risk.'],
+  ['The Aesthete', 'Some see our mortal flesh as a limitation.'],
+  ['The Body', 'all must flow through the body at some point.']
+]
+
+test('B21: "some" is unique among the NAMES — which is why the name check let it through', () => {
+  // The seven hits: the wanted card, and six flavour texts. The first one is
+  // the only one the old universe could see.
+  const inNames = ALL_NAMES.filter(n => n.toLowerCase().includes('some'))
+  assert.deepEqual(inNames, ['Something Dark'], 'the name list knows exactly one "some"')
+  for (const [card, text] of FLAVOUR) {
+    assert.ok(text.toLowerCase().includes('some'), `${card}: flavour text without "some"`)
+    assert.ok(!card.toLowerCase().includes('some'), `${card}: the NAME already contains it, wrong example`)
+  }
+  assert.equal(1 + FLAVOUR.length, 7, 'one name hit plus six flavour hits')
+})
+
+test('B21: the nine cards no longer produce "some"', () => {
+  const r = buildHighlight(CARDS, ALL_NAMES)
+  assert.ok(!r.tokens.includes('some'), `still there: ${r.text}`)
+  // and the six false hits stay dark: no fragment occurs in their flavour text.
+  const re = new RegExp(r.text.slice(1, -1), 'i')
+  for (const [card, text] of FLAVOUR) {
+    assert.ok(!re.test(text), `${card} would light up again via its flavour text: ${r.text}`)
+  }
+})
+
+test('B21: the nine names still light up, and nothing foreign does', () => {
+  const r = buildHighlight(CARDS, ALL_NAMES)
+  const re = new RegExp(r.text.slice(1, -1), 'i')
+  for (const c of CARDS) assert.ok(re.test(c), `${c} should light up`)
+  const wantedLower = new Set(CARDS.map(n => n.toLowerCase()))
+  const bad = ALL_NAMES.filter(n => !wantedLower.has(n.toLowerCase()) && re.test(n))
+  assert.deepEqual(bad, [], `false hits by NAME: ${bad.join(' | ')}`)
+})
+
+test('B21: the guard is named as the reason, per entry', () => {
+  const r = buildHighlight(CARDS, ALL_NAMES)
+  assert.deepEqual(r.lengthened, ['Something Dark'],
+    'only the card whose short fragment was an everyday word')
+  assert.ok(r.entries.find(e => e.name === 'Monochrome').token.length <= 4,
+    'a fragment the guard has no opinion about must not grow')
+})
+
+test('B21: what does not fit is still counted honestly, and the guard is why', () => {
+  // At 250 all nine fit (49 characters). Force the cap to bite and the numbers
+  // must still add up — the page prints used/(used+dropped).
+  const full = buildHighlight(CARDS, ALL_NAMES)
+  assert.equal(full.used.length, CARDS.length, `not all nine fit: ${full.dropped.join(', ')}`)
+  const tight = buildHighlight(CARDS, ALL_NAMES, { maxLen: 30 })
+  assert.ok(tight.dropped.length > 0)
+  assert.equal(tight.used.length + tight.dropped.length, CARDS.length, 'nothing disappears silently')
+  assert.ok(tight.length <= 30)
+  assert.ok(tight.lengthened.length > 0, 'the reason line has something to say')
+})
+
+test('B21: a name that cannot be shortened safely passes as the WHOLE name', () => {
+  // Every proper substring of "others" sits inside the everyday word "others"
+  // itself, so the guard refuses them all. The full name is exempt — a long
+  // entry beats a wrong one — and this is NOT overmatching: no other name
+  // contains it.
+  const r = buildHighlight(['Others'], ['Chaos Orb'])
+  assert.deepEqual(r.tokens, ['others'])
+  assert.deepEqual(r.overmatching, [])
+  assert.deepEqual(r.lengthened, ['Others'])
+})
+
+test('B21: the guard is a heuristic, and this is what it does NOT catch', () => {
+  // Honesty test, and it is meant to fail the day someone claims completeness:
+  // "tuna" comes from The Fortunate and passes, because "fortunate" is not on
+  // the word list. Any flavour text using that word still lights up. Without
+  // the flavour texts themselves nothing in this repository can do better.
+  const r = buildHighlight(CARDS, ALL_NAMES)
+  assert.ok(r.tokens.includes('tuna'), 'the example changed — rewrite this test, do not delete it')
+  assert.ok('fortunate'.includes('tuna'), 'and a word nobody listed contains it')
+  assert.ok(!FLAVOUR.some(([, t]) => t.toLowerCase().includes('tuna')),
+    'the six measured texts happen not to say it — which is luck, not coverage')
+})
+
+// ---- B10: the regex is matched by the GAME, so it speaks the GAME's language ----
+// `table` is the answer of GET /item-names: `names` are the spellings that need
+// no translation, `byRef` maps the English reference name a snapshot row travels
+// under to the spelling the client prints.
+const DE_TABLE = {
+  names: ['Cortex'],                       // identical in both languages
+  byRef: {
+    'Chaos Orb': 'Chaossphäre',
+    'Divine Orb': 'Erhabene Sphäre',
+    'Orb of Alchemy': 'Sphäre der Alchemie'
+  }
+}
+
+test('highlightInputs: wanted AND universe are in the client language', () => {
+  const { wanted, unwanted } = highlightInputs({
+    refs: ['Chaos Orb'],
+    extraRefs: ['Chaos Orb', 'Divine Orb'],
+    table: DE_TABLE
+  })
+  assert.deepEqual(wanted, ['Chaossphäre'])
+  // The decisive half: no English reference name may survive in the exclusion
+  // set. A German wanted list shortened against an English universe is the
+  // "unambiguous in a universe nobody searches" failure.
+  for (const n of unwanted) assert.ok(!Object.hasOwn(DE_TABLE.byRef, n), `${n} is still English`)
+  assert.ok(unwanted.includes('Erhabene Sphäre'))
+  assert.ok(unwanted.includes('Cortex'), 'a name that needs no translation belongs in the universe too')
+  assert.ok(!unwanted.includes('Chaossphäre'), 'the wanted name is not its own competitor')
+})
+
+test('highlightInputs: no table -> everything English, on BOTH sides', () => {
+  // Old container, failed request, primary language: the fallback may never be
+  // half a translation.
+  const { wanted, unwanted } = highlightInputs({
+    refs: ['Chaos Orb'], extraRefs: ['Chaos Orb', 'Divine Orb'], table: null
+  })
+  assert.deepEqual(wanted, ['Chaos Orb'])
+  assert.deepEqual(unwanted, ['Divine Orb'])
+})
+
+test('highlightInputs: a name the data set does not know stays as it is, everywhere', () => {
+  // Our own label for an unidentified unique map. The client prints it in
+  // English too, so passing it through is the right answer — and it has to be
+  // the same string in both lists or it becomes its own competitor.
+  const label = 'Unidentified Map (Tier 16)'
+  const { wanted, unwanted } = highlightInputs({
+    refs: [label], extraRefs: [label, 'Chaos Orb'], table: DE_TABLE
+  })
+  assert.deepEqual(wanted, [label])
+  assert.ok(!unwanted.includes(label))
+  assert.ok(unwanted.includes('Chaossphäre'))
+})
+
+test('highlightInputs: the fragments really come out German', () => {
+  // End to end through the generator: with the German table the token has to be
+  // a piece of the German name, and must not appear in the German universe.
+  const { wanted, unwanted } = highlightInputs({
+    refs: ['Chaos Orb'], extraRefs: [], table: DE_TABLE
+  })
+  const r = buildHighlight(wanted, unwanted)
+  assert.ok('chaossphäre'.includes(r.tokens[0]), `${r.tokens[0]} is not a piece of the German name`)
+  for (const n of unwanted) assert.ok(!n.toLowerCase().includes(r.tokens[0]), `${r.tokens[0]} also matches ${n}`)
+})
+
+// ---- and the page has to SAY it, not just compute it ----------------------------
+// `lengthened` is worth nothing while it sits in the return value unread. The
+// page has no unit test of its own (renderHighlight writes into the DOM), so
+// this reads the source: the reason line must exist in both string tables and
+// must be printed exactly when something dropped out AND the guard is why.
+import vm from 'node:vm'
+
+test('the page prints the reason when the field ran out', async () => {
+  const nw = readFileSync(new URL('./networth.js', import.meta.url), 'utf8')
+  assert.match(nw, /r\.dropped\.length && r\.lengthened\.length/,
+    'the reason line is not tied to a drop AND the guard')
+  assert.match(nw, /T\('nw\.hlWordGuard', \{ n: fmtC\(r\.lengthened\.length\) \}\)/,
+    'the count printed must be the number of lengthened fragments')
+
+  const ctx = vm.createContext({ window: {} })
+  vm.runInContext(readFileSync(new URL('./i18n.js', import.meta.url), 'utf8'), ctx, { filename: 'i18n.js' })
+  for (const lang of ['en', 'de']) {
+    const s = ctx.window.I18n.STRINGS[lang]['nw.hlWordGuard']
+    assert.ok(s && s.includes('{n}'), `${lang}: the reason line is missing or does not count`)
+  }
 })

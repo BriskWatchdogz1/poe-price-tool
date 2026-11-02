@@ -1,0 +1,15 @@
+Gegenstandsklasse: Gürtel
+Seltenheit: Einzigartig
+Die Gezeiten der Zeit
+Vorhut-Gürtel
+--------
+Anforderungen:
+Stufe: 78
+--------
+Gegenstandsstufe: 87
+--------
+{ Impliziter Modifikator — Defensiven, Rüstung, Ausweichen }
++310(260-320) zu Rüstung und Ausweichwert
+--------
+{ Einzigartiger Modifikator — Leben — 20% erhöht }
+100% erhöhte Lebenswiederherstellung von Fläschchen

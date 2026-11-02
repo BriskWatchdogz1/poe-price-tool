@@ -4,12 +4,12 @@
  * - Holds a WebSocket endpoint at /events.
  * - Simulates a realistic price-check session: cd-ratio, a burst of item-added
  *   cards that move queued -> searching -> priced, periodic queue-status with
- *   changing depth + rate-limit dots, and priority requeries on `search`.
+ *   changing depth + rate-limit snapshot, and priority requeries on `search`.
  *
- * Only dependency: `ws` (already vendored for the MVP server).
+ * Only dependency: `ws` (the same one server.mjs uses).
  * Start:  node backend/v2/mock-server.mjs   (PORT env optional, default 8788)
  *
- * This does NOT touch the existing MVP server (backend/server.js).
+ * This is a standalone stand-in; it shares no state with server.mjs.
  */
 import { createServer } from 'node:http'
 import { readFile, stat } from 'node:fs/promises'
@@ -205,7 +205,7 @@ wss.on('connection', ws => {
     })
   }
 
-  // 4) periodic queue-status with wandering depth + rate-limit dots
+  // 4) periodic queue-status with wandering depth + rate-limit snapshot
   let tick = 0
   const qTimer = setInterval(() => {
     tick++

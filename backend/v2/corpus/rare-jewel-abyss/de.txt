@@ -1,0 +1,25 @@
+Gegenstandsklasse: Abgrund-Juwelen
+Seltenheit: Selten
+Flüsternder Vorzeichen
+Juwel der angsteinflößenden Augen
+--------
+Abgrund
+Immaterialität: 10%
+--------
+Anforderungen:
+Stufe: 50
+--------
+Gegenstandsstufe: 63
+--------
+{ Präfix-Modifikator "Rasiermesserscharfer" (Level: 3) — Schaden, Physisch, Kreatur }
+Kreaturen verursachen 17(14-17) bis 22(20-23) zusätzlichen physischen Schaden
+{ Präfix-Modifikator "Gesunder" (Level: 3) — Leben }
++30(26-30) zu maximalem Leben
+{ Suffix-Modifikator "des Behütens" (Level: 1) }
++3(3-4)% Chance, Angriffsschaden zu blocken, wenn Ihr kürzlich Schaden von einem Treffer erlitten habt
+(Kürzlich bezieht sich auf die letzten 4 Sekunden)
+{ Suffix-Modifikator "des Trainings" (Level: 1) — Angriff, Zauberer, Geschwindigkeit, Kreatur }
+Kreaturen haben 5(4-6)% erhöhte Angriffsgeschwindigkeit
+Kreaturen haben 5(4-6)% erhöhte Zaubergeschwindigkeit
+--------
+Kann in eine Abgrund-Fassung eines Gegenstands oder in eine zugewiesene Fassung im Fertigkeitenbaum eingesetzt werden. Mit Rechtsklick kannst du es aus der Fassung entfernen.

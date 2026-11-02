@@ -1,0 +1,3 @@
+rare
+armour-percentile
+socket-colours

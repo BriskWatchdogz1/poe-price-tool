@@ -11,14 +11,23 @@
 // nor poe.ninja (1c) carries a number anywhere near it.
 //
 // So this module does two things, in this order of importance:
-//   1. LOG the jump with everything needed to identify the source next time.
+//   1. LOG the jump with everything needed to identify the source next time —
+//      including WHICH price source produced the number (`opts.sourceOf`,
+//      carried per item from the snapshot through history.mjs). That is the
+//      one thing the Scavenger night could not answer.
 //   2. Record the point at the item's PREVIOUS unit price instead of the new
-//      one, and correct the point's total by the same amount.
+//      one, and correct the point's total by the same amount. An item that has
+//      no previous price is covered by the arrival bar further down.
 //
 // It deliberately guards the HISTORY only — the live snapshot keeps showing
 // whatever the valuator produced. A brake that silently rewrote the displayed
 // net worth would hide exactly the bug we are trying to catch.
 'use strict'
+
+// The shared "read a number out of the environment" rule, used by
+// guardOptionsFromEnv further down. The defaults stay here, with the prose that
+// argues them; only the parsing is shared.
+import { readEnvNumber } from '../env-number.mjs'
 
 // A jump must clear BOTH bars to count as implausible, so that ordinary market
 // moves and cheap items are never touched:
@@ -34,19 +43,131 @@ export const GUARD_SHARE = 0.25
 // the series forever — after this long the new price is accepted (and logged).
 export const GUARD_MAX_HOLD_MS = 6 * 60 * 60 * 1000
 
+/* ---- the second bar: items ENTERING the snapshot ---------------------------
+ * The bars above compare an item against its own previous unit price, so they
+ * only ever protect items that were already there. On 2026-08-10 that gap was
+ * hit head-on: "The Twilight Moon", a divination card that trades at about one
+ * chaos, entered the stash as a quantity change of +1 and was recorded at
+ * ~11,700c (55.2 divine at that hour's 212 c/div). It had no entry in the
+ * previous map, so there was no previous price, and nothing for `factor` to
+ * measure against. The brake never saw it.
+ *
+ * TWO things close that gap, in this order:
+ *
+ * 1. THE GUARD REMEMBERS PRICES IT HAS ACCEPTED (`known` below), for as long as
+ *    a hold may last. An item that left the stash and comes back is therefore
+ *    still judged against what this very tool last paid attention to for that
+ *    name — the "same source's own history for that name" — instead of
+ *    arriving unexamined. This is the cheap half and it costs no new threshold.
+ *
+ * 2. FOR A NAME THE GUARD HAS NEVER SEEN there is, by construction, nothing to
+ *    compare against. No factor applies, and a unit-price ceiling per category
+ *    cannot work either: the same divination-card overview legitimately carries
+ *    The Doctor and The Apothecary at thousands of chaos apiece, so a ceiling
+ *    that catches an 11,700c Twilight Moon blanks the expensive cards that are
+ *    real — the "a flat bar punishes whatever is expensive" failure the volume
+ *    floors in faustus.mjs and valuator.mjs are already full of.
+ *
+ *    So the arrival bar does not decide whether the price is right. It decides
+ *    whether the series may lean on it YET, and the answer for a big unknown is
+ *    "not until it has stood for a while": the item is recorded at NO value at
+ *    all until it stands through `maxHoldMs` — present in every point recorded
+ *    in that window, not merely six hours older than the suspicion — and is
+ *    then accepted. That follows the rule the rest of this tool prices by — an
+ *    unpriced item is honest, a wrongly priced one is not — and it is the same
+ *    shape as the hold above, so a real arrival is late in the series rather
+ *    than missing from it.
+ *
+ *    LATE IS ONLY HONEST IF IT IS ALSO VISIBLE. Withholding is one half; the
+ *    other is how the acceptance is booked. Nothing was ever counted for this
+ *    name, so the moment it is accepted the whole stock ENTERS the series — an
+ *    inflow, at the point where it becomes countable, not a revaluation of
+ *    stock the series already carried. Booked the other way (the value change
+ *    on the price side, quantity delta zero) a 25-divine find appears in no
+ *    event list at all and then jumps into the curve unexplained, which is the
+ *    exact defect this brake exists to prevent. `apply` reports the release in
+ *    `notes` and history.mjs does the booking; see `withoutReleased` there.
+ *
+ *    It fires only when BOTH hold:
+ *      share  — the arrival is worth at least `share` of the previous total
+ *               (the same yardstick as the jump bar), and
+ *      floor  — it is worth at least GUARD_ARRIVAL_MIN_DIVINE divine.
+ *
+ *    The floor is what keeps the bar out of ordinary play. Without it every
+ *    drop is a large share of a small total early in a league, and the brake
+ *    would suppress the first hours of every fresh account. It is denominated
+ *    in DIVINE, like EVENT_MIN_DIVINE in history.mjs, so it does not drift as
+ *    the chaos scale of a league moves; the point's own C:D converts it.
+ *
+ *    The default is a judgement call bounded by the one measured case, not a
+ *    measured optimum: the observed artefact entered at 55 divine on a ~94
+ *    divine account, and the two other suspicious cards in that same window
+ *    (The Demoness at 7.8 divine, Enmity's Embrace at 12.9 divine) are BELOW
+ *    this floor and would not be caught. That is deliberate — neither of those
+ *    two was ever shown to be wrong, and suppressing a 10-divine arrival for
+ *    six hours on suspicion alone costs more than it buys.
+ */
+export const GUARD_ARRIVAL_MIN_DIVINE = 20
+
+/**
+ * guardOptionsFromEnv(env, { log }) -> { factor, share, maxHoldMs, arrivalMinDivine }
+ *
+ * Reads the four bars out of an environment. It lives here rather than in
+ * server.mjs because the module constants above are the documented defaults and
+ * a second reader would drift from them — but the READING itself is the shared
+ * one (env-number.mjs), so these four obey the same rule as every other numeric
+ * setting: unset and blank fall back in silence, an unusable value falls back
+ * and says so, and whether zero is legal is stated rather than implied.
+ *
+ * WHY NOT `Number(env) || DEFAULT`: because that cannot express ZERO, and zero
+ * is a meaningful setting for at least one of these — `arrivalMinDivine = 0`
+ * removes the arrival bar's floor, which switches the bar off entirely (see the
+ * `arrivalFloor` line in `apply`). With `||` an operator who sets it to 0 gets
+ * 20 back and no error, so "every bar is settable" was true for every value
+ * except the one that turns a bar off. All four take zero, which is why every
+ * spec below says `zero: true`.
+ */
+// Exported so a documentation test can ask the same question of these four that
+// it asks of numeric-settings.mjs's table: does docs/admin.md say what a 0 means
+// for each of them? They all take one, and all four answers are surprising in
+// their own way (see the rows in that table).
+export const GUARD_SPECS = [
+  ['factor', { name: 'POE_NETWORTH_GUARD_FACTOR', fallback: GUARD_FACTOR, zero: true }],
+  ['share', { name: 'POE_NETWORTH_GUARD_SHARE', fallback: GUARD_SHARE, zero: true }],
+  ['maxHoldMs', { name: 'POE_NETWORTH_GUARD_HOLD_MS', fallback: GUARD_MAX_HOLD_MS, zero: true }],
+  ['arrivalMinDivine', { name: 'POE_NETWORTH_GUARD_ARRIVAL_MIN_DIVINE', fallback: GUARD_ARRIVAL_MIN_DIVINE, zero: true }]
+]
+
+export function guardOptionsFromEnv (env = process.env, { log } = {}) {
+  const out = {}
+  for (const [key, spec] of GUARD_SPECS) out[key] = readEnvNumber(spec, { env, ...(log ? { log } : {}) })
+  return out
+}
+
 const unit = (v, q) => (q > 0 ? v / q : null)
 const round1 = n => Math.round(n * 10) / 10
 
 /**
- * createPriceGuard({ factor, share, maxHoldMs, now, log }) -> { apply, held }
+ * createPriceGuard({ factor, share, maxHoldMs, arrivalMinDivine, now, log })
+ *   -> { apply, held, known }
  *
- * apply(user, prevMap, curMap, prevTotal) -> { items, adjust, notes }
+ * apply(user, prevMap, curMap, prevTotal, opts) -> { items, adjust, notes }
  *   prevMap/curMap: folded item maps (name -> [qty, chaos]) as used by
  *     history.mjs; curMap is never mutated.
  *   prevTotal: the previous point's chaos total — the yardstick for `share`.
+ *   opts.cdRatio:  chaos per divine AT THIS POINT. Without it the arrival bar
+ *     cannot convert its divine floor and abstains (see the block above).
+ *   opts.sourceOf: Map(name -> price source, e.g. "faustus"), purely so the log
+ *     line can name where the number came from. Missing -> "unknown".
  *   items:  the map to record (a corrected COPY, or curMap itself when clean)
  *   adjust: chaos to add to the point's total (<= 0)
- *   notes:  one entry per correction, for tests and callers
+ *   notes:  one entry per decision, for tests and callers. `withheld` marks the
+ *     arrival case, where there is no old price to fall back to; `released`
+ *     marks the point at which such an arrival is accepted. A release corrects
+ *     NOTHING (adjust stays 0) and still has to be reported — history.mjs books
+ *     the accepted stock as an inflow off the back of it, and that is the whole
+ *     difference between a find that shows up in "what moved" and one that does
+ *     not (see the comment at `withoutReleased` in history.mjs).
  */
 /* ---- retro-cleanup of ALREADY RECORDED spikes ------------------------------
  * The brake above only protects points recorded from now on. The Scavenger
@@ -122,67 +243,220 @@ export function createPriceGuard ({
   factor = GUARD_FACTOR,
   share = GUARD_SHARE,
   maxHoldMs = GUARD_MAX_HOLD_MS,
+  arrivalMinDivine = GUARD_ARRIVAL_MIN_DIVINE,
   now = () => Date.now(),
   log = (...a) => console.warn(...a)
 } = {}) {
-  // `${user}|${name}` -> { since, price } for items currently held back. Memory
-  // only: after a restart the brake simply re-evaluates from the next point,
-  // which errs toward guarding rather than toward trusting a stale hold.
+  // `${user}|${name}` -> { user, name, since, seen, price } for items currently
+  // held back. A `price` of 0 is the ARRIVAL case: there is no old price to fall
+  // back to, so the item is recorded at no value at all while the hold lasts.
+  // `seen` is the last point at which the item was observed WITH a price of its
+  // own; the sweep below moves `since` by the gap between two such points when
+  // one in between carried no price, so the window counts only what was
+  // actually observed. `user`/`name` are carried in the record rather than
+  // parsed back out of the key, because an item name may contain anything.
+  // Memory only: after a restart the brake simply re-evaluates from the next
+  // point, which errs toward guarding rather than toward trusting a stale hold.
   const held = new Map()
+  // `${user}|${name}` -> { at, price }: the newest unit price the guard let
+  // through for this name. This is what makes an item that LEFT the stash and
+  // came back judgeable at all — prevMap only knows the one point before. Aged
+  // out with the hold window: an opinion older than the longest hold is not
+  // evidence any more.
+  //
+  // MEMORY ONLY, AND THAT IS A LIMIT, NOT A FEATURE: this map does not survive
+  // a container restart, and the Scavenger night's container had just been
+  // rebuilt. What DOES survive is the previous point's breakdown, in the
+  // history-items sidecar — so after a restart a name that was in the last
+  // recorded point still has its previous unit price, and only a name that was
+  // absent from it loses its reference and re-enters through the arrival bar.
+  // Persisting this map would buy the difference between those two cases for at
+  // most `maxHoldMs`, at the price of a second store in /config; it is written
+  // down in docs/bugs.md instead of built. Do not describe it as more than it
+  // is anywhere else either.
+  const known = new Map()
+  // The newest chaos-per-divine this guard has been handed. The arrival bar's
+  // floor is denominated in divine and a single point can arrive without a rate
+  // (poe.ninja unreachable at that minute); abstaining then means the bar is
+  // missing exactly when the feeds are shaky. A rate from a few minutes ago is
+  // a far better conversion than none. Only when NO rate has ever been seen —
+  // the true cold start — does the bar still abstain.
+  let lastRatio = 0
 
-  function apply (user, prevMap, curMap, prevTotal) {
+  function apply (user, prevMap, curMap, prevTotal, { cdRatio = 0, sourceOf = null } = {}) {
     const clean = { items: curMap, adjust: 0, notes: [] }
     if (!(prevMap instanceof Map) || !(curMap instanceof Map)) return clean
     const total = Number(prevTotal)
     if (!Number.isFinite(total) || total <= 0) return clean
 
     const t = now()
+    for (const [k, v] of known) if (t - v.at > maxHoldMs) known.delete(k)
+    // Holds of users that stopped reporting altogether would otherwise
+    // accumulate forever. Twice the window, so an item that IS still there is
+    // always released (and logged) by its own branch below first. `since` moves
+    // with the blind points the sweep below discounts, so this cannot reap a
+    // hold whose item is still being observed — for a user who keeps reporting
+    // it is the item that ends the hold, never the clock.
+    for (const [k, v] of held) if (t - v.since > 2 * maxHoldMs) held.delete(k)
+
+    // A HOLD IS A CLAIM ABOUT STANDING, NOT ABOUT THE WALL CLOCK. `since` alone
+    // says how long ago the suspicion started, and that is not the promise the
+    // brake makes: "it stood for six hours, so it is real". An item that left
+    // the snapshot in between did not stand — and because `held` was only swept
+    // at twice the window, one that disappeared and came back after seven hours
+    // was accepted on the second sight of it. So a hold ends with its item: a
+    // snapshot without the name drops the hold, and a returning name is judged
+    // from the beginning. "Present in every recorded point of the window" is the
+    // whole of the promise; recording is what the guard can observe, so it is
+    // also the unit it can honestly count in.
+    //
+    // AND A POINT THAT SAYS NOTHING ENDS NOTHING. An item that is in the
+    // snapshot but carries NO PRICE OF ITS OWN is a third observation, and this
+    // loop used to fold it into the second one: `cur` tells "gone" and "here,
+    // unpriced" apart and the code then collapsed both to "the hold is over".
+    // They are not the same. Absence is evidence — the item did not stand. A
+    // missing price is the absence of evidence: the valuator had nothing for
+    // that name this minute, and the guard learns neither that the suspicious
+    // price is real nor that it is not. Ending the hold on it restarted the
+    // window at every flicker of a price feed, so an arrival over the divine
+    // floor could stand in the series at zero for as long as the flicker lasted
+    // and write a fresh withholding line every time it restarted.
+    // So such a point simply DOES NOT COUNT: the deadline moves out by exactly
+    // the blind interval — `since` is what `maxHoldMs` is measured from, and
+    // `seen` is the last point that carried a price — which neither restarts
+    // the window nor lets the wall clock run through a stretch that proves
+    // nothing. It needs no third kind of hold: the record already distinguishes
+    // a jump (`price > 0`) from a withheld arrival (`price === 0`), and this is
+    // a shift of the same deadline, not a new state. The hours both release
+    // lines print are that same measure — observed window, not wall clock.
+    for (const [k, h] of held) {
+      if (h.user !== user) continue
+      const cur = curMap.get(h.name)
+      const p = cur ? unit(cur[1], cur[0]) : null
+      if (p != null && p > 0) { h.seen = t; continue }
+      if (cur && cur[0] > 0) { h.since += t - h.seen; h.seen = t; continue }
+      // A JUMP hold carries the price the series is being recorded at, and that
+      // opinion does not become wrong because the item left the stash. Hand it
+      // to `known` on the way out, so a name that vanishes for a minute and
+      // returns at the same spike is still measured against it instead of
+      // falling through to the arrival bar. A withheld ARRIVAL (price 0) has no
+      // opinion to hand over and hands over nothing.
+      if (h.price > 0) known.set(k, { at: t, price: h.price })
+      held.delete(k)
+    }
+
+    // Absolute floor of the arrival bar, converted into chaos. THIS point's
+    // rate first, otherwise the newest one this guard has seen; only a guard
+    // that has never seen a rate has no floor, and then the arrival bar
+    // abstains entirely rather than fall back to a share-only test that would
+    // suppress ordinary play on a small account.
+    const ratio = Number(cdRatio)
+    if (Number.isFinite(ratio) && ratio > 0) lastRatio = ratio
+    const arrivalFloor = (lastRatio > 0 && arrivalMinDivine > 0)
+      ? lastRatio * arrivalMinDivine
+      : null
+    const srcOf = name => (sourceOf instanceof Map ? sourceOf.get(name) : null) || 'unknown'
+
     let out = null
     let adjust = 0
     const notes = []
+    const corrected = (name, qty, value) => {
+      if (!out) out = new Map(curMap)
+      out.set(name, [qty, value])
+    }
 
     for (const [name, cur] of curMap) {
-      const prev = prevMap.get(name)
-      if (!prev) continue
-      const [q0, v0] = prev
       const [q1, v1] = cur
-      const p0 = unit(v0, q0)
       const p1 = unit(v1, q1)
-      if (p0 == null || p1 == null || !(p0 > 0)) continue
+      if (p1 == null || !(p1 > 0)) continue
 
       const key = `${user}|${name}`
       const hold = held.get(key)
-      // Compare against the price we are HOLDING, not against the value we
-      // recorded last time — otherwise a held spike becomes its own baseline on
-      // the very next point and the brake releases after one interval.
-      const ref = hold ? hold.price : p0
-      const gain = v1 - q1 * ref
+      const prev = prevMap.get(name)
+      const p0 = prev ? unit(prev[1], prev[0]) : null
+      const memo = known.get(key)
+      // The price this item is judged against, best evidence first:
+      //   1. the price we are already HOLDING — otherwise a held spike becomes
+      //      its own baseline on the very next point and the brake releases
+      //      after one interval,
+      //   2. the previous point's unit price,
+      //   3. the last unit price the guard accepted for this name.
+      // A hold at price 0 is a withheld arrival and carries no reference.
+      let ref = null
+      if (hold) ref = hold.price > 0 ? hold.price : null
+      else if (p0 != null && p0 > 0) ref = p0
+      else if (memo && memo.price > 0) ref = memo.price
 
-      if (!(p1 >= ref * factor) || !(gain >= total * share)) {
-        if (hold) held.delete(key) // back to normal -> stop holding
+      // ---- a price to compare against: the original jump bar ----------------
+      if (ref != null) {
+        const gain = v1 - q1 * ref
+
+        if (!(p1 >= ref * factor) || !(gain >= total * share)) {
+          if (hold) held.delete(key) // back to normal -> stop holding
+          known.set(key, { at: t, price: p1 })
+          continue
+        }
+
+        if (hold && t - hold.since >= maxHoldMs) {
+          held.delete(key)
+          known.set(key, { at: t, price: p1 })
+          log('[networth] price hold released after %dh: "%s" stays at %sc/ea (was %sc/ea, source %s) — recording it as real',
+            Math.round((t - hold.since) / 3600000), name, round1(p1), round1(ref), srcOf(name))
+          continue
+        }
+        if (!hold) held.set(key, { user, name, since: t, seen: t, price: ref })
+
+        const value = q1 * ref
+        corrected(name, q1, value)
+        adjust += value - v1
+        notes.push({ name, qty: q1, oldPrice: ref, newPrice: p1, dropped: round1(v1 - value), source: srcOf(name) })
+        log('[networth] implausible price jump ignored for the trend: "%s" %sc/ea -> %sc/ea (x%s, %s in stock, +%sc = %d%% of the previous total %sc, source %s); recorded at the old price',
+          name, round1(ref), round1(p1), round1(p1 / ref), q1, round1(v1 - value),
+          Math.round((gain / total) * 100), round1(total), srcOf(name))
         continue
       }
 
+      // ---- no price to compare against: the arrival bar ---------------------
+      if (arrivalFloor == null) continue
+      const suspect = v1 >= total * share && v1 >= arrivalFloor
+
+      if (!suspect) {
+        if (hold) held.delete(key)
+        known.set(key, { at: t, price: p1 })
+        continue
+      }
       if (hold && t - hold.since >= maxHoldMs) {
         held.delete(key)
-        log('[networth] price hold released after %dh: "%s" stays at %sc/ea (was %sc/ea) — recording it as real',
-          Math.round((t - hold.since) / 3600000), name, round1(p1), round1(ref))
+        known.set(key, { at: t, price: p1 })
+        // The note is what makes this visible. Nothing is corrected here, so
+        // without it the caller sees an unchanged map and books the accepted
+        // value as a revaluation of stock it never counted — a price move with
+        // a quantity delta of zero, which the events list drops and the spike
+        // detector reads as "no stock explains this rise".
+        notes.push({ name, qty: q1, oldPrice: null, newPrice: p1, dropped: 0, released: true, source: srcOf(name) })
+        log('[networth] withheld arrival accepted after %dh: "%s" is still here at %sc/ea (%s in stock, source %s) — recording it as real, as stock arriving now',
+          Math.round((t - hold.since) / 3600000), name, round1(p1), q1, srcOf(name))
         continue
       }
-      if (!hold) held.set(key, { since: t, price: ref })
-
-      if (!out) out = new Map(curMap)
-      const corrected = q1 * ref
-      out.set(name, [q1, corrected])
-      adjust += corrected - v1
-      notes.push({ name, qty: q1, oldPrice: ref, newPrice: p1, dropped: round1(v1 - corrected) })
-      log('[networth] implausible price jump ignored for the trend: "%s" %sc/ea -> %sc/ea (x%s, %s in stock, +%sc = %d%% of the previous total %sc); recorded at the old price',
-        name, round1(ref), round1(p1), round1(p1 / ref), q1, round1(v1 - corrected),
-        Math.round((gain / total) * 100), round1(total))
+      if (!hold) {
+        held.set(key, { user, name, since: t, seen: t, price: 0 })
+        // Logged when the hold STARTS and when it is released, not once per
+        // point: the line below already carries everything needed to chase the
+        // number down, and repeating it every minute for six hours adds nothing.
+        log('[networth] new item withheld from the trend until it holds: "%s" arrived at %sc/ea (%s in stock, %sc = %d%% of the previous total %sc, source %s); recorded at no value for up to %dh',
+          name, round1(p1), q1, round1(v1), Math.round((v1 / total) * 100), round1(total),
+          srcOf(name), Math.round(maxHoldMs / 3600000))
+      }
+      corrected(name, q1, 0)
+      adjust -= v1
+      notes.push({ name, qty: q1, oldPrice: null, newPrice: p1, dropped: round1(v1), withheld: true, source: srcOf(name) })
     }
 
-    return out ? { items: out, adjust: round1(adjust), notes } : clean
+    // NOT `out ? … : clean`: a release corrects nothing and still has to be
+    // reported. Dropping the notes with the correction is how the acceptance of
+    // a withheld arrival became invisible to the caller in the first place.
+    return { items: out || curMap, adjust: round1(adjust), notes }
   }
 
-  return { apply, held }
+  return { apply, held, known }
 }

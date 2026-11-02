@@ -10,8 +10,12 @@
 //       accountName, league, cdRatio,
 //       tabs: { "<tabIndex>": { index, name, syncedAt,
 //         items:    [ {name,kind,tab,tabIndex,qty,chaosEach,chaosTotal} ],
-//         unpriced: [ {name,kind,count} ],
-//         counts:   {priced,unpriced,skipped} } },
+//         unpriced: [ {name,kind,count} ],            // count = PIECES
+//         counts:   {priced,unpriced,unpricedPieces,skipped} } },
+//                   // priced/unpriced/skipped = GGG ENTRIES, unpricedPieces =
+//                   // the same unpriced items in PIECES. A tab written before
+//                   // unpricedPieces existed simply lacks the key; aggregate.mjs
+//                   // falls back to the row sum until the tab is next synced.
 //       history: [ {at, totalChaos, totalDivine, league} ]  // small, last N
 //     } } }
 import { readFile, writeFile, rename, unlink } from 'node:fs/promises'
@@ -24,7 +28,14 @@ function emptyStore () {
 
 let tmpCounter = 0
 
-export function createNetworthStore (filePath, { keep = 50 } = {}) {
+export function createNetworthStore (filePath, { keep = 50, log = console } = {}) {
+  // user -> the set of stored tab keys the LAST live tab list did not contain.
+  // A drop is only carried out once a second consecutive list agrees with the
+  // first about the same tab (see pruneTabs). In memory on purpose: a restart
+  // forgetting a half-made proposal costs one more list before a genuinely
+  // deleted tab goes, which is the harmless direction.
+  const proposedDrops = new Map()
+
   const store = {
     data: emptyStore(),
     // Server flips this to false when the /config volume isn't writable (local
@@ -110,13 +121,61 @@ export function createNetworthStore (filePath, { keep = 50 } = {}) {
 
     // Drop tabs that no longer exist in the account (currentIndexes = the live
     // tab list's indexes). Keeps the store from accumulating deleted tabs.
+    //
+    // A DROP NEEDS TWO CONSECUTIVE TAB LISTS THAT AGREE ABOUT IT. This used to
+    // believe one list absolutely: a single short answer took the matching part
+    // of the store with it, and `pruneTabs(user, [])` wiped a user's entire
+    // stored stash on one bad response — which is what made the partial-store
+    // window of B2 reachable outside a fresh install. Since 2026-08-11 a tab is
+    // deleted only when it is missing from the current list AND was missing
+    // from the previous one; the intersection, so two lists that disagree about
+    // WHICH tab vanished confirm neither. A list that drops nothing clears the
+    // proposal, which is what makes "consecutive" mean consecutive.
+    //
+    // WHY EVERY SHORTENING AND NOT ONLY A BIG ONE. "Significantly shorter" would
+    // need a threshold, and nobody has measured how often GGG answers short —
+    // the whole reason the warning line below was added first. A threshold
+    // invented on top of that would be a guessed number guarding against a
+    // guessed frequency. Requiring agreement needs no number at all, and it
+    // costs no request: the second opinion is the list the refresher fetches on
+    // its own schedule anyway (`POE_NETWORTH_LIST_TTL_MS`, 15 min by default).
+    //
+    // WHAT IT COSTS. A tab genuinely deleted in game keeps contributing its
+    // stored value to the snapshot for one more list interval. That is the
+    // direction that shows a tab too long rather than the one that throws away
+    // an account's worth of stash on a single hiccup.
+    //
+    // Frequency of the lines: zero in normal operation — the list is re-fetched
+    // roughly every 15 minutes per user and normally matches the store exactly.
+    // A genuine deletion produces one hold line and then one prune line; a
+    // one-off short answer produces one hold line and nothing else.
     pruneTabs (user, currentIndexes) {
       const u = store.data.users[user]
       if (!u?.tabs) return
       const keepSet = new Set((currentIndexes || []).map(String))
-      for (const key of Object.keys(u.tabs)) {
-        if (!keepSet.has(key)) delete u.tabs[key]
+      const storedKeys = Object.keys(u.tabs)
+      const missing = storedKeys.filter(key => !keepSet.has(key))
+      if (!missing.length) { proposedDrops.delete(user); return }
+
+      const proposed = proposedDrops.get(user)
+      const confirmed = proposed ? missing.filter(key => proposed.has(key)) : []
+      proposedDrops.set(user, new Set(missing))
+
+      // Routing name (player1) and counts only — no account name, no tab
+      // contents.
+      const emptyNote = keepSet.size === 0
+        ? ' — the live tab list is EMPTY, which would take everything this user has stored'
+        : ''
+      if (!confirmed.length) {
+        log.warn?.(`[networth-store] a live tab list of ${keepSet.size} would drop ${missing.length} of ` +
+          `${storedKeys.length} stored tabs for ${user} — held back until a second list agrees${emptyNote}`)
+        return
       }
+      const held = missing.length - confirmed.length
+      log.warn?.(`[networth-store] pruning ${confirmed.length} of ${storedKeys.length} stored tabs for ${user} ` +
+        `(live tab list: ${keepSet.size}) — two consecutive lists agree they are gone` +
+        (held ? `, ${held} further one(s) held back for a second opinion` : '') + emptyNote)
+      for (const key of confirmed) delete u.tabs[key]
     },
 
     appendHistory (user, { totalChaos, totalDivine } = {}) {

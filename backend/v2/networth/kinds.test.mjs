@@ -100,3 +100,22 @@ test('classify: a unique hands its mod texts through to valuation', () => {
   assert.equal(d.kind, 'unique')
   assert.deepEqual(d.mods, ['16% increased Stun and Block Recovery', 'Everlasting Sacrifice'])
 })
+
+test('classify: a tier-decorated map base line falls back to the undecorated join', () => {
+  // GGG hands the map stash a base line with the tier baked in ("Map (Tier 16)")
+  // while the bridge data knows the base as plain "Map". Without the retry the
+  // join misses, the category stays null and ninjaTypeFor never reaches
+  // 'UniqueMap' — the whole tab lands in `unpriced`.
+  const index = { categoryOfBase: b => (b === 'Map' ? 'Map' : null) }
+  const d = classify(ctx({ frame: 3, name: 'Cortex', typeLine: 'Map (Tier 15)', index }))
+  assert.equal(d.category, 'Map')
+  assert.equal(d.baseType, 'Map (Tier 15)') // decoration kept: it is the tier key for poe.ninja
+
+  // The DIRECT join still wins — an undecorated hit is never second-guessed.
+  const direct = { categoryOfBase: b => (b === 'Map (Tier 15)' ? 'Jewel' : 'Map') }
+  assert.equal(classify(ctx({ frame: 3, name: 'X', typeLine: 'Map (Tier 15)', index: direct })).category, 'Jewel')
+
+  // A decoration whose stem is unknown resolves to nothing, never to a guess.
+  const none = { categoryOfBase: () => null }
+  assert.equal(classify(ctx({ frame: 3, name: 'X', typeLine: 'Nonexistent (Tier 3)', index: none })).category, null)
+})

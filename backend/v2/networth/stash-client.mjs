@@ -8,10 +8,40 @@
 // sequential, parse the headers after EVERY response and derive the pause
 // before the next request from them. Repeated 4xx (invalid-request threshold)
 // -> abort instead of hammering away. The cookie value never appears in any message.
+//
+// A 429 IS NOT RETRIED HERE. It used to be: sleep Retry-After+1 (capped at 90s)
+// and try again, up to `maxRetries` times — which is up to SIX requests fired
+// into a throttle GGG had already declared, before the refresher's ten-minute
+// cooldown ever got a say. The client now propagates the very first 429 as
+// kind:'ratelimit' with the Retry-After it was given, and the caller
+// (networth/refresher.mjs) owns the wait. That is one request per 429 instead
+// of six, and the wait becomes a state the operator can SEE — a cooldown with
+// an end time in the status line — rather than a sleep inside a fetch. This
+// repository has two real Trade-API bans behind it; the retry loop was the last
+// place in the stash path that answered a throttle with more traffic.
+//
+// The pacing derived from the state counters (delayFor) is a different thing
+// and keeps its cap: see MAX_PACING_SLEEP_MS below.
+//
+// TWO PACING MECHANISMS, AND THEY ARE NOT THE SAME ONE. delayFor() reads the
+// STATE counters and brakes once a window is already filling up — reactive, by
+// construction, because a counter can only be read off a response the requests
+// are already behind. stash-pacer.mjs reads the LIMITS and derives the spacing
+// the tool holds to before any of that: `Ip 45/60s` says one request every
+// 1.33s is the ceiling, the constant below said 1.5s, and 40 requests a minute
+// against a limit of 45 is not a margin. The derivation is ahead of the limit,
+// the brake is behind it, and the client takes the longer of the two.
+
+import { parseRateLimitHeaders } from '../rate-limit-headers.mjs'
+import { envNum } from '../numeric-settings.mjs'
+import { sharedStashPacer, bucketSecFor } from './stash-pacer.mjs'
+import { walkFolderTab } from './folder-walk.mjs'
+import { noteSubTabShape } from './subtab-shape.mjs'
+import { planFolderChildren } from './map-sections.mjs'
 
 const STASH_BASE = 'https://www.pathofexile.com/character-window/get-stash-items'
 // Browser-like UA — Cloudflare blocks generic agents (precedent:
-// BROWSER_UA in server.mjs / userAgent in backend/config.js).
+// BROWSER_UA in server.mjs).
 const BROWSER_UA =
   'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) ' +
   'Chrome/126.0.0.0 Safari/537.36'
@@ -32,55 +62,209 @@ const STASH_V2_BASE = 'https://www.pathofexile.com/api/stash'
 // answered with a 404).
 const CHILDED_TAB_TYPES = new Set(['UniqueStash', 'MapStash'])
 
-export function parseRateLimitHeaders (headers) {
-  const get = k => (typeof headers?.get === 'function' ? headers.get(k) : headers?.[k]) ?? null
-  const rules = []
-  const states = []
-  const ruleNames = String(get('x-rate-limit-rules') || '')
-    .split(',').map(s => s.trim()).filter(Boolean)
-  const parseTriples = (raw, rule, into) => {
-    for (const part of String(raw || '').split(',').map(s => s.trim()).filter(Boolean)) {
-      const [hits, windowSec, banSec] = part.split(':').map(Number)
-      into.push({ rule, hits, windowSec, banSec })
-    }
-  }
-  for (const rule of ruleNames) {
-    parseTriples(get(`x-rate-limit-${rule.toLowerCase()}`), rule, rules)
-    parseTriples(get(`x-rate-limit-${rule.toLowerCase()}-state`), rule, states)
-  }
-  const ra = get('retry-after')
-  return { rules, states, retryAfterSec: ra != null && ra !== '' ? Number(ra) : null }
+// The header parser moved to ../rate-limit-headers.mjs: the trade audit needs
+// the same one, and importing it out of THIS file closed a cycle (see the note
+// there). Re-exported so every caller and test keeps its one import.
+export { parseRateLimitHeaders }
+
+// ---------------------------------------------------------------------------
+// Which rules the stash budget is actually measured by — pure observation.
+//
+// The stash path has no bookkeeping at all (trade-audit.mjs covers /api/trade/*
+// only), so after an incident the log said nothing about it. The cheapest thing
+// that changes that is already in hand: every stash response carries the rule
+// set, and the RULE NAMES answer the question the code cannot: `Ip` means the
+// budget is shared with everything else leaving this address (the household's
+// browser on pathofexile.com included), `Account` means it belongs to that one
+// POESESSID. Nothing here sends, delays or retries anything — it reads headers
+// that arrived anyway.
+//
+// Only the LIMITS are fingerprinted, never the state counters: the counters
+// change on every response, so including them would be a line per request.
+//
+// FREQUENCY IN NORMAL OPERATION: one line per process. The set is module-level
+// (the server builds a fresh client every tick, so per-instance memory would
+// mean a line every 30s round the clock) and holds every rule set already
+// reported, so a set that flips back and forth costs one line per DISTINCT set
+// and then stays quiet forever. GGG changing its published limits is the only
+// thing that produces a second line, which is exactly the event worth seeing.
+const seenRuleSets = new Set()
+// A pathological server that varies its limits per response must not be able to
+// grow this set — or the log — without bound. Past the cap the observation goes
+// quiet rather than becoming the noise it exists to avoid.
+const MAX_LOGGED_RULE_SETS = 20
+
+/** "Account 45/60s ban 60s, Account 240/240s ban 900s", or '' when there are none. */
+function describeRules (rules) {
+  return rules.map(r => `${r.rule} ${r.hits}/${r.windowSec}s ban ${r.banSec}s`).join(', ')
 }
 
-// Pause before the next request. Deterministic (unit-testable):
-//  - Retry-After set (429)                     -> (N+1)s
-//  - any state counter >= limit-1              -> wait out the whole window
+/**
+ * Log the rule set of a parsed stash response the first time it is seen.
+ * Observation only — it returns nothing and changes no pacing.
+ *
+ * `spacingMs`, when given, is the pace stash-pacer.mjs derives from these rules
+ * (see there). It belongs on this line rather than on one of its own: "what GGG
+ * published" and "what this tool does about it" are one event, and the second
+ * half is the one that can be checked against the first.
+ */
+export function noteRateLimitRules (parsed, log = console, spacingMs = null) {
+  const desc = describeRules(parsed?.rules || [])
+  // The POLICY is part of the identity of a set, not decoration on it. GGG
+  // answered this deployment with three different sets over two days, and the
+  // policy is what says whether a changed set is the same budget being restated
+  // (in which case the pacer replaces it) or a second budget standing next to
+  // the first (in which case both count). A line that named only the numbers
+  // could not tell those apart after the fact — see stash-pacer.mjs.
+  const policy = parsed?.policy || null
+  const key = `${policy || '(no policy)'} ${desc || '(none)'}`
+  if (seenRuleSets.has(key)) return
+  if (seenRuleSets.size >= MAX_LOGGED_RULE_SETS) return
+  seenRuleSets.add(key)
+  const derived = spacingMs != null
+    ? ` — derived minimum spacing between two stash requests: ${(spacingMs / 1000).toFixed(1)}s`
+    : ''
+  const named = policy ? ` (policy ${policy})` : ' (no X-Rate-Limit-Policy header — the set is kept alongside the others rather than replacing one)'
+  log?.log?.(desc
+    ? `[stash-client] GGG rate-limit rules for the stash endpoints${named}: ${desc} ` +
+      '— the rule NAME says what the budget belongs to (Ip = shared with everything else from this address, Account = this session)' +
+      derived
+    : '[stash-client] the stash endpoints returned no X-Rate-Limit headers at all — the budget cannot be read from the response' +
+      derived)
+}
+
+/** Forget which rule sets have been reported. Tests only. */
+export function resetRateLimitRuleLog () { seenRuleSets.clear() }
+
+// ---------------------------------------------------------------------------
+// WHICH SCOPE THE REQUEST WAS COUNTED IN — the rule NAMES as a session check.
+//
+// The legacy stash endpoint publishes the SAME policy in two forms: `Account,Ip`
+// when the POESESSID was accepted and `Ip`-only when it was not, with the
+// address limit roughly halved in the second (measured by gerwaric/acquisition
+// on 28.07.2026; a GGG developer described the same behaviour in the official
+// forum in 2018 — with a session id the budget is counted per account, and the
+// address limit is then twice as generous).
+//
+// This deployment has one of those in its log: on 13.08.2026 at 02:15 UTC an
+// `Ip`-only set arrived, which the pacer honoured. It is not a punishment and
+// it is not GGG tightening anything. It is what a night-time round with an
+// expired cookie looks like from the outside, and the tool's only reaction was
+// to get slower — silently, for hours.
+//
+// So the disappearance of the `Account` rules is a NAMED STATE, not a number.
+// It is edge-triggered per policy and reported once each way: a set that has
+// never carried `Account` rules says nothing (nothing to conclude from), and a
+// policy that regains them says so too, because "it fixed itself" is the other
+// half an operator needs.
+//
+// NOTHING HERE CHANGES CONTROL FLOW, deliberately. An unauthenticated stash
+// request cannot read a private stash, so it is refused, and that refusal
+// already travels the auth path (401/403 -> kind:'auth' -> the refresher pauses
+// that user, logs "cookie expired for X" and reports `state: 'expired'` for
+// them). Turning this observation into a second pause would add a per-user
+// consequence to a process-wide signal that cannot name a user — and a false
+// positive, should GGG ever publish an Ip-only set to an authenticated request,
+// would freeze a healthy refresher until somebody edited the cookie. The line
+// is what was missing; the pause was not.
+const accountScopeByPolicy = new Map()
+
+/**
+ * Report the loss (and the return) of the `Account` rules of a policy.
+ * Observation only — no request, no pacing change, no thrown error.
+ */
+export function noteSessionScope (parsed, log = console) {
+  const rules = parsed?.rules || []
+  if (!rules.length) return          // no headers is not an answer about scope
+  const policy = parsed?.policy || '(no policy)'
+  const hasAccount = rules.some(r => r?.rule === 'Account')
+  const had = accountScopeByPolicy.get(policy)
+  if (had === undefined) {
+    // A pathological server varying its policy names must not grow this map.
+    if (accountScopeByPolicy.size >= MAX_LOGGED_RULE_SETS) return
+    accountScopeByPolicy.set(policy, hasAccount)
+    return                            // the first set of a policy establishes the baseline
+  }
+  if (had === hasAccount) return
+  accountScopeByPolicy.set(policy, hasAccount)
+  if (!hasAccount) {
+    log?.warn?.(`[stash-client] the stash session is NOT being counted per account any more (policy ${policy}): ` +
+      'GGG published only Ip rules, which is the form it answers an unauthenticated request with — ' +
+      'the POESESSID is expired or was not accepted. Renew it in networth-users.json. ' +
+      'The Ip-only limits are stricter, so the pace lengthens with them; that is a symptom, not the problem')
+  } else {
+    log?.log?.(`[stash-client] the stash session is being counted per account again (policy ${policy}) — ` +
+      'the POESESSID is being accepted')
+  }
+}
+
+/** Forget the per-policy scope baseline. Tests only. */
+export function resetSessionScope () { accountScopeByPolicy.clear() }
+
+// The REACTIVE half of the pacing: a pause derived from the STATE counters of
+// the response that just arrived. Deterministic (unit-testable):
+//  - Retry-After set                           -> (N+1)s
+//  - any state counter >= limit-1              -> wait out the whole window,
+//      PLUS its bucket: GGG buckets incoming requests and the bucket size is in
+//      no header ("you'd have to add 5 more seconds rather than 2 … this isn't
+//      exposed anywhere for you to have known" — GGG support). Waiting exactly
+//      `windowSec` lands inside the bucket the window is still being summed
+//      over, which is one way a correctly-paced client still collects a 429.
 //  - any state counter >= 80% of the limit      -> 4x baseMs (slow down noticeably)
-//  - otherwise baseMs (base pace, keeps a ~150-tab scan within a few minutes)
-export function delayFor (parsed, { baseMs = 1500 } = {}) {
+//  - otherwise baseMs (the floor, and nothing more)
+// `baseMs` stays the CONSTANT here and is deliberately not the derived pace: the
+// caller takes the maximum of this and stash-pacer.mjs's spacing, so the two
+// answers stay separable — this one says "the window you can see is filling up",
+// the other says "this is the rate the published limits allow at all".
+// The Retry-After branch no longer describes the 429 path — a 429 is propagated
+// on the spot and never slept on here (see the header note). It still fires for
+// the rarer case of a Retry-After on a response that was not a 429.
+// Anything this returns above MAX_PACING_SLEEP_MS is not slept out either: the
+// request is not sent at all and the wait goes to the caller's cooldown.
+export function delayFor (parsed, { baseMs = 1500, bucketSecOf = bucketSecFor } = {}) {
   if (parsed.retryAfterSec != null) return (parsed.retryAfterSec + 1) * 1000
   let delay = baseMs
   for (const st of parsed.states) {
     const rule = parsed.rules.find(r => r.rule === st.rule && r.windowSec === st.windowSec)
     if (!rule || !(rule.hits > 0)) continue
-    if (st.hits >= rule.hits - 1) delay = Math.max(delay, st.windowSec * 1000)
-    else if (st.hits >= rule.hits * 0.8) delay = Math.max(delay, baseMs * 4)
+    if (st.hits >= rule.hits - 1) {
+      const bucketSec = Math.max(0, Number(bucketSecOf(st.windowSec)) || 0)
+      delay = Math.max(delay, (st.windowSec + bucketSec) * 1000)
+    } else if (st.hits >= rule.hits * 0.8) delay = Math.max(delay, baseMs * 4)
   }
   return delay
 }
 
 export function createStashClient ({
   accountName, poesessid, league, realm = 'pc',
-  fetchImpl = fetch, baseDelayMs = 1500, maxRetries = 5, onProgress = () => {},
-  requestTimeoutMs = Number(process.env.POE_STASH_TIMEOUT_MS) || 30000
+  fetchImpl = fetch, baseDelayMs = 1500,
+  // The process-wide pace derived from GGG's own published limits. NOT
+  // per-client on purpose: the server builds a fresh client every tick, and an
+  // `Ip` budget belongs to the address, not to a client that lives for 30
+  // seconds. See stash-pacer.mjs. Injected only by tests.
+  pacer = sharedStashPacer,
+  // Injected only by tests, so a derived wait can be asserted instead of waited
+  // out. Production sleeps for real.
+  sleep = ms => new Promise(r => setTimeout(r, ms)),
+  // 5xx ONLY. A 429 is not retried at all any more (see the header note), so
+  // this no longer bounds how many requests a rate limit can cost — that number
+  // is one.
+  maxRetries = 5, onProgress = () => {},
+  requestTimeoutMs = envNum('POE_STASH_TIMEOUT_MS'),
+  // Only the folder-tab path routes through this (everything else still writes
+  // to console directly). It exists so a test can READ those lines — they are
+  // the whole point of B7, and a line nothing can assert on is not evidence.
+  log = console
 }) {
   if (!accountName || !poesessid) throw new Error('accountName and poesessid are required')
-  const sleep = ms => new Promise(r => setTimeout(r, ms))
   let nextDelayMs = 0     // derived from the headers of the LAST response
 
-  function fail (message, kind) {
+  function fail (message, kind, extra = null) {
     const e = new Error(message)
     e.kind = kind
+    // `retryAfterSec` rides along on a 'ratelimit' so the caller's cooldown can
+    // be at least as long as the wait GGG asked for — never shorter.
+    if (extra) Object.assign(e, extra)
     return e
   }
 
@@ -96,7 +280,23 @@ export function createStashClient ({
     } catch { return '' }
   }
 
-  const MAX_DELAY_MS = 90_000      // never sleep longer than this before a request
+  // How long ONE step may sit inside a header-derived pacing sleep. It is NOT a
+  // shortcut past a rate limit: a pacing wait longer than this is not truncated
+  // and then sent anyway (that fires a request into a window GGG's own headers
+  // call full, which is how the 90s cap used to behave). It is handed to the
+  // caller as a 'ratelimit' instead — zero requests, and the refresher's
+  // cooldown does the waiting where the status line can show it.
+  //
+  // Why a cap at all, rather than sleeping out whatever the headers say: the
+  // sleep happens inside a step that holds the refresher's `busy` flag for ALL
+  // users, and a state counter against a long window can derive a wait of many
+  // minutes. Sitting there is indistinguishable from a hang; a cooldown with an
+  // end time is not. 90s is above every pacing wait an ordinary round produces
+  // (the derived spacing is ~24s on the measured rule set, the 80% brake 6s) and
+  // below the ten-minute cooldown that takes over past it. A derived spacing
+  // above 90s — which no rule set seen so far comes close to — would land here
+  // too: one request per cooldown instead of a sleep nobody can see.
+  const MAX_PACING_SLEEP_MS = 90_000
   const TIMEOUT_MAX_RETRIES = 2    // stalled/network request -> give up fast (~90s) and skip the tab
 
   // HARD timeout: AbortController alone does NOT reliably tear down a stalled
@@ -123,17 +323,53 @@ export function createStashClient ({
 
   async function requestUrl (url) {
     for (let attempt = 0; ; attempt++) {
-      if (nextDelayMs > 0) await sleep(Math.min(nextDelayMs, MAX_DELAY_MS))
+      // The longer of the two waits, never the shorter: `nextDelayMs` is what
+      // this client would have waited before the pacer existed (0 on a fresh
+      // client's first request, the reactive brake after that), and the pacer
+      // adds what GGG's published limits ask for on top — measured from the
+      // last request of ANY client in this process, so a folder tab's burst and
+      // the gap between two ticks are counted on the same timeline. Between two
+      // ordinary ticks the pacer contributes 0: 30s has already passed.
+      const waitMs = Math.max(nextDelayMs, pacer.waitMs(baseDelayMs))
+      if (waitMs > 0) {
+        if (waitMs > MAX_PACING_SLEEP_MS) {
+          throw fail(`Rate limits ask for ${Math.round(waitMs / 1000)}s before the next stash request — ` +
+            'handing the wait to the refresher cooldown instead of sitting on it', 'ratelimit',
+          { retryAfterSec: Math.ceil(waitMs / 1000) })
+        }
+        await sleep(waitMs)
+      }
       const ac = new AbortController()
       try {
+        // Before the fetch, not after: what a rate-limit window counts is a
+        // request going out, and it has gone out even if the answer never comes.
+        pacer.noteRequest()
         const r = await withTimeout(fetchImpl(url, {
           headers: { Cookie: `POESESSID=${poesessid}`, 'User-Agent': BROWSER_UA, Accept: 'application/json' },
           signal: ac.signal
         }), requestTimeoutMs, ac)
-        nextDelayMs = delayFor(parseRateLimitHeaders(r.headers), { baseMs: baseDelayMs })
+        const parsed = parseRateLimitHeaders(r.headers)
+        // The limits GGG publishes -> the pace of every following request, in
+        // this client and in the ones later ticks build (stash-pacer.mjs).
+        pacer.noteRules(parsed)
+        // Pure observation, no request of its own, at most one line per process.
+        noteRateLimitRules(parsed, log, pacer.spacingMs(baseDelayMs))
+        // …and the one observation that is about the SESSION rather than the
+        // budget: an Ip-only set means this request was not authenticated.
+        noteSessionScope(parsed, log)
+        nextDelayMs = delayFor(parsed, { baseMs: baseDelayMs })
+        // …and the reactive brake outlives this client too. A state counter at
+        // the top of a 1800s window used to be forgotten the moment the tick
+        // ended, so the next tick opened by sending into the full window.
+        pacer.noteBrake(nextDelayMs)
         if (r.status === 429) {
-          if (attempt >= maxRetries) throw fail('Rate-limited: retries exhausted, scan aborted', 'ratelimit')
-          continue
+          // NO retry. GGG has said stop; the only thing a retry can add is
+          // another request inside the window that produced this one. The wait
+          // travels with the error (retryAfterSec) so the caller's cooldown is
+          // at least as long as the one GGG asked for.
+          throw fail(`Rate-limited by GGG (HTTP 429)${parsed.retryAfterSec != null ? `, Retry-After ${parsed.retryAfterSec}s` : ''} ` +
+            '— no client-side retry; the refresher cooldown owns the wait', 'ratelimit',
+          parsed.retryAfterSec != null ? { retryAfterSec: parsed.retryAfterSec } : null)
         }
         if (r.status === 401) {
           // Cookie value deliberately NOT in the message.
@@ -158,8 +394,11 @@ export function createStashClient ({
       } catch (e) {
         // Typed fail() errors (auth/ratelimit/rejected/server) are deliberate
         // decisions -> propagate. Timeout/network (no kind) -> transient, but
-        // give up FAST so ONE stalled tab skips in ~90s instead of freezing the
-        // whole scan (fetchAllTabs then skips this tab).
+        // give up FAST so ONE stalled tab skips in ~90s of waiting on the socket
+        // instead of freezing the whole scan (fetchAllTabs then skips this tab).
+        // The two retries are paced like every other request — a request that
+        // timed out still went out and still counts against the window — so the
+        // wall-clock cost of a stalled tab is those 90s plus two derived gaps.
         if (e?.kind) throw e
         if (attempt >= TIMEOUT_MAX_RETRIES) throw fail(`Stash request failed (network/timeout after ${requestTimeoutMs}ms): ${e?.name || e}`, 'server')
         continue
@@ -167,28 +406,77 @@ export function createStashClient ({
     }
   }
 
-  // One folder tab: fetch the child list, then every child individually. Goes
-  // through the same requestUrl() as everything else, so it inherits header
-  // parsing, backoff and timeout. One pass costs 1 + N requests (unique tab:
-  // 18) — acceptable, since a tab's turn only comes around every few minutes.
-  async function fetchChildedTab (tab) {
-    const base = `${STASH_V2_BASE}/${encodeURIComponent(league)}`
-    const parent = await requestUrl(`${base}/${encodeURIComponent(tab.id)}`)
-    const children = Array.isArray(parent?.stash?.children) ? parent.stash.children : []
-    const out = Array.isArray(parent?.stash?.items) ? [...parent.stash.items] : []
-    for (const child of children) {
-      if (!child?.id) continue
-      const j = await requestUrl(`${base}/${encodeURIComponent(tab.id)}/${encodeURIComponent(child.id)}`)
+  // THE TWO REQUESTS A FOLDER TAB IS MADE OF. Both go through the same
+  // requestUrl() as everything else, so they inherit header parsing, backoff,
+  // timeout AND the derived pace; neither of them knows anything about the
+  // walk they are part of. That is what lets the refresher spend them one per
+  // tick instead of 1+N inside one (networth/folder-walk.mjs): the walk is
+  // plain data held by the caller, and a caller that has been handed a FRESH
+  // client — which the server builds every tick, with freshly reloaded
+  // credentials — can go on using it without carrying the old one along.
+  //
+  // One pass is still 1 + N requests (unique tab: 18, map stash: 30) and it is
+  // the reason the pace had to be derived at all: at the old 1.5s constant
+  // those 31 requests went out inside 45s, which is 41 a minute against a
+  // published `Ip 45/60s`.
+  //
+  // A plain function, not only a method on the returned object: `fetchTab` uses
+  // it too, and a `this` that a destructured caller could lose is not something
+  // a rate-limit decision should hang on.
+  const isChildedTab = tab => !!(tab?.id && CHILDED_TAB_TYPES.has(tab?.type))
+  const childApi = {
+    async listTabChildren (tab) {
+      const base = `${STASH_V2_BASE}/${encodeURIComponent(league)}`
+      const parent = await requestUrl(`${base}/${encodeURIComponent(tab.id)}`)
+      const children = Array.isArray(parent?.stash?.children) ? parent.stash.children : []
+      // What GGG really answered with, in its own words, once per folder tab per
+      // process (networth/subtab-shape.mjs). It costs no request — the response
+      // is already in hand — and it decides NOTHING: every child that can be
+      // addressed is read. That separation is the point of the line, and of
+      // docs/bugs.md B19, where reading it the other way round cost a whole tab.
+      noteSubTabShape(tab, parent, log)
+      // WHAT THE OBSERVATION LINE FOUND, PUT TO USE — and the one thing in this
+      // response that decides anything. `planFolderChildren` reads GGG's own
+      // `metadata.map.section` and marks the `tier<N>` pages of the MAP stash;
+      // everything it does not understand it leaves alone, so a stash shaped
+      // differently from this one is read whole exactly as before
+      // (networth/map-sections.mjs). Nothing is dropped from `childIds` — the
+      // skip is a set laid over the list, because the walk still has to account
+      // for every sub-tab GGG listed.
+      const { childIds, skipIds, skipSections } = planFolderChildren(tab, children)
+      return {
+        // `listed` is what GGG answered, `childIds` what can be addressed. They
+        // differ only for an entry with no id, which the walk cannot fetch —
+        // reporting the first is what keeps the B7 yield line saying how many
+        // sub-tabs there ARE rather than how many were usable.
+        listed: children.length,
+        childIds,
+        skipIds,
+        skipSections,
+        items: Array.isArray(parent?.stash?.items) ? [...parent.stash.items] : []
+      }
+    },
+    async fetchTabChild (tab, childId) {
+      const base = `${STASH_V2_BASE}/${encodeURIComponent(league)}`
+      const j = await requestUrl(`${base}/${encodeURIComponent(tab.id)}/${encodeURIComponent(childId)}`)
       const items = j?.stash?.items
-      if (Array.isArray(items)) out.push(...items)
+      return {
+        items: Array.isArray(items) ? items : [],
+        hasItemsArray: Array.isArray(items),
+        hasOwnChildren: Array.isArray(j?.stash?.children) && j.stash.children.length > 0
+      }
     }
-    if (process.env.POE_NETWORTH_DEBUG === '1') {
-      console.log(`[stash-client] folder tab "${tab.name}": ${children.length} sub-tabs, ${out.length} items`)
-    }
-    return out
   }
 
   return {
+    /**
+     * Does this tab have to be read through the sub-folder walk? The refresher
+     * asks before it decides whether a tab is one step or many, so the answer
+     * belongs to whoever knows which endpoint can read what — here — rather
+     * than to a type list copied into the caller.
+     */
+    isChildedTab,
+    ...childApi,
     async listTabs () {
       const j = await request('tabs=1&tabIndex=0')
       const tabs = Array.isArray(j?.tabs) ? j.tabs : []
@@ -214,22 +502,56 @@ export function createStashClient ({
      * do not exist there at all (proven: subIndex is ignored, and it does not
      * know the tab ID). Those go through the newer endpoint of the website,
      * two levels deep, strictly sequential.
+     *
+     * THIS NEVER ANSWERS "EMPTY" FOR "COULD NOT READ". An empty array means GGG
+     * said the tab holds nothing; anything else — a body without an items array,
+     * a folder walk whose sub-tabs did not all answer, an unexpected status the
+     * folder path used to swallow — throws `kind: 'unread'`. The caller keeps
+     * the tab's stored contents and tries again on a later turn.
      */
     async fetchTab (tabIndex, tab = null) {
-      if (tab?.id && CHILDED_TAB_TYPES.has(tab.type)) {
+      if (isChildedTab(tab)) {
         try {
-          return await fetchChildedTab(tab)
+          // The whole walk in one call — for callers with no ticks to spread it
+          // over (networth/scan.mjs, fetchAllTabs). The refresher takes the same
+          // walk apart instead; same requests, same order, same log lines.
+          return await walkFolderTab(childApi, tab, log)
         } catch (e) {
           // The newer endpoint is undocumented and can change. auth/ratelimit
-          // must propagate (cookie/ban protection), everything else degrades
-          // to "tab empty" instead of tearing down the scan.
-          if (e?.kind === 'auth' || e?.kind === 'ratelimit') throw e
-          console.warn(`[stash-client] folder tab "${tab.name}" not readable (${e?.message || e})`)
-          return []
+          // must propagate (cookie/ban protection), and `unread` already IS the
+          // answer this branch has to give, with its own line already logged by
+          // finishFolderWalk.
+          if (e?.kind === 'auth' || e?.kind === 'ratelimit' || e?.kind === 'unread') throw e
+          // EVERYTHING ELSE USED TO DEGRADE TO "TAB EMPTY", and that was the
+          // wrong of the two answers available. A tab this client could not read
+          // is UNKNOWN, and handing an empty array up says the opposite — the
+          // caller stores it, the snapshot loses the tab's whole contents, and
+          // the history books them as stock that left the stash (docs/bugs.md
+          // B2). `unread` keeps the tab's last real contents standing; the scan
+          // still carries on, because every caller skips this tab exactly the
+          // way it skips a timeout.
+          log.warn?.(`[stash-client] folder tab "${tab.name}" not readable (${e?.message || e}) — ` +
+            'its stored contents stand rather than being replaced by an empty tab')
+          throw fail(`folder tab "${tab.name}" not readable: ${e?.message || e}`, 'unread')
         }
       }
       const j = await request(`tabIndex=${tabIndex}&tabs=0`)
-      const items = Array.isArray(j?.items) ? j.items : []
+      // NO ITEMS ARRAY IS NOT AN EMPTY TAB. `Array.isArray(j?.items) ? j.items : []`
+      // collapsed two answers into one: GGG saying "this tab holds nothing"
+      // (`items: []`, a fact) and GGG answering 200 with a body that is not the
+      // documented shape at all (no fact whatsoever). B7 measured the second one
+      // on the sub-tab endpoint — a 200 whose body carried no items array,
+      // logged nowhere, indistinguishable from an empty tab afterwards — and
+      // this is the same collapse on the ordinary endpoint. Stored, it empties a
+      // whole stash tab, and the recorder reads the difference as stock leaving
+      // (docs/bugs.md B2). The response KEYS travel in the message (names only,
+      // never item data, never the cookie) because they are what says where the
+      // items went.
+      if (!Array.isArray(j?.items)) {
+        throw fail(`Stash tab ${tabIndex} answered HTTP 200 without an items array — that is not an empty tab, ` +
+          `it is no answer at all (top-level keys: ${Object.keys(j || {}).join(',') || 'none'})`, 'unread')
+      }
+      const items = j.items
       // Diagnostics (POE_NETWORTH_DEBUG=1): when a tab came back empty, the
       // TOP-LEVEL KEYS of the response show whether GGG puts the items
       // somewhere else (folder tabs) or really returns nothing. Key names and

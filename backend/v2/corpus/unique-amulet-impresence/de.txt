@@ -1,0 +1,39 @@
+Gegenstandsklasse: Amulette
+Seltenheit: Einzigartig
+Impräsenz
+Onyxamulett
+--------
+Qualität (Attributs-Modifikatoren): +20% (augmented)
+--------
+Anforderungen:
+Stufe: 64
+--------
+Gegenstandsstufe: 87
+--------
+Weist zu: Spirituelle Herrschaft (enchant)
+--------
+{ Impliziter Modifikator — Attribut — 20% erhöht }
++16(10-16) zu allen Attributen
+(Attribute sind Stärke, Geschick und Intelligenz)
+--------
+{ Einzigartiger Modifikator — Schaden, Chaos }
+Fügt 17(17-19) bis 23(23-29) Chaosschaden hinzu
+{ Einzigartiger Modifikator — Leben }
++70(50-70) zu maximalem Leben
+{ Einzigartiger Modifikator — Zauberer, Fluch }
+'Verzweiflung' hat keine Reservierung, wenn die Fertigkeit als Aura gezaubert wird
+{ Einzigartiger Modifikator — Schaden }
+34(30-40)% erhöhter Schaden über Zeit
+{ Einzigartiger Modifikator — Chaos, Widerstand }
++18(17-23)% zu Chaoswiderstand
+{ Einzigartiger Modifikator }
+Erhaltet Bösartiger Wahnsinn für 10 Sekunden, wenn Ihr einen seltenen oder einzigartigen Gegner tötet
+(Wendet 'Bösartiger Wahnsinn' auf Gegner im Umkreis an und verringert ihren Schaden und Aktionsgeschwindigkeit um 10%)
+{ Einzigartiger Modifikator — Zauberer, Fluch }
+'Fesseln der Zeit' hat keine Reservierung, wenn die Fertigkeit als Aura gezaubert wird
+--------
+Es gibt kein dunkleres Nichts als
+der leere Schmerz einer vergessenen Liebe...
+--------
+Schöpfer-Gegenstand
+Ältesten-Gegenstand

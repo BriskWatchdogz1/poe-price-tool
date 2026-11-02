@@ -1,0 +1,33 @@
+Gegenstandsklasse: Gürtel
+Seltenheit: Einzigartig
+Die Gezeiten der Zeit
+Vorhut-Gürtel
+--------
+Qualität (Lebens- und Mana-Modifikatoren): +20% (augmented)
+Immaterialität: 5%
+--------
+Anforderungen:
+Stufe: 78
+--------
+Gegenstandsstufe: 87
+--------
+{ Impliziter Modifikator — Defensiven, Rüstung, Ausweichen }
++310(260-320) zu Rüstung und Ausweichwert
+--------
+{ Einzigartiger Modifikator — Leben — 20% erhöht }
+100% erhöhte Lebenswiederherstellung von Fläschchen
+{ Einzigartiger Modifikator — Mana — 20% erhöht }
+100% erhöhte Manawiederherstellung von Fläschchen
+{ Einzigartiger Modifikator }
+Auf Euch angewendete Fläschchen haben 25% erhöhte Wirkung
+{ Einzigartiger Modifikator }
+Lebensfläschchen erhalten alle 3 Sekunden 1(0-3) Füllung
+{ Einzigartiger Modifikator }
+Manafläschchen erhalten alle 3 Sekunden 2(0-3) Füllungen
+{ Einzigartiger Modifikator }
+Hilfsfläschchen erhalten alle 3 Sekunden 3(0-3) Ladungen
+--------
+Alle Dinge haben eine gewisse Dynamik, die für diejenigen, 
+die beobachten und warten, greifbar ist.
+--------
+Schöpfer-Gegenstand

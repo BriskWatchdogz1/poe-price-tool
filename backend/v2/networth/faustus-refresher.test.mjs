@@ -80,3 +80,68 @@ test('start/stop: the interval ticks and tears itself down cleanly (unref, no da
   assert.ok(calls >= 1)
   await cleanup()
 })
+
+test('tickOnce: detail.at is carried into the store, per item', async () => {
+  // The refresher is the only place the observation hour can be persisted —
+  // the pricer holds it for one call and the store cannot derive it. A tick
+  // that dropped it would leave every price looking equally fresh again.
+  const { s, cleanup } = await freshStore()
+  const pricer = {
+    detailByName: async () => new Map([
+      ['Item A', { chaos: 10, at: 9 * 3600 }],
+      ['Item B', { chaos: 50, at: 8 * 3600 }],
+      ['Chaos Orb', { chaos: 1 }] // no observation behind it -> no hour
+    ])
+  }
+  await createFaustusRefresher({ league: 'Standard', store: s, pricer, log: silentLog }).tickOnce()
+  assert.equal(s.getHour('Item A'), 9 * 3600)
+  assert.equal(s.getHour('Item B'), 8 * 3600)
+  assert.equal(s.getHour('Chaos Orb'), null)
+  assert.deepEqual(s.allPrices(), { 'Item A': 10, 'Item B': 50, 'Chaos Orb': 1 })
+  await cleanup()
+})
+
+test('tickOnce: a pricer with only chaosByName() still works — prices, no hours', async () => {
+  const { s, cleanup } = await freshStore()
+  const pricer = { chaosByName: async () => new Map([['Item A', 10]]) }
+  await createFaustusRefresher({ league: 'Standard', store: s, pricer, log: silentLog }).tickOnce()
+  assert.equal(s.getPrice('Item A'), 10)
+  assert.equal(s.getHour('Item A'), null, 'unknown age, never a guessed one')
+  await cleanup()
+})
+
+test('tickOnce: an empty result keeps the previous store, logs a warning and does not call onRefreshed', async () => {
+  const { s, cleanup } = await freshStore()
+  await s.setPrices('Standard', { 'Chaos Orb': 1 }, 1000)
+  const warnings = []
+  const log = { warn: m => warnings.push(m), error () {}, log () {} }
+  let refreshed = 0
+  // No market matched the configured league (typo, or a league without trade yet).
+  const pricer = { chaosByName: async () => new Map() }
+  const r = createFaustusRefresher({
+    league: 'Typo League', store: s, pricer, now: () => 99_000, onRefreshed: () => { refreshed++ }, log
+  })
+  await r.tickOnce()
+  assert.deepEqual(s.allPrices(), { 'Chaos Orb': 1 }) // not replaced by an empty map
+  assert.equal(s.league(), 'Standard')
+  assert.equal(s.updatedAt(), 1000) // not re-stamped as fresh
+  assert.equal(refreshed, 0)
+  assert.equal(warnings.length, 1)
+  assert.match(warnings[0], /\[faustus-refresher\] no market matched league=Typo League/)
+  assert.match(warnings[0], /keeping the previous store/)
+  await cleanup()
+})
+
+test('tickOnce: an empty detailByName() result is treated the same way', async () => {
+  const { s, cleanup } = await freshStore()
+  await s.setPrices('Standard', { 'Chaos Orb': 1 }, 1000)
+  const warnings = []
+  const pricer = { detailByName: async () => new Map() }
+  const r = createFaustusRefresher({
+    league: 'Standard', store: s, pricer, log: { warn: m => warnings.push(m), error () {}, log () {} }
+  })
+  await r.tickOnce()
+  assert.deepEqual(s.allPrices(), { 'Chaos Orb': 1 })
+  assert.equal(warnings.length, 1)
+  await cleanup()
+})

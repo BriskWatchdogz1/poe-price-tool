@@ -1,0 +1,33 @@
+Gegenstandsklasse: Ringe
+Seltenheit: Selten
+Morbider Schlaufe
+Knochenring
+--------
+Qualität (Geschwindigkeitsmodifikatoren): +20% (augmented)
+Immaterialität: 27%
+--------
+Anforderungen:
+Stufe: 65
+--------
+Gegenstandsstufe: 85
+--------
+Eure unterkühlenden Türme frieren Gegner für 0.2 Sekunden ein, während sie von den unterkühlenden Strahlen betroffen sind (enchant)
+(Unterkühlen verringert die gegnerische Aktionsgeschwindigkeit um 10%) (enchant)
+--------
+{ Impliziter Modifikator — Elementar, Widerstand, Kreatur }
+Kreaturen haben +15(10-15)% zu allen Elementarwiderständen
+--------
+{ Präfix-Modifikator "Viriler" (Level: 1) — Leben }
++107(100-114) zu maximalem Leben
+{ Präfix-Modifikator "Strahlender" (Level: 7) — Defensiven, Energieschild }
++16(16-19) zu maximalem Energieschild
+{ Präfix-Modifikator "Der Markgräfin" (Level: 3) — Schaden, Kreatur }
+Kreaturen verursachen 25(21-30)% erhöhten Schaden
+{ Brüchig Suffix-Modifikator "der Harmonie" (Level: 1) — Geschwindigkeit, Kreatur — 20% erhöht }
+Kreaturen haben 28(26-30)% erhöhte Bewegungsgeschwindigkeit
+{ Suffix-Modifikator "des Windes" (Level: 1) — Attribut }
++54(51-55) zu Geschick
+{ Suffix-Modifikator "der Motivation" (Level: 4) — Angriff, Zauberer, Geschwindigkeit, Kreatur — 20% erhöht }
+Kreaturen haben 7(5-7)% erhöhte Angriffs- und Zaubergeschwindigkeit
+--------
+Brüchiger Gegenstand

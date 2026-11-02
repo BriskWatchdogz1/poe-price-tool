@@ -26,25 +26,42 @@ export function createFaustusRefresher ({
     if (busy) return
     busy = true
     try {
-      // detailByName() when the pricer has it (name -> {chaos,min?,max?,sell?}),
-      // so the traded range and the separated sell-side rates get persisted
+      // detailByName() when the pricer has it (name ->
+      // {chaos,min?,max?,sell?,at?}), so the traded range, the separated
+      // sell-side rates and the HOUR each price was observed in get persisted
       // alongside the price; a pricer that only has chaosByName() (older stub /
       // test double) still works unchanged.
-      let prices, ranges = null, sell = null
+      //
+      // `at` is the one field that cannot be recovered later: this tick's
+      // timestamp says when the map was written, and the union walk means two
+      // prices in the same map can be hours apart (networth/faustus-age.mjs).
+      let prices, ranges = null, sell = null, hours = null
       if (typeof pricer.detailByName === 'function') {
         const detail = await pricer.detailByName()
         prices = new Map()
         ranges = new Map()
         sell = new Map()
+        hours = new Map()
         for (const [name, d] of detail) {
           prices.set(name, d.chaos)
           if (typeof d.min === 'number' && typeof d.max === 'number') ranges.set(name, [d.min, d.max])
           if (d.sell) sell.set(name, d.sell)
+          if (typeof d.at === 'number') hours.set(name, d.at)
         }
       } else {
         prices = await pricer.chaosByName()
       }
-      await store.setPrices(league, prices, now(), ranges, sell)
+      // Nothing priced at all: no market of the digests matched this league (a
+      // typo in POE_LEAGUE, or a league that has no trade yet). Replacing the map
+      // with an empty one would stamp "nothing" as fresh without a word, so the
+      // last good store stays. It cannot leak into another league: the valuator
+      // ignores a store whose league differs from its own (fromFaustus).
+      const priced = prices instanceof Map ? prices.size : Object.keys(prices || {}).length
+      if (priced === 0) {
+        log.warn?.(`[faustus-refresher] no market matched league=${league} in the digest window — keeping the previous store`)
+        return
+      }
+      await store.setPrices(league, prices, now(), ranges, sell, hours)
       onRefreshed(prices)
     } catch (e) {
       log.warn?.(`[faustus-refresher] refresh failed (kept last good map): ${e?.message || e}`)

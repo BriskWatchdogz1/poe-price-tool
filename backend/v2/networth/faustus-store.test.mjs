@@ -161,3 +161,51 @@ test('an old file WITHOUT ranges loads cleanly (prices stay, ranges are simply a
   assert.equal(s.isFresh(60_000), true)
   await cleanup()
 })
+
+// ---------------------------------------------------------------------------
+// hours — WHEN each price was observed
+//
+// The store's `updatedAt` says when the refresher ran. The union walk in
+// faustus.mjs hands it prices observed hours apart in the same tick, so the
+// only honest place for an observation time is per item.
+// ---------------------------------------------------------------------------
+
+test('setPrices persists optional hours, getHour returns the unix hour', async () => {
+  const { p, s, cleanup } = await fresh()
+  await s.setPrices('Standard', new Map([['A', 10], ['B', 50]]), Date.now(), null, null,
+    new Map([['A', 9 * 3600], ['B', 8 * 3600]]))
+  assert.equal(s.getHour('A'), 9 * 3600)
+  assert.equal(s.getHour('B'), 8 * 3600, 'two prices of one tick can carry different hours')
+  assert.equal(s.getHour('Unknown'), null)
+  const onDisk = JSON.parse(await readFile(p, 'utf8'))
+  assert.deepEqual(onDisk.hours, { A: 9 * 3600, B: 8 * 3600 })
+  await cleanup()
+})
+
+test('setPrices without the hours argument: prices as before, no hours', async () => {
+  const { s, cleanup } = await fresh()
+  await s.setPrices('Standard', new Map([['A', 10]]))
+  assert.equal(s.getPrice('A'), 10)
+  assert.equal(s.getHour('A'), null, 'absent, not invented')
+  await cleanup()
+})
+
+test('unusable hour stamps are discarded, never rounded into something plausible', async () => {
+  // A bad stamp is worse than none: it would make a price look older or younger
+  // than it is, and the age gate acts on that.
+  const { s, cleanup } = await fresh()
+  await s.setPrices('Standard', new Map([['A', 1], ['B', 1], ['C', 1], ['D', 1], ['E', 1]]),
+    Date.now(), null, null,
+    { A: 0, B: -3600, C: NaN, D: Infinity, E: '9000' })
+  for (const n of ['A', 'B', 'C', 'D', 'E']) assert.equal(s.getHour(n), null, `${n} kept a bad stamp`)
+  assert.equal(s.getPrice('A'), 1, 'a bad stamp must not cost the price')
+  await cleanup()
+})
+
+test('a file written before `hours` existed loads cleanly and reports the age as unknown', async () => {
+  const { s, cleanup } = await fresh()
+  s.data = { schema_version: 1, updatedAt: Date.now(), league: 'Standard', prices: { A: 7 } }
+  assert.equal(s.getPrice('A'), 7)
+  assert.equal(s.getHour('A'), null)
+  await cleanup()
+})

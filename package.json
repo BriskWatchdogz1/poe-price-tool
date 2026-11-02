@@ -1,19 +1,30 @@
 {
   "name": "poe-price-tool",
-  "version": "0.1.0",
-  "description": "Self-hosted one-key item price checks for Path of Exile 1, plus a net-worth tracker \u2014 headless Awakened PoE Trade engine, browser UI, Docker.",
+  "version": "0.2.0",
+  "description": "Self-hosted one-key item price checks for Path of Exile 1, plus a net-worth tracker — headless Awakened PoE Trade engine, browser UI, Docker.",
   "license": "MIT",
   "private": true,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/BriskWatchdogz1/poe-price-tool.git"
+  },
+  "bugs": {
+    "url": "https://github.com/BriskWatchdogz1/poe-price-tool/issues"
+  },
+  "homepage": "https://github.com/BriskWatchdogz1/poe-price-tool#readme",
   "type": "module",
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "scripts": {
     "start": "node backend/v2/server.mjs",
-    "test": "node --test --test-force-exit backend/v2",
-    "update-apt-data": "node backend/v2/apt-data-update.mjs"
+    "test": "node backend/v2/run-tests.mjs",
+    "test:fast": "node --test backend/v2",
+    "update-apt-data": "node backend/v2/apt-data-update.mjs",
+    "gen-lang-data": "node backend/v2/lang-data-gen.mjs"
   },
   "dependencies": {
+    "pathofexile-dat": "^15.2.0",
     "ws": "^8.18.0"
   },
   "devDependencies": {

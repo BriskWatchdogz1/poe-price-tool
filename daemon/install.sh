@@ -12,16 +12,20 @@ UNIT="$CFG_DIR/systemd/user/poe-price-daemon.service"
 say()  { printf '\033[1m%s\033[0m\n' "$*"; }
 warn() { printf '\033[33m%s\033[0m\n' "$*"; }
 
-# 1) Check prerequisites (don't auto-install -> requires sudo/pacman).
-missing=()
-for cmd in ydotool xdotool xprop xsel wl-paste curl python3; do
-  command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
-done
-python3 -c 'import evdev' 2>/dev/null || missing+=("python-evdev")
-python3 -c 'import tomllib' 2>/dev/null || missing+=("python>=3.11")
-if [ "${#missing[@]}" -gt 0 ]; then
-  warn "Missing prerequisites: ${missing[*]}"
-  echo  "Install (Arch/Garuda):  sudo pacman -S ydotool wl-clipboard xsel xdotool xorg-xprop python-evdev curl"
+# 1) Check prerequisites (don't auto-install -> requires sudo/pacman). The list
+# lives in selftest.sh — the very script the user runs later when something
+# stops working, so there is ONE list instead of two that drift apart. It reads
+# the config to decide what is actually required: with no [macros] section the
+# chat-macro tools are not demanded here either.
+if ! "$DIR/selftest.sh" --tools; then
+  echo
+  warn "Prerequisites are missing — nothing was installed."
+  echo  "See README.md, \"Prerequisites\" — it lists what each tool is for, and has"
+  echo  "its own table for immutable distributions (Bazzite, Silverblue, Kinoite),"
+  echo  "where installing these the usual way is the WRONG move."
+  echo
+  echo  "Arch/Garuda, as one example:"
+  echo  "  sudo pacman -S ydotool wl-clipboard xsel xdotool xorg-xprop python-evdev curl"
   echo  "Then run this script again."
   exit 1
 fi
@@ -62,13 +66,19 @@ systemctl --user daemon-reload
 systemctl --user enable --now poe-price-daemon.service
 say "Service installed and started: poe-price-daemon.service"
 
-# 5) Check the input group (evdev needs read access to /dev/input/event*).
-if ! id -nG | grep -qw input; then
-  warn "You are not in the 'input' group — the daemon won't see any keys otherwise."
-  echo  "Fix (then log in again):  sudo usermod -aG input $USER"
-fi
+# 5) Self-test: prove the installation instead of assuming it. This is the same
+# script the user runs later when the tool "does nothing" — input group,
+# clipboard, ydotoold, backend, and a real test parse in the language the
+# backend reads for this user. It never exits the installer: the unit is
+# already in place at this point, and a fresh install that still needs a config
+# edit (step 3) is EXPECTED to have findings.
+echo
+say "Self-test:"
+SELFTEST_RC=0
+"$DIR/selftest.sh" || SELFTEST_RC=$?
 
 echo
 say "Done."
 [ "${NEED_EDIT:-0}" = 1 ] && echo "Next step: adjust backend/user in $CFG, then:  systemctl --user restart poe-price-daemon"
+[ "$SELFTEST_RC" != 0 ] && warn "The self-test found problems (see above). Re-run it any time:  ./daemon/selftest.sh"
 echo "View status:  systemctl --user status poe-price-daemon"

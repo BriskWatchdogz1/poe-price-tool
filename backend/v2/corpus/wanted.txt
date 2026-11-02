@@ -1,0 +1,34 @@
+# What the acceptance corpus has to contain, one category per line.
+#
+#   <id>: <what an item of this kind has to show>
+#
+# A leading "!" marks a category that DECIDES an open question — the corpus is
+# not just incomplete without it, a wrong answer would ship unnoticed.
+#
+# `corpus-parity.test.mjs` reads this file. A category counts as covered when
+# at least one item directory names it in `covers.txt` AND carries both de.txt
+# and en.txt — parity needs the pair, a German text alone proves nothing.
+#
+# Adding a category is a line here. Adding an item is a directory. Neither
+# touches code.
+
+unique: a unique item, name and base both localized
+rare: a rolled rare, prefix/suffix info lines in the extended form
+gem: a skill gem — level, quality, experience block
+map: a map — tier, quantity/rarity/pack size, map mods
+currency: a stackable currency item
+divination-card: a divination card, with its stack size and flavour text
+corrupted: any item carrying the "Verderbt" line
+weapon-dps: a weapon, so the pDPS/eDPS/DPS split gets computed and searched
+armour-percentile: an armour piece whose base percentile filter is offered
+cluster-jewel: a cluster jewel — enchant line plus the passive count
+
+# --- the two that decided something: both ANSWERED, 2026-08-10 -----------------
+#
+# Both were open questions about what the German client actually writes. A
+# German text alone settles that — no English partner needed. They stay on the
+# list because the parity check still wants the pair, but the risk they carried
+# is retired.
+
+!decimal-value: a mod with a fractional roll. ANSWERED: the German client writes a POINT, not a comma — `frieren Gegner für 0.2 Sekunden ein` (rare-ring-bone). Not one comma-decimal anywhere in the corpus. The value regexes (`\d+(?:\.\d+)?` in renderer/src/parser/stat-translations.ts, backend/v2/server.mjs, backend/v2/trade-stats.mjs) are therefore correct as they stand.
+!socket-colours: sockets in a combination other than `R-B W-G`. ANSWERED: the letters are language-independent — `Fassungen: G-R-B-B-W W` (rare-body-armour-paladin), plus `B-B-B-R` and `B-B-R-W`. German Grün/Rot/Blau/Weiss happen to share their initials with Green/Red/Blue/White, and the client uses those initials.

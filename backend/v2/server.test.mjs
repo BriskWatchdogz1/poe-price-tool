@@ -5,17 +5,41 @@
 // server.mjs would otherwise start on import (the Faustus CDN refresher, the
 // corpse Trade-API pricer, the APT/RePoE data auto-update, and the C:D ratio +
 // reference rail warm-up) — no live crawl, no network polling in tests.
+// POE_REFERENCE_ON_CONNECT_DISABLED=1 is the fifth: POE_REFERENCE_DISABLED
+// covers the warm-up done at BOOT, and every WS connection below used to walk
+// into the OTHER one — warmLeague(), for a league with a cold cache — which
+// sent two poe.ninja requests per run (docs/bugs.md B12). That the whole suite
+// now reaches nobody is measured in `server-no-network.test.mjs`, not asserted
+// by this comment.
+//
+// POE_PRICE_CHECK_DISABLED=1 turns off the FOREGROUND one those four never
+// covered: every POST below creates a card, and a card used to be auto-priced
+// against www.pathofexile.com. Nothing here asserts on a price — the file is
+// about routing, dedupe, the room cap and the requeue — so the searches were
+// pure collateral, and they were also what kept this process alive after the
+// last test: APT's RateLimiter books each spent request as a timer running for
+// the window it read out of GGG's headers (302 s, 21602 s), and the engine's
+// response cache adds its own expiry timer. `mod.server.close()` in after()
+// closes the HTTP server; those timers are what was left.
 import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { WebSocket } from 'ws'
+import { quietEnv } from './test-quiet-env.mjs'
 
 // Env MUST be set before server.mjs is imported (its top-level await reads it at
 // module load time).
+// The full set that keeps a booted server off the network. One list, imported:
+// every file that wrote it out by hand left something out, and what kept being
+// left out was the switch a WebSocket needs (test-quiet-env.mjs, docs/bugs.md
+// B25). Applied FIRST — anything this file sets below overrides it on purpose.
+quietEnv()
 process.env.PORT = '0'
 process.env.POE_FAUSTUS_DISABLED = '1'
 process.env.POE_CORPSE_DISABLED = '1'
 process.env.POE_DATA_REFRESH_DISABLED = '1'
 process.env.POE_REFERENCE_DISABLED = '1'
+process.env.POE_REFERENCE_ON_CONNECT_DISABLED = '1'
+process.env.POE_PRICE_CHECK_DISABLED = '1'
 process.env.POE_APP_NAME = 'Custom Console'
 // Dedicated users so the robustness tests don't fight the dedup tests' rooms.
 process.env.POE_USERS = 'player1,player2,capuser,requser,xuser'
@@ -285,11 +309,20 @@ test('leaguesToRefresh: the configured league is in there, even with no client c
   assert.ok(set.has(mod.LEAGUE), 'POE_LEAGUE is always in the refresh set')
 })
 
-// --- H3: negative/0 cap overrides are clamped to >=1 (no endless loop) -------
-test('positiveEnvInt: negative/0/NaN are guarded (lower bound 1)', () => {
-  assert.equal(mod.positiveEnvInt('-5', 50), 1, 'negative -> clamped to 1 (endless loop otherwise)')
-  assert.equal(mod.positiveEnvInt('0', 50), 50, '0 -> default (|| fallback)')
-  assert.equal(mod.positiveEnvInt(undefined, 10), 10, 'unset -> default')
-  assert.equal(mod.positiveEnvInt('abc', 10), 10, 'NaN -> default')
-  assert.equal(mod.positiveEnvInt('7', 50), 7, 'a valid value is kept')
+// --- H3: the two caps this file sets really are in force ---------------------
+// This used to unit-test `positiveEnvInt`, the helper that read them —
+// `Math.max(1, Number(raw) || fallback)`, the same defect as
+// `Number(env) || DEFAULT` and just as silent about a 0 (docs/bugs.md B13).
+// Both now come out of numeric-settings.mjs, whose own test file owns the
+// reading rules. What belongs HERE is the other half, which the helper test
+// never covered: that the values in the environment above are the ones the
+// running server actually enforces. The two tests above measure exactly that —
+// four posts and three surviving cards at POE_MAX_ITEMS_PER_ROOM=3, two
+// re-queued cards at POE_MAX_REQUEUE_ON_RECONNECT=2 — so this one only pins
+// down that they are not the defaults being mistaken for a working override.
+test('the room cap and the requeue cap are the ones this file configured, not the defaults', () => {
+  assert.equal(process.env.POE_MAX_ITEMS_PER_ROOM, '3')
+  assert.equal(process.env.POE_MAX_REQUEUE_ON_RECONNECT, '2')
+  assert.notEqual(process.env.POE_MAX_ITEMS_PER_ROOM, '50', 'the default would make the eviction test vacuous')
+  assert.notEqual(process.env.POE_MAX_REQUEUE_ON_RECONNECT, '10', 'ditto for the requeue test')
 })

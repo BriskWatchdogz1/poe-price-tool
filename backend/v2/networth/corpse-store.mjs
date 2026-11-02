@@ -64,6 +64,11 @@ export function createCorpseStore (filePath, { ttlMs = DEFAULT_TTL_MS } = {}) {
     // (mirrors faustus-store.setPrices) so a crash after a tick never loses it.
     async setPrice (league, name, chaos, now = Date.now()) {
       const val = (typeof chaos === 'number' && isFinite(chaos)) ? chaos : null
+      // A new league invalidates everything stored: the valuator's guard only
+      // compares the single `league` field, so entries left over from the old
+      // league would otherwise be served as new-league prices until the TTL ran
+      // out. A file without a stored league (legacy) is adopted, not cleared.
+      if (store.data.league && store.data.league !== league) store.data.entries = {}
       store.data.entries[name] = { chaos: val, at: now }
       store.data.updatedAt = now
       store.data.league = league

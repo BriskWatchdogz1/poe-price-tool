@@ -19,7 +19,13 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createServer } from 'node:net'
 import WebSocket from 'ws'
+import { quietEnv } from '../test-quiet-env.mjs'
 
+// The full set that keeps a booted server off the network, applied before the
+// dynamic import below — server.mjs reads the environment at module load. One
+// list, imported: every file that wrote it out by hand left something out, and
+// what kept being left out was the switch a WebSocket needs (test-quiet-env.mjs).
+quietEnv()
 process.env.PORT = '0'
 process.env.POE_FAUSTUS_DISABLED = '1'
 process.env.POE_CORPSE_DISABLED = '1'
@@ -130,9 +136,22 @@ test('after a reload the picker shows the selection the price was searched with'
   }
 
   // Everything the card claims, picker and price block side by side.
+  //
+  // `priced` is the readiness flag, and it is deliberately not one of the
+  // values under test. A reconnect replays TWO messages per card — `item-added`
+  // (which builds the card) and the `price-result` right behind it (which fills
+  // the price block in a second render, see applyPriceResult in app.js). Waiting
+  // for `.card` alone therefore snapshots a card that exists but has no price
+  // yet, and app.js renders exactly that state as "in queue" (priceHtml's first
+  // branch: no price and not error/searching/rate-limited). That is the flake:
+  // the run below asserted the listing count against a card the second message
+  // had not reached. So the loop waits for the price block to have LEFT its
+  // waiting state — a signal from the render path, independent of the count,
+  // the mod ticks and the corruption toggle the assertions then check.
   const SNAP = `(() => {
     const c = document.querySelector('.card')
     if (!c) return null
+    const pr = c.querySelector('.pblock .pr')
     const rows = [...c.querySelectorAll('.mrow')].map(r => ({
       text: r.dataset.text,
       defsel: r.dataset.defsel,
@@ -141,6 +160,7 @@ test('after a reload the picker shows the selection the price was searched with'
       max: r.querySelector('.slmax') ? r.querySelector('.slmax').value : null
     }))
     return {
+      priced: !!pr && !pr.classList.contains('wait'),
       rows,
       modbarCount: c.querySelector('.modbar .cnt').textContent,
       footCount: c.querySelector('.ed-foot .sel').textContent,
@@ -155,10 +175,15 @@ test('after a reload the picker shows the selection the price was searched with'
     let snap = null
     for (let i = 0; i < 150; i++) {
       snap = await evalJs(SNAP)
-      if (snap) break
+      if (snap && snap.priced) break
       await sleep(100)
     }
     assert.ok(snap, 'the replayed card is rendered')
+    // Reached only if the price block stayed on a waiting state for the whole
+    // budget — i.e. the replayed price never arrived at all. That is a real
+    // failure, and it says so here rather than surfacing as a confusing
+    // "expected 65, got in queue" three lines down.
+    assert.ok(snap.priced, `the replayed price reached the card (price block still reads "${snap.hits}")`)
 
     // The price block shows the 2-mod search's result ...
     assert.match(snap.hits, /65/, 'the replayed listing count is on the card')

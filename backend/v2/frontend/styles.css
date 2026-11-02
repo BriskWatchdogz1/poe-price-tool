@@ -162,6 +162,12 @@ body{background:var(--bg); color:var(--text); font-family:var(--sans); font-size
 .pblock .psrc{font-family:var(--mono); font-size:12px; color:var(--faint);
   letter-spacing:.1em; text-transform:uppercase; line-height:1;}
 .pblock .pask{font-family:var(--mono); font-size:12px; color:var(--muted); line-height:1.2;}
+/* "rate is N h old", ABOVE the number on purpose: it qualifies the figure that
+   follows, and a reader who has already read the price has stopped looking.
+   Only rendered when the rate is genuinely behind (app.js staleTxt), so it is
+   never the constant decoration a permanent label would become. Muted, not a
+   warning — the number is real, it is just not from now. */
+.pblock .pstale{font-family:var(--mono); font-size:12px; color:var(--muted); line-height:1;}
 /* Ask-conflict suffix on .psrc ("Exchange — asks disagree"): the headline
    still wins (see server.mjs withExchangeMain / app.js askConflict) — this is
    a quiet disclosure that the two sources disagree, not a warning. Same muted

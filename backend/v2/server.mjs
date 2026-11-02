@@ -16,12 +16,20 @@
  * own item cards and their own league. Identity is only used for routing (LAN, trusted):
  *  - browser: cookie `ppt_user=<user>` (read from req.headers.cookie at the WS handshake).
  *  - daemon: header `X-User: <user>` on POST /item (missing/unknown -> USERS[0]).
+ * The same identity also carries the CLIENT LANGUAGE (POE_USER_LANGS, see
+ * user-langs.mjs): a user on a German client is parsed by a second, parse-only
+ * engine instance (engine-instances.mjs). Trade calls stay on the one primary
+ * instance with the one shared RateLimiter.
  * `queue-status` is global (shared queue), everything else is routed per room.
  * poe.ninja caches are keyed by league (two users on the same league share them).
  *
  * Deps: only `ws` + the engine.
  * Start:  node backend/v2/server.mjs   (PORT default 8788)
  */
+// FIRST import, and it has to stay first: it folds /config/overrides.json into
+// process.env before anything reads a `POE_…` variable (config-boot.mjs says
+// why it is a module of its own rather than a call further down).
+import { configOverrideState } from './config-boot.mjs'
 import { createServer } from 'node:http'
 import { readFile, writeFile, stat, mkdir } from 'node:fs/promises'
 import { join, extname, normalize, dirname } from 'node:path'
@@ -47,11 +55,12 @@ import { validateCredentialInput, saveNetworthUser, CredentialsError } from './n
 import { createStashClient } from './networth/stash-client.mjs'
 import { loadItemsIndex, normalizeItem } from './networth/normalize.mjs'
 import { createValuator } from './networth/valuator.mjs'
-import { aggregate } from './networth/aggregate.mjs'
+import { aggregate, unpricedStock } from './networth/aggregate.mjs'
 import { createNetworthStore } from './networth/store.mjs'
 import { valueTab } from './networth/scan.mjs'
-import { createNetworthRefresher } from './networth/refresher.mjs'
-import { createNetworthHistory, RANGES as NETWORTH_RANGES } from './networth/history.mjs'
+import { createNetworthRefresher, slowStepMsFromEnv } from './networth/refresher.mjs'
+import { createNetworthHistory, createTabSetWatch, RANGES as NETWORTH_RANGES } from './networth/history.mjs'
+import { createPriceGuard, guardOptionsFromEnv } from './networth/price-guard.mjs'
 import { createReferenceHistory } from './reference-history.mjs'
 // Faustus (GGG Currency Exchange, public CDN) — Task 3: store + hourly
 // refresher for the derived name->chaos map (Task 2's faustus.mjs is the
@@ -59,6 +68,7 @@ import { createReferenceHistory } from './reference-history.mjs'
 import { createFaustusPricer } from './networth/faustus.mjs'
 import { createFaustusStore } from './networth/faustus-store.mjs'
 import { createFaustusRefresher } from './networth/faustus-refresher.mjs'
+import { faustusMaxAgeHoursFromEnv, maxAgeMs as faustusMaxAgeMsOf, isTooOld as faustusTooOld, staleHours as faustusStaleHours } from './networth/faustus-age.mjs'
 // Sell-side comparison for the reference rail: which currency pays the seller
 // more (chaos vs divine), from the SEPARATED Faustus per-market rates.
 import { compareSellSides } from './sell-side.mjs'
@@ -71,8 +81,55 @@ import { createCorpsePricer } from './networth/corpse-pricer.mjs'
 // Data auto-update: keeps the vendored APT data, base-names.json and
 // base-names.json fresh in the background (daily conditional checks,
 // validate-before-adopt, persisted under /config) — see data-refresher.mjs.
-import { createDataRefresher, DEFAULT_INTERVAL_MS as DATA_REFRESH_DEFAULT_MS, DEFAULT_STALE_TICKS as DATA_REFRESH_STALE_TICKS } from './data-refresher.mjs'
+// (its DEFAULT_INTERVAL_MS/DEFAULT_STALE_TICKS are the defaults for
+// POE_DATA_REFRESH_MS/POE_DATA_STALE_TICKS and are imported by
+// numeric-settings.mjs, so the number is not restated here.)
+import { createDataRefresher } from './data-refresher.mjs'
+import { isFailKind } from './check-failure.mjs'
+// Once-a-day look at GitHub for a newer release of this tool (reports only,
+// installs nothing) — see release-check.mjs. The installed version is the root
+// package.json's, read by version.mjs.
+import { createReleaseCheck, DEFAULT_REPO as RELEASE_DEFAULT_REPO } from './release-check.mjs'
+import { VERSION, USER_AGENT } from './version.mjs'
 import { loadBaseNames } from './networth/base-names.mjs'
+// Two languages in one process: the primary engine (English — parse AND trade)
+// plus a parse-only instance per additional client language, handed out as a
+// wrapper that exposes nothing but parseItem. See engine-instances.mjs for why
+// that is structural and not a convention.
+import { createEngineInstances, PRIMARY_LANG } from './engine-instances.mjs'
+import { parseUserLangs, DEFAULT_LANG, SUPPORTED_LANGS } from './user-langs.mjs'
+// ...and the half of that mapping the USER owns: a language chosen on the
+// settings page, persisted in /config and beating POE_USER_LANGS (see
+// user-lang-store.mjs for why that direction and not the other one).
+import { createUserLangStore } from './user-lang-store.mjs'
+// Configuration the admin area may change at runtime: the allow-list, the
+// validation, and the read/write half of the override file whose boot half ran
+// in config-boot.mjs above.
+import { SETTABLE_BY_NAME, configView, readOverrideFile, setOverride, clearApplyingMarker } from './config-overrides.mjs'
+// ...and the numbers among them. One table (default, range, and whether an
+// explicit 0 is a setting), one reader, one rule for a value that cannot be
+// honoured: say so and use the default. Replaces the `Number(env) || DEFAULT`
+// idiom that used to stand eighteen times in the config block below and could
+// not express zero — see numeric-settings.mjs for what that cost.
+import { envNum } from './numeric-settings.mjs'
+// The de->en bridge that lets the unknown-mod repair path fire for a localized
+// item at all (design doc, section 5) — without it the English-only stat
+// catalogue can never match a German mod line.
+import { createModTextBridge } from './mod-text-pairs.mjs'
+// The tool reporting its own gaps (design doc, section 6): what failed to parse
+// and which mod lines stayed unresolved, aggregated per language; how far a
+// localized data set has fallen behind English; and the plaintext-password
+// partition in front of the view that shows all of it.
+import { createGapLog } from './gap-log.mjs'
+import { createLangSkew } from './lang-skew.mjs'
+import { createAdminAuth, ADMIN_PASSWORD_FILE_DEFAULT, ADMIN_MISSING } from './admin-auth.mjs'
+// The update button. A restart this process can do to itself; an update needs
+// the host, so the container writes a request into /config and a script out
+// there decides. host-update.mjs argues the whole shape of it, including why
+// there is no docker socket anywhere near this container.
+// (HEARTBEAT_MAX_AGE_MS_DEFAULT is the default for
+// POE_UPDATE_HEARTBEAT_MAX_AGE_MS and lives in numeric-settings.mjs's table.)
+import { createHostUpdate, UPDATE_DIR_DEFAULT } from './host-update.mjs'
 
 // ---- Observability (install FIRST, before anything can log) ----------------
 // Timestamps on every console line: without them a log gives the order of
@@ -82,28 +139,56 @@ if (process.env.POE_LOG_TIMESTAMPS !== '0') installLogTimestamps()
 // Trade rate-limit bookkeeping. Reads the headers of responses that happen
 // anyway (never sends anything itself) and logs ONE line when a window gets
 // tight, plus one with per-consumer counts on a 429. POE_TRADE_AUDIT=0 off.
-const TRADE_AUDIT_THRESHOLD = Number(process.env.POE_TRADE_AUDIT_THRESHOLD) || 0.8
+// The threshold accepts 0 ("report every window"); the audit never sends a
+// request, so the loudest setting it has still costs nothing.
+const TRADE_AUDIT_THRESHOLD = envNum('POE_TRADE_AUDIT_THRESHOLD')
 const tradeAudit = createTradeAudit({ threshold: TRADE_AUDIT_THRESHOLD })
 if (process.env.POE_TRADE_AUDIT !== '0') installTradeAudit({ audit: tradeAudit })
 
 // ---- Config (all from env, sensible defaults) ------------------------------
-// `Number(process.env.PORT) || 8788` would wrongly fall back to 8788 for
-// PORT=0 (random port, used by tests so they never bind the real 8788) since
-// 0 is falsy -> explicitly check "is env set?" instead.
-const PORT = process.env.PORT !== undefined ? Number(process.env.PORT) : 8788
+// Every NUMBER below comes from envNum() — numeric-settings.mjs holds the
+// default, the range and the answer to "is an explicit 0 a setting here?" for
+// each one, and an unusable value is reported instead of silently replaced.
+// That includes PORT (0 = let the OS pick a free port, the test suite's normal path).
+const PORT = envNum('PORT')
 const LEAGUE = process.env.POE_LEAGUE || 'Standard'
 // Fixed user list (no login). Identity is only used for routing.
 const USERS = (process.env.POE_USERS || 'player1,player2').split(',').map(s => s.trim()).filter(Boolean)
+// ...and which client language each of them plays in — same identity, both
+// transports (X-User on POST /item, cookie ppt_user on the WS). Unset means
+// English for everyone, exactly as before. A malformed mapping throws right
+// here, at startup, instead of feeding items to the wrong parser
+// (user-langs.mjs explains why that is a hard error).
+const ENV_LANG_BY_USER = parseUserLangs({
+  spec: process.env.POE_USER_LANGS,
+  users: USERS,
+  defaultLang: process.env.POE_LANG_DEFAULT || DEFAULT_LANG
+})
+// The mapping actually in force. Starts as the env seed and is overlaid with
+// whatever each user has chosen for himself — the store WINS over the env, so
+// a deploy never silently reverts somebody's own choice (user-lang-store.mjs).
+// Not a const's worth of immutability any more: POST /user-lang writes into it.
+const LANG_BY_USER = new Map(ENV_LANG_BY_USER)
+const userLangStore = createUserLangStore()
+for (const [u, lang] of await userLangStore.load({ users: USERS, supported: SUPPORTED_LANGS })) {
+  LANG_BY_USER.set(u, lang)
+}
 // Configurable brand name (landing page only — the feature pages keep their
 // own functional names, "Net Worth"/"History"). Neutral default; the
-// operator sets their own via env.
-const APP_NAME = process.env.POE_APP_NAME || 'Trade Console'
+// operator sets their own via env. Read at REQUEST time, not once at startup:
+// that is what makes it changeable from the admin area without a restart
+// (config-overrides.mjs lists it as `live`).
+const appName = () => process.env.POE_APP_NAME || 'Trade Console'
 // PoE trade fetch (/api/trade/fetch/{ids}) allows MAX. 10 ids per request —
 // more -> the API responds "Invalid query". searchPreset fetches in ONE call,
-// so cap it hard at <=10 here (env can go lower, but never higher).
-const MAX_LISTINGS = Math.min(10, Number(process.env.POE_MAX_LISTINGS) || 10)
-const CD_FALLBACK = Number(process.env.POE_CD_RATIO) || 215 // used when poe.ninja is unreachable
-const CD_REFRESH_MS = Number(process.env.POE_CD_REFRESH_MS) || 15 * 60 * 1000
+// so the ceiling of 10 is GGG's, not ours; the table carries it as `max` and
+// refuses anything above it instead of quietly clamping (which is what
+// `Math.min(10, …)` used to do — and it clamped a NEGATIVE value through
+// untouched, so POE_MAX_LISTINGS=-5 really did ask for -5 listings).
+// Read per search for the same reason as appName().
+const maxListings = () => envNum('POE_MAX_LISTINGS')
+const CD_FALLBACK = envNum('POE_CD_RATIO') // used when poe.ninja is unreachable
+const CD_REFRESH_MS = envNum('POE_CD_REFRESH_MS')
 const BROWSER_UA =
   'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) ' +
   'Chrome/126.0.0.0 Safari/537.36'
@@ -121,17 +206,50 @@ const BUNDLE = new URL('./engine.bundle.mjs', import.meta.url).href
 // one. The background schedule itself starts further down (start()), once the
 // consumers exist. POE_DATA_REFRESH_DISABLED=1 stops the fetching, but an
 // already-persisted valid snapshot is still preferred (wipe the dir to reset).
-const DATA_REFRESH_MS = Number(process.env.POE_DATA_REFRESH_MS) || DATA_REFRESH_DEFAULT_MS
+const DATA_REFRESH_MS = envNum('POE_DATA_REFRESH_MS')
 const DATA_REFRESH_DISABLED = process.env.POE_DATA_REFRESH_DISABLED === '1'
 const DATA_REFRESH_DIR = process.env.POE_DATA_REFRESH_DIR || '/config/data-refresh'
 // How many missed ticks make a source "stale" in the UI status line. Relative
 // to the interval, not an absolute duration (POE_DATA_STALE_TICKS overrides).
-// (positiveEnvInt is defined further down, after the queue section — same clamp)
-const DATA_STALE_TICKS = Math.max(1, Number(process.env.POE_DATA_STALE_TICKS) || DATA_REFRESH_STALE_TICKS)
+const DATA_STALE_TICKS = envNum('POE_DATA_STALE_TICKS')
+// How many characters of the last failure REASON a source's status line carries
+// (check-failure.mjs). The duration alone never said whether a source is briefly
+// away or refusing to work again — docs/bugs.md B24.
+const DATA_STATUS_REASON_MAX = envNum('POE_DATA_STATUS_REASON_MAX')
+// How long the admin area's "check now" stays shut after a run. It exists so a
+// repair can be verified instead of waited out, and it is guarded because the
+// person most likely to press it twice is the one in the middle of a repair.
+const DATA_CHECK_NOW_COOLDOWN_MS = envNum('POE_DATA_CHECK_NOW_COOLDOWN_MS')
+// The languages somebody is configured for right now. Handed over explicitly
+// rather than left to the refresher's own `configuredLanguages()` read of
+// POE_USER_LANGS: a language a user picked HIMSELF (user-lang-store) is not in
+// that variable, and a data set that stops being refreshed goes stale silently.
+//
+// This is the SEED, not the final answer: the set the refresher ends up with is
+// widened to BOOT_LANGS below, once the snapshot has been read. The refresher is
+// created here because its init() is what decides which snapshot is active, and
+// that answer is an input to the wider set — see setLanguages() further down.
+const CONFIGURED_LANGS = [...new Set([
+  process.env.POE_LANG_DEFAULT || DEFAULT_LANG,
+  ...ENV_LANG_BY_USER.values(),
+  ...LANG_BY_USER.values()
+])].filter(l => SUPPORTED_LANGS.includes(l))
+// How much of the coverage the live localized set already has may fall away in
+// one regeneration before the run is refused (lang-derive.mjs, validate()). Read
+// here rather than in the generator: numeric-settings.mjs sits ABOVE it in the
+// import graph, and a module reading the environment on its own is exactly what
+// that table exists to end.
+const LANG_MAX_COVERAGE_LOSS_RATIO = envNum('POE_LANG_MAX_COVERAGE_LOSS_RATIO')
 const dataRefresher = createDataRefresher({
   dir: DATA_REFRESH_DIR,
   intervalMs: DATA_REFRESH_MS,
   staleTicks: DATA_STALE_TICKS,
+  languages: CONFIGURED_LANGS,
+  langMaxLossRatio: LANG_MAX_COVERAGE_LOSS_RATIO,
+  // How much of a failure reason travels into the status line (the refresher
+  // filters and caps it there, so nothing longer is ever persisted either).
+  reasonMaxChars: DATA_STATUS_REASON_MAX,
+  checkNowCooldownMs: DATA_CHECK_NOW_COOLDOWN_MS,
   vendored: {
     publicDir: fileURLToPath(new URL('../../renderer/public/', import.meta.url)),
     baseNamesPath: fileURLToPath(new URL('./networth/base-names.json', import.meta.url))
@@ -139,11 +257,156 @@ const dataRefresher = createDataRefresher({
 })
 await dataRefresher.init()
 
+// ---- Release check (release-check.mjs) --------------------------------------
+// Asks GitHub at most once a day whether a newer release of this tool exists and
+// tells every open page. POE_RELEASE_CHECK_DISABLED=1 stops the AUTOMATIC check
+// only and is read at tick time (setting, apply: live); the admin area's manual
+// check ignores it. The state survives restarts, so a container that restarts
+// every night still asks once a day.
+const RELEASE_REPO = process.env.POE_RELEASE_REPO || RELEASE_DEFAULT_REPO
+const RELEASE_CHECK_STATE = process.env.POE_RELEASE_CHECK_STATE || '/config/release-check.json'
+const releaseCheck = createReleaseCheck({
+  repo: RELEASE_REPO,
+  installedVersion: VERSION,
+  statePath: RELEASE_CHECK_STATE,
+  userAgent: USER_AGENT,
+  isDisabled: () => process.env.POE_RELEASE_CHECK_DISABLED === '1',
+  onCheck () { broadcastAll(releaseStatusMsg()) }
+})
+await releaseCheck.init()
+
+function releaseStatusMsg () {
+  return { type: 'release-status', ...releaseCheck.status() }
+}
+
+// ---- Gap reporting + admin partition (design doc, section 6) ---------------
+// The German user will not report a bug and the operator will not read logs, so
+// the two failure modes that would otherwise stay invisible are counted here
+// and handed out on the settings page: a clipboard text the engine refused, and
+// a mod line nothing could resolve. Both are aggregated per language and
+// bounded in memory — see gap-log.mjs for the eviction rule.
+const GAP_LOG_MAX = envNum('POE_GAP_LOG_MAX')
+const GAP_LOG_TEXT_MAX = envNum('POE_GAP_LOG_TEXT_MAX')
+const gapLog = createGapLog({ maxEntriesPerKind: GAP_LOG_MAX, maxTextLength: GAP_LOG_TEXT_MAX })
+
+// How far a localized data set may fall behind English before the view calls it
+// a warning, as a fraction of the English set. A ratio, not a count — see
+// lang-skew.mjs.
+const LANG_SKEW_WARN_RATIO = envNum('POE_LANG_SKEW_WARN_RATIO')
+// Compared against the snapshot the container is ACTUALLY serving (the
+// refresher's active dir), never against a guessed one.
+const langSkew = createLangSkew({
+  resolvePath: (lang, file) => (file === 'items.ndjson'
+    ? dataRefresher.itemsNdjsonPath(lang)
+    : dataRefresher.statsNdjsonPath(lang)),
+  warnRatio: LANG_SKEW_WARN_RATIO
+})
+
+// Plaintext password in a file, default `admin`, checked on EVERY admin request
+// — no session, no expiry, no server-side state. admin-auth.mjs argues why.
+const ADMIN_PASSWORD_PATH = process.env.POE_ADMIN_PASSWORD_FILE || ADMIN_PASSWORD_FILE_DEFAULT
+const adminAuth = createAdminAuth({ path: ADMIN_PASSWORD_PATH })
+await adminAuth.ensureFile()
+// Said out loud at every start while the default is still in force, because
+// what it guards has grown: the same password ends the process and writes the
+// configuration the next start reads, not just a read-only diagnostic view. The
+// trust model is unchanged (LAN, no authentication) and nothing is forced —
+// this is a warning, not a gate.
+if (await adminAuth.usingDefault()) {
+  console.warn('[admin] ============================================================')
+  console.warn(`[admin] THE ADMIN PASSWORD IS STILL THE DEFAULT (${ADMIN_PASSWORD_PATH}).`)
+  console.warn('[admin] It is published in this repository, and it is what stands')
+  console.warn('[admin] between anyone on this network and the restart button, the')
+  console.warn('[admin] configuration the next start reads, and the diagnostic view.')
+  console.warn('[admin] Change it before this tool is reachable from anywhere but')
+  console.warn('[admin] your own network.')
+  console.warn('[admin] ============================================================')
+}
+
+// ---- The update button (host-update.mjs) -----------------------------------
+// Which commit this image was built from. Comes in as a build argument
+// (Dockerfile ARG BUILD_COMMIT -> POE_BUILD_COMMIT), and is EMPTY whenever
+// nobody passed one — a plain `docker compose build` does not know about git.
+// It is then reported as unknown rather than filled with a plausible-looking
+// value: "which version is running" is the first question of every update, and
+// a wrong answer to it is worse than no answer.
+const BUILD_COMMIT = (process.env.POE_BUILD_COMMIT || '').trim()
+// Where the container and the host script meet: the /config volume. Not a file
+// path but the directory, because the three files of the protocol (request,
+// heartbeat, result) have to sit together and the host script names the same
+// directory in its own constant.
+const UPDATE_DIR = process.env.POE_UPDATE_DIR || UPDATE_DIR_DEFAULT
+const UPDATE_HEARTBEAT_MAX_AGE_MS = envNum('POE_UPDATE_HEARTBEAT_MAX_AGE_MS')
+// NOTHING HAPPENS AT BOOT HERE. Creating this object touches no file: an
+// installation without the host script must not gain a single new file in its
+// /config volume, and must not behave differently in any other way either.
+const hostUpdate = createHostUpdate({
+  dir: UPDATE_DIR,
+  heartbeatMaxAgeMs: UPDATE_HEARTBEAT_MAX_AGE_MS,
+  buildCommit: BUILD_COMMIT
+})
+
 // ---- Load engine (import the bundle dynamically, like the CLI) ------------
-const engine = await import(BUNDLE)
+// One instance per configured client language, all pointed at the SAME
+// snapshot dir (data/en and data/de live side by side in it) and loaded
+// STRICTLY SERIALLY — __aptEnv.BASE_URL is process-wide, so a parallel load
+// would be a race. Only the primary (English) instance is the full engine;
+// every other one is handed out as a parse-only wrapper.
+//
+// The set is wider than "the languages somebody is configured for": every
+// language whose data set is IN THE ACTIVE SNAPSHOT gets an instance. That is
+// what makes the runtime language switch (POST /user-lang) mean anything — a
+// user can only be moved to a language that has a live parser, and loading one
+// on demand is not possible (the loads must be serial, `__aptEnv.BASE_URL` is
+// process-wide). A data set is only ever in the snapshot because this
+// installation was configured for that language at some point, so this costs a
+// second instance exactly where somebody once wanted one.
+const BOOT_LANGS = [...new Set([
+  ...CONFIGURED_LANGS,
+  ...dataRefresher.activeLanguages().filter(l => SUPPORTED_LANGS.includes(l))
+])]
+// WHAT CAN BE CHOSEN HAS TO BE KEPT UP TO DATE. The refresher was created with
+// the configured languages alone, which is a smaller set than this one: a
+// language that is in the snapshot but that nobody is configured for any more
+// still gets a parser below, is still offered by GET /user-lang — and its data
+// set would have gone stale silently, the exact failure the comment at
+// CONFIGURED_LANGS warns about. So the refresher is handed the set the parsers
+// are built from, before it is ever started. What /user-lang offers is exactly
+// the subset of it that came up, so nothing selectable is left unrefreshed;
+// covering the few that did not come up as well is the cheaper mistake, and it
+// is what lets them come up after the next restart.
+//
+// Once, here, and never again at runtime — because the set cannot change at
+// runtime either: /user-lang only hands out languages that have a LIVE PARSER,
+// the parsers must be loaded serially at boot (`__aptEnv.BASE_URL` is
+// process-wide), and the one setting that could widen the set, POE_LANG_DEFAULT,
+// is a `restart` key. Every way to make a new language selectable goes through
+// a boot, and every boot passes this line.
+dataRefresher.setLanguages(BOOT_LANGS)
+const engines = await createEngineInstances({
+  bundleUrl: BUNDLE,
+  languages: BOOT_LANGS,
+  log: console
+})
+const engine = engines.primary()
 // warm up the data DB once — from the refresher's active snapshot (undefined
 // -> engine default, the baked-in renderer/public)
-await engine.ready({ lang: 'en', publicDataDir: dataRefresher.publicDataUrl() })
+await engines.ready({ publicDataDir: dataRefresher.publicDataUrl() })
+{
+  const missing = engines.languages().filter(l => !engines.liveLanguages().includes(l))
+  console.log(`[engine] parsers=[${engines.liveLanguages().join(', ')}]  snapshot languages=[${dataRefresher.activeLanguages().join(', ')}]` +
+    (missing.length ? `  MISSING=[${missing.join(', ')}] — those users get an error instead of an English parse` : ''))
+}
+
+// Second pass over the stored per-user languages, now that it is known which
+// parsers are actually LIVE. A stored entry whose language did not come up
+// (its data set vanished from the snapshot, or its instance failed to load)
+// would otherwise mean 503 on every item that user pastes. Dropped instead —
+// per entry, with a warning — and the user falls back to the env/default
+// value, exactly as if he had never chosen anything.
+for (const u of userLangStore.prune({ isLive: l => engines.liveLanguages().includes(l) })) {
+  LANG_BY_USER.set(u, ENV_LANG_BY_USER.get(u) || DEFAULT_LANG)
+}
 
 // Consumer-tagged entry points into the engine's trade calls. These are the
 // ONLY places this app reaches the Trade API from, so tagging them here (rather
@@ -154,6 +417,23 @@ await engine.ready({ lang: 'en', publicDataDir: dataRefresher.publicDataUrl() })
 const searchPresetAs = (...args) => withConsumer(CONSUMER.PRICE_CHECK, () => engine.searchPreset(...args))
 const bulkPriceItemAs = (...args) => withConsumer(CONSUMER.PRICE_CHECK, () => engine.bulkPriceItem(...args))
 const searchRawAs = (consumer) => (...args) => withConsumer(consumer, () => engine.searchRaw(...args))
+
+// The item price check was the one outbound path with no off switch. Every
+// background schedule can be disabled (Faustus, corpses, data refresh,
+// reference warm-up), but POSTing an item always sent a Trade-API search, so
+// "boot the real server without touching the network" was not expressible —
+// which is why `server.test.mjs` and `server-langs.test.mjs` priced live
+// against www.pathofexile.com on every run, and why they then never exited:
+// APT's RateLimiter books each spent request as a timer that runs for the
+// whole rate-limit window it learned from GGG's headers (observed: 302 s and
+// 21602 s), and the engine's response cache adds an expiry timer of the same
+// order. Those are ref'd, so closing the HTTP server does not end the process.
+// Not in the config-overrides allow-list on purpose: turning the tool's own
+// price check off is a deployment decision, not a click in the settings page.
+const PRICE_CHECK_DISABLED = process.env.POE_PRICE_CHECK_DISABLED === '1'
+if (PRICE_CHECK_DISABLED) {
+  console.log('[price-check] disabled via POE_PRICE_CHECK_DISABLED=1 — item cards are created but never priced')
+}
 
 // ---- Net-Worth-Tracker: store + items index + credentials -------------------
 // Store path in the /config volume; mkdir guard
@@ -169,9 +449,16 @@ const NETWORTH_AUTOSYNC = process.env.POE_NETWORTH_AUTOSYNC !== '0'
 // stored POESESSID never leaves this file towards a client — see the
 // /networth/credentials endpoints below.
 const NETWORTH_CONFIG_PATH = process.env.POE_NETWORTH_CONFIG || NETWORTH_CONFIG_DEFAULT
-const NETWORTH_SYNC_INTERVAL_MS = Number(process.env.POE_NETWORTH_SYNC_INTERVAL_MS) || 30 * 1000
-const NETWORTH_LIST_TTL_MS = Number(process.env.POE_NETWORTH_LIST_TTL_MS) || 15 * 60 * 1000
-const NETWORTH_COOLDOWN_MS = Number(process.env.POE_NETWORTH_COOLDOWN_MS) || 10 * 60 * 1000
+// None of the three accepts 0: a tick without pause, a tab list re-fetched
+// every tick and a 429 retried immediately are all requests against GGG that
+// nobody asked for. POE_NETWORTH_AUTOSYNC=0 is the switch that means "stop".
+const NETWORTH_SYNC_INTERVAL_MS = envNum('POE_NETWORTH_SYNC_INTERVAL_MS')
+const NETWORTH_LIST_TTL_MS = envNum('POE_NETWORTH_LIST_TTL_MS')
+const NETWORTH_COOLDOWN_MS = envNum('POE_NETWORTH_COOLDOWN_MS')
+// This one DOES accept 0 (report every step that outlives a tick), and its
+// default lives next to the module that uses it — see slowStepMsFromEnv in
+// refresher.mjs, which reads it through the same env-number.mjs reader.
+const NETWORTH_SLOW_STEP_MS = slowStepMsFromEnv()
 const networthStore = createNetworthStore(NETWORTH_STORE)
 let networthStoreWritable = true
 try {
@@ -190,7 +477,20 @@ await networthStore.load()
 // networth/history.mjs for the line shape and the privacy note.
 const NETWORTH_HISTORY = process.env.POE_NETWORTH_HISTORY ||
   join(dirname(NETWORTH_STORE), 'networth-history.ndjson')
-const networthHistory = createNetworthHistory(NETWORTH_HISTORY)
+// The implausible-price brake in front of that series (networth/price-guard.mjs).
+// Every bar of it is settable, because every one of them is a judgement about a
+// market and the market is not ours: the factor and the share come from the
+// Scavenger incident, the hold window is how long a suspicion may stand, and
+// the arrival floor is what keeps a fresh account out of the brake's reach.
+// The module constants are the documented defaults; see docs/pricing-logic.md.
+// Parsed by the module itself (guardOptionsFromEnv) and NOT with the
+// `Number(env) || DEFAULT` idiom used elsewhere in this block, because that
+// idiom cannot express zero — and zero is how POE_NETWORTH_GUARD_ARRIVAL_MIN_DIVINE
+// switches the arrival bar off. Setting it to 0 used to hand back 20, silently.
+const NETWORTH_GUARD = guardOptionsFromEnv(process.env)
+const networthHistory = createNetworthHistory(NETWORTH_HISTORY, {
+  priceGuard: createPriceGuard(NETWORTH_GUARD)
+})
 networthHistory.writable = networthStoreWritable
 await networthHistory.load() // tolerates missing/empty/corrupt -> empty series
 
@@ -219,13 +519,19 @@ await referenceHistory.load() // tolerates missing/empty/corrupt -> empty series
 // Task 4 concern. mkdir guard identical to the networth store above.
 const FAUSTUS_STORE = process.env.POE_FAUSTUS_STORE || '/config/faustus-store.json'
 const FAUSTUS_DISABLED = process.env.POE_FAUSTUS_DISABLED === '1'
-const FAUSTUS_UNION_HOURS = Number(process.env.POE_FAUSTUS_UNION_HOURS) || undefined // undefined -> faustus.mjs default (8)
-const FAUSTUS_REFRESH_MS = Number(process.env.POE_FAUSTUS_REFRESH_MS) || 60 * 60 * 1000
+const FAUSTUS_UNION_HOURS = envNum('POE_FAUSTUS_UNION_HOURS') // undefined -> faustus.mjs default (8)
+const FAUSTUS_REFRESH_MS = envNum('POE_FAUSTUS_REFRESH_MS')
 // Max staleness before the valuator treats the Faustus map as absent (F1). The
 // store shares one updatedAt across the whole map; generous default (48h) covers
 // the multi-hour union + hourly refresh, but bounds silently-frozen prices if
 // the CDN feed breaks -> valuation falls through to poe.ninja.
-const FAUSTUS_TTL_MS = Number(process.env.POE_FAUSTUS_TTL_MS) || 48 * 60 * 60 * 1000
+const FAUSTUS_TTL_MS = envNum('POE_FAUSTUS_TTL_MS')
+// How old the OBSERVATION behind ONE price may be — a different question from
+// the map-wide TTL above, and the one the "206.6c against 147c in-game" report
+// turned out to be about. Lives with its own module for the same reason
+// guardOptionsFromEnv and slowStepMsFromEnv do (same reader, same refusal
+// logging, default next to the prose that argues it): networth/faustus-age.mjs.
+const FAUSTUS_MAX_AGE_MS = faustusMaxAgeMsOf(faustusMaxAgeHoursFromEnv(process.env), FAUSTUS_REFRESH_MS)
 const faustusStore = createFaustusStore(FAUSTUS_STORE)
 let faustusStoreWritable = true
 try {
@@ -276,9 +582,12 @@ if (!FAUSTUS_DISABLED && faustusStoreWritable) {
 // /config stores. Single-league (LEAGUE), like Faustus.
 const CORPSE_STORE = process.env.POE_CORPSE_STORE || '/config/corpse-store.json'
 const CORPSE_DISABLED = process.env.POE_CORPSE_DISABLED === '1'
-const CORPSE_TTL_MS = Number(process.env.POE_CORPSE_TTL_MS) || 6 * 60 * 60 * 1000
-const CORPSE_BUDGET_PER_HOUR = Number(process.env.POE_CORPSE_BUDGET_PER_HOUR) || 25
-const CORPSE_INTERVAL_MS = Number(process.env.POE_CORPSE_INTERVAL_MS) || 2 * 60 * 1000
+const CORPSE_TTL_MS = envNum('POE_CORPSE_TTL_MS')
+// 0 is a setting and it means what it says: the pricer runs and asks the Trade
+// API for NOTHING. `Number(env) || 25` used to answer that with 25 queries an
+// hour, silently — the defect numeric-settings.mjs exists for.
+const CORPSE_BUDGET_PER_HOUR = envNum('POE_CORPSE_BUDGET_PER_HOUR')
+const CORPSE_INTERVAL_MS = envNum('POE_CORPSE_INTERVAL_MS')
 const corpseStore = createCorpseStore(CORPSE_STORE, { ttlMs: CORPSE_TTL_MS })
 let corpseStoreWritable = true
 try {
@@ -293,12 +602,27 @@ await corpseStore.load() // tolerates missing/corrupt -> empty store (corpses ho
 // Corpse base names actually held across ALL users' latest snapshots (union of
 // stored tabs). Priced corpses live in tab.items (kind 'corpse'), unpriced ones
 // in tab.unpriced — collect from both, dedupe. The pricer skips 'Imperfect '.
+//
+// This store is SHARED between users while the searches that fill it are
+// ENGLISH (corpse-pricer -> trade search). A name that is not English therefore
+// does not merely stay unpriced for the one user who owns the corpse: it sits
+// in everybody's store and burns a slot of the hourly trade budget on a query
+// that cannot ever match. So nothing goes in that could not be brought to its
+// English name first — englishCorpseName decides that, and returns null when it
+// cannot (unpriced beats wrongly priced, and a search that can never hit should
+// not be made at all).
+//
+// Whether GGG's stash API answers localized at all is still an open question
+// (design doc, gate G0-3); this is the precaution for the negative outcome, and
+// it is built so the positive one costs nothing — see englishCorpseName.
 function collectCorpseNames () {
   const names = new Set()
   for (const user of USERS) {
+    const lang = LANG_BY_USER.get(user) || PRIMARY_LANG
+    const add = raw => { const en = englishCorpseName(raw, lang); if (en) names.add(en) }
     for (const tab of networthStore.tabList(user)) {
-      for (const row of (tab.items || [])) if (row?.kind === 'corpse' && row.name) names.add(row.name)
-      for (const u of (tab.unpriced || [])) if (u?.kind === 'corpse' && u.name) names.add(u.name)
+      for (const row of (tab.items || [])) if (row?.kind === 'corpse' && row.name) add(row.name)
+      for (const u of (tab.unpriced || [])) if (u?.kind === 'corpse' && u.name) add(u.name)
     }
   }
   return [...names]
@@ -323,6 +647,13 @@ if (!CORPSE_DISABLED && corpseStoreWritable) {
   corpsePricer.start()
   console.log('[corpse] background pricer on (league=%s ttl=%dms budget=%d/h interval=%dms, prices cached=%d)',
     LEAGUE, CORPSE_TTL_MS, CORPSE_BUDGET_PER_HOUR, CORPSE_INTERVAL_MS, Object.keys(corpseStore.data.entries).length)
+  // A budget of zero is a legal setting and means exactly nothing goes out. Say
+  // it in its own line: "budget=0/h" in the line above is easy to read past,
+  // and this is the state somebody deliberately asked for after a rate-limit
+  // scare. Already-cached prices are still served from the store.
+  if (CORPSE_BUDGET_PER_HOUR === 0) {
+    console.log('[corpse] POE_CORPSE_BUDGET_PER_HOUR=0 — no Trade-API query will be made; cached prices are still served')
+  }
 } else if (CORPSE_DISABLED) {
   console.log('[corpse] disabled via POE_CORPSE_DISABLED=1')
 }
@@ -331,11 +662,174 @@ if (!CORPSE_DISABLED && corpseStoreWritable) {
 // adopts a fresh APT snapshot (normalizeItem reads it per call).
 let itemsIndex = await loadItemsIndex(dataRefresher.itemsNdjsonPath())
 
+// ---------------------------------------------------------------------------
+// Localized stash names -> English reference names
+// ---------------------------------------------------------------------------
+// Second derivative of the snapshot's items.ndjson, next to itemsIndex and
+// rebuilt with it (see onAptData). data/<lang>/items.ndjson carries the
+// localized `name` beside the same English `refName`, which is exactly the pair
+// needed to undo a localized stash answer.
+//
+// Ambiguity is REJECTED, not resolved: if two entries share a localized name
+// but not a refName, the entry is poisoned to null and the name counts as
+// unresolvable. Guessing which of the two an item is would be the failure mode
+// this project pays the most for — a confident wrong price.
+async function loadRefNamesByLocalName (lang) {
+  const map = new Map() // localized name -> refName, or null when ambiguous
+  let raw
+  try {
+    raw = await readFile(dataRefresher.itemsNdjsonPath(lang), 'utf8')
+  } catch {
+    // No generated set for this language yet. Not an error: the German data is
+    // produced locally and only exists after a generator run. Every name then
+    // has to prove itself English (englishCorpseName) or is left out.
+    return map
+  }
+  for (const line of raw.split('\n')) {
+    if (!line.trim()) continue
+    let e
+    try { e = JSON.parse(line) } catch { continue }
+    if (typeof e.name !== 'string' || !e.name) continue
+    if (typeof e.refName !== 'string' || !e.refName) continue
+    if (map.has(e.name)) { if (map.get(e.name) !== e.refName) map.set(e.name, null); continue }
+    map.set(e.name, e.refName)
+  }
+  return map
+}
+
+// lang -> the map above, for every configured NON-primary language. English is
+// absent on purpose: it needs no bridge, and its absence is what makes the
+// identity path below impossible to get wrong.
+const refNamesByLang = new Map()
+async function reloadRefNamesByLang () {
+  refNamesByLang.clear()
+  for (const lang of new Set(LANG_BY_USER.values())) {
+    if (lang === PRIMARY_LANG) continue
+    refNamesByLang.set(lang, await loadRefNamesByLocalName(lang))
+  }
+}
+await reloadRefNamesByLang()
+
+// ---------------------------------------------------------------------------
+// English reference names -> localized names, FOR DISPLAY ONLY
+// ---------------------------------------------------------------------------
+// The same pair table as above, read the other way round — and for the opposite
+// purpose. loadRefNamesByLocalName UNDOES a localized stash answer so a name can
+// be MATCHED: the value join, the trade query and every price source are keyed
+// on the English reference name (see refNameOf/priceKeyOf and
+// price-source-lang.test.mjs). This table is only ever used to SHOW a name, and
+// nothing derived from it may travel back into a lookup — that is exactly the
+// mistake that produced the pricing bugs those two guard against.
+//
+// It is therefore never consulted here: it is serialized once per language and
+// handed to the browser (GET /item-name-map), which applies it in the renderer
+// and nowhere else. Every row still travels under its English name.
+//
+// Ambiguity is rejected in this direction too: two entries carrying the same
+// refName but different localized names leave that refName out, so the English
+// name stays on screen. An English name is readable; a coin flip is a lie.
+// Entries whose two names are equal are left out as well — they would only pad
+// the payload without changing a single character on the page.
+async function loadLocalNamesByRefName (lang) {
+  const map = new Map() // refName -> localized name, or null when ambiguous
+  let raw
+  try {
+    raw = await readFile(dataRefresher.itemsNdjsonPath(lang), 'utf8')
+  } catch {
+    // No generated set for this language yet (the German data is produced
+    // locally). Same consequence as everywhere else: English names on screen,
+    // which is the state before this feature existed.
+    return map
+  }
+  for (const line of raw.split('\n')) {
+    if (!line.trim()) continue
+    let e
+    try { e = JSON.parse(line) } catch { continue }
+    if (typeof e.name !== 'string' || !e.name) continue
+    if (typeof e.refName !== 'string' || !e.refName) continue
+    if (e.name === e.refName) continue
+    if (map.has(e.refName)) { if (map.get(e.refName) !== e.name) map.set(e.refName, null); continue }
+    map.set(e.refName, e.name)
+  }
+  return map
+}
+
+// lang -> the map above, for every configured NON-primary language, plus the
+// serialized answer the endpoint hands out. English is absent for the same
+// reason as in refNamesByLang: it needs no bridge, and its absence is what
+// makes the identity path impossible to get wrong.
+const localNamesByLang = new Map()
+const localNamesJson = new Map()
+async function reloadLocalNamesByLang () {
+  localNamesByLang.clear()
+  localNamesJson.clear()
+  for (const lang of new Set(LANG_BY_USER.values())) {
+    if (lang === PRIMARY_LANG) continue
+    localNamesByLang.set(lang, await loadLocalNamesByRefName(lang))
+  }
+}
+await reloadLocalNamesByLang()
+
+// The body of GET /item-name-map for one language, built once and kept until
+// the next snapshot swap drops it (reloadLocalNamesByLang).
+function itemNameMapJson (lang) {
+  const cached = localNamesJson.get(lang)
+  if (cached) return cached
+  const names = {}
+  for (const [ref, local] of (localNamesByLang.get(lang) || new Map())) {
+    if (local) names[ref] = local // null == ambiguous -> stays English
+  }
+  const json = JSON.stringify({ lang, names })
+  localNamesJson.set(lang, json)
+  return json
+}
+
+// Third derivative of the active snapshot, next to itemsIndex and
+// refNamesByLang — but LAZY, unlike those two: the pair table is only read once
+// a non-primary language actually has an unresolved mod line, which on an
+// English-only installation never happens (mod-text-pairs.mjs argues the size).
+// Dropped on every snapshot swap in onAptData, so the table and the data set
+// the engine parses with are always from the same generator run.
+const modTextBridge = createModTextBridge({
+  resolvePath: lang => dataRefresher.textPairsPath(lang)
+})
+
+// Names already reported as undroppable, so a two-minute pricer tick cannot
+// turn one unmappable corpse into an endless log (same idea as ninja.mjs's
+// warnNetOnce).
+const corpseNameWarned = new Set()
+
+// The English name for a corpse out of `lang`'s stash answer, or null when it
+// cannot be established.
+//
+// For a user on the primary language this is the IDENTITY — not a lookup that
+// happens to succeed, but a branch taken before any lookup exists. That is the
+// no-op guarantee: with everybody on English, not one name can be dropped, no
+// matter what the data set says.
+//
+// For anyone else, English comes first anyway: should the stash API turn out to
+// answer English regardless of client language (G0-3 positive), the name is
+// already a reference name and passes through untouched. Only what is neither a
+// known reference name nor resolvable through the localized set is dropped.
+function englishCorpseName (name, lang) {
+  if (lang === PRIMARY_LANG) return name
+  if (itemsIndex.byName.has(name)) return name
+  const ref = refNamesByLang.get(lang)?.get(name) // null == ambiguous, undefined == unknown
+  if (ref) return ref
+  if (!corpseNameWarned.has(name)) {
+    corpseNameWarned.add(name)
+    console.warn('[corpse] "%s" (%s) has no English reference name — not stored, not searched', name, lang)
+  }
+  return null
+}
+
 // Snapshot aggregated from whatever the store currently holds for a user
 // (union of all persisted tabs), or null when the store has nothing yet. Uses
 // the meta frozen at scan time (league + C:D) so a replay matches the scan.
-function networthSnapshot (user) {
-  const tabs = networthStore.tabList(user)
+// `tabs` is a parameter only so a caller that also needs the stored tabs
+// themselves (recordNetworthHistory does, for the uncapped unpriced names) can
+// read the list ONCE and be certain both halves describe the same moment.
+function networthSnapshot (user, tabs = networthStore.tabList(user)) {
   if (!tabs.length) return null
   const meta = networthStore.getMeta(user) || {}
   const league = meta.league || users.get(user)?.league || LEAGUE
@@ -348,14 +842,92 @@ function networthSnapshot (user) {
 // The C:D ratio of THIS moment travels with the point so an old value never
 // gets re-derived with today's ratio. Fire-and-forget: a failing history write
 // must never disturb the refresher.
-function recordNetworthHistory (user) {
-  const snap = networthSnapshot(user)
+// Users the recorder is currently refusing points for, so the two log lines
+// below fire on the TRANSITION instead of once per tab. A gap in the series
+// that says nothing about itself is the same dead end the price guard's log
+// line exists to avoid.
+const historyPausedFor = new Set()
+// Users the recorder has already said it is recording over an incomplete
+// account for, so the line fires on the transition rather than once a tab.
+const historyUnreadWarned = new Set()
+
+// Which stash tabs the recorder last saw a user's snapshot summed over. The
+// rule lives in networth/history.mjs next to the `tabsChanged` it feeds, so the
+// recorder and its tests cannot drift apart on it.
+const networthTabWatch = createTabSetWatch()
+
+// `coverage` is what the refresher knows and this level does not: whether the
+// store can answer for EVERY live stash tab yet. While it cannot, the snapshot
+// is a sum over a subset of the account and must not become a point — see the
+// note on history.append().
+function recordNetworthHistory (user, coverage = null) {
+  const storedTabs = networthStore.tabList(user)
+  const snap = networthSnapshot(user, storedTabs)
   if (!snap) return
+  if (coverage && coverage.complete === false) {
+    if (!historyPausedFor.has(user)) {
+      historyPausedFor.add(user)
+      console.log('[networth-history] no points for %s until the sync covers the whole account (%d of %d tabs so far)',
+        user, coverage.tabsCovered, coverage.tabsTotal)
+    }
+  } else if (historyPausedFor.delete(user)) {
+    console.log('[networth-history] %s covered again (%d tabs) — recording resumed', user, coverage?.tabsTotal ?? 0)
+  }
+  // `tabsRead` is the part of "covered" that is an actual reading. Covered and
+  // not read means the round-robin has been past a tab and got nothing storable
+  // out of it, which is allowed to continue for ever (its absence is a constant
+  // in every point, not a dip in one) — but it must not do so silently, because
+  // every point recorded meanwhile is a sum over less than the account.
+  if (coverage && coverage.complete && Number.isFinite(coverage.tabsRead) &&
+      coverage.tabsRead < coverage.tabsTotal && !historyUnreadWarned.has(user)) {
+    historyUnreadWarned.add(user)
+    console.warn('[networth-history] recording for %s over %d of %d tabs — %d have been tried and never yielded a reading, ' +
+      'so every point is a sum over the rest of the account',
+      user, coverage.tabsRead, coverage.tabsTotal, coverage.tabsTotal - coverage.tabsRead)
+  } else if (coverage && Number.isFinite(coverage.tabsRead) &&
+      coverage.tabsRead >= coverage.tabsTotal && historyUnreadWarned.delete(user)) {
+    console.log('[networth-history] every tab of %s reads again (%d)', user, coverage.tabsTotal)
+  }
+  // A tab set that differs from the one the last point was summed over. Not a
+  // stock movement, and indistinguishable from one in the delta — see the note
+  // on history.append(). One point is refused, the breakdown is dropped, and
+  // the next point starts the diff over on the new set.
+  const tabSet = networthTabWatch.look(user, snap)
+  if (tabSet.changed) {
+    console.warn('[networth-history] the stash tabs %s is summed over changed (%d now, %d before) — ' +
+      'one point is skipped and the item diff starts over, because a tab appearing or disappearing ' +
+      'is not stock moving (docs/bugs.md B2)',
+      user, tabSet.tabs, tabSet.before)
+  }
   // items travel along so the history can diff them against the previous point
-  // (quantity vs price movers behind a jump). Only name/qty/chaos are read from
+  // (quantity vs price movers behind a jump) and so the price guard can name
+  // the source of a number it rejects. Only name/qty/chaos/source are read from
   // them; nothing account-identifying goes near the file.
+  //
+  // unpriced travels for ONE reason: it is the proof that a name which fell out
+  // of `items` is still in the stash. Without it the diff reads a lost price as
+  // an item leaving and a regained one as an item arriving, and the events list
+  // — which promises stock movements and nothing else — filled up with mirror
+  // pairs on an untouched stash (docs/bugs.md B2). It adds no value to any
+  // total.
+  //
+  // AND IT IS NOT `snap.unpriced`. That list is capped at 100 names for the
+  // page's sake, and the names it drops are the rarest ones — the same thinly
+  // traded items that drift in and out of being priced, i.e. precisely the
+  // population this proof exists for. A name ranked out of the display list used
+  // to be invisible here and fell straight back into the old reading. So the
+  // uncapped account-wide fold of the stored tabs is what travels; it stays
+  // inside the server, so the snapshot the browser gets keeps its cap and its
+  // size. Older stored tabs still carry a capped list of their own and cannot be
+  // helped until the refresher writes them again — completeness returns tab by
+  // tab, and nothing gets worse in the meantime.
   networthHistory.append(user, {
-    totalChaos: snap.totalChaos, cdRatio: snap.cdRatio, items: snap.items || []
+    totalChaos: snap.totalChaos,
+    cdRatio: snap.cdRatio,
+    items: snap.items || [],
+    unpriced: unpricedStock(storedTabs),
+    tabsChanged: tabSet.changed,
+    syncComplete: coverage ? coverage.complete : undefined
   })
     .catch(e => console.warn(`[networth-history] append failed: ${e?.message || e}`))
 }
@@ -382,9 +954,25 @@ async function networthSyncStatus (user) {
 }
 
 // WS message for the M2 status line (see PROTOCOL.md `networth-sync-status`).
+//
+// `lastTab` and `current` are the answer to B5: `state: "ok"` alone described
+// both a refresher walking the stash and one whose single step had been stuck
+// for ten minutes. Neither field carries a cookie or an account name — a
+// timestamp, a stash-tab name of THIS user, and a phase. Both are optional and
+// only present when the refresher has something to report.
 function syncStatusMsg (status) {
   const msg = { type: 'networth-sync-status', state: status.state }
   if (status.until) msg.until = status.until
+  // Only meaningful next to a cooldown: a stash 429 pauses EVERY user (the
+  // refresher cannot tell whether GGG counted it per session or per address),
+  // so the status line has to say whether this room is the cause or a bystander.
+  if (status.mine != null) msg.mine = status.mine
+  // ...and the other reason a cooldown can be on: the trade-API ban gate holds
+  // the stash path too (B14). Same state, one field of difference, because the
+  // remedy is not the same one — this one is waited out, not fixed here.
+  if (status.tradeBan) msg.tradeBan = true
+  if (status.lastTab) msg.lastTab = status.lastTab
+  if (status.current) msg.current = status.current
   return msg
 }
 
@@ -398,6 +986,14 @@ function broadcastSyncStatus (user) {
 // facts of the data auto-update — when each source was last checked
 // successfully, plus the threshold. The client ages them itself, so a schedule
 // that stopped pushing anything still turns stale in the UI on its own.
+//
+// `reason`/`failKind` ride along since 2026-08-18 (docs/bugs.md B24): the note
+// used to carry the DURATION and the CONSEQUENCE and nothing about the cause,
+// so "the endpoint is briefly away" and "this build cannot read the format any
+// more" produced the same sentence for days. The reason is foreign text —
+// filtered and capped by the refresher before it is persisted (check-failure.mjs)
+// — and `failKind` is the class the failing code named, never one derived from
+// the wording here; the page maps a class it does not know to no advice at all.
 function dataStatusMsg () {
   const st = dataRefresher.status()
   return {
@@ -410,7 +1006,18 @@ function dataStatusMsg () {
     sources: st.sources.map(s => ({
       source: s.source,
       lastSuccessAt: s.lastSuccessAt,
-      lastOutcome: s.lastOutcome
+      lastOutcome: s.lastOutcome,
+      reason: s.lastReason ?? null,
+      // The last gate before the wire, and what isFailKind() is for: the page
+      // maps a class to a sentence, so a value it cannot map is a missing key
+      // on screen or — worse — the wrong remedy. Anything this build does not
+      // know leaves as null, which the page reads as "no advice".
+      failKind: isFailKind(s.lastFailKind) ? s.lastFailKind : null,
+      // Something a check that SUCCEEDED has to say. Beside the reason rather
+      // than inside it, because it is not one: the tick did its job. The page
+      // shows it without waiting for anything to go stale — a set frozen on a
+      // pinned patch never goes stale, which is the whole problem with it.
+      warning: s.lastWarning ?? null
     }))
   }
 }
@@ -439,6 +1046,17 @@ async function serveStatic (urlPath, res) {
   }
 }
 
+// The language THE GAME CLIENT runs in for this user. Reads the same
+// configuration as the display language (POE_USER_LANGS, overridden per user by
+// /user-lang — which the settings page calls "the user's own client language"),
+// and is deliberately its OWN function anyway: it answers a different question.
+// The display lookups ask "how should this be spelled for the person reading
+// the page"; this one asks "what will the game match". They agree today because
+// one setting feeds both, and they must stay separately named so that the day
+// they stop agreeing, only one of them moves. A wrong answer here highlights the
+// wrong stash slots; it can never reach a price.
+const gameClientLang = user => LANG_BY_USER.get(user) || PRIMARY_LANG
+
 // ---------------------------------------------------------------------------
 // Item name universe (GET /item-names) — ground truth for the Stash-Highlight
 // ---------------------------------------------------------------------------
@@ -451,31 +1069,84 @@ async function serveStatic (urlPath, res) {
 // list. Only the complete name list settles it.
 //
 // Delivered as one flat name array (~4700 entries, ~90 KB, ~29 KB gzipped),
-// parsed once and cached for the process lifetime. Names only — the frontend
-// needs nothing else from these records, and the icons/namespaces would blow the
-// payload up tenfold. No category filter either: any item class can share a
-// stash tab, and the list is small enough that guessing categories would only
-// add a way to be wrong.
-// `let`, both of them: retargeted/reset when the data refresher adopts a new
-// APT snapshot, so the stash-search name list follows the active data.
-let itemNamesPath = dataRefresher.itemsNdjsonPath()
-let itemNamesJson = null
+// parsed once per language and cached until the next snapshot swap. Names only
+// — the frontend needs nothing else from these records, and the icons/
+// namespaces would blow the payload up tenfold. No category filter either: any
+// item class can share a stash tab, and the list is small enough that guessing
+// categories would only add a way to be wrong.
+//
+// ── The language of this list is the GAME CLIENT's, not the page's (B10) ────
+// Every other localized thing on the net-worth page is DISPLAY: it answers "how
+// should this be spelled for the person reading". The highlight answers a
+// different question — "what will the game's stash search match" — and the game
+// matches the names IT shows. A German client searching for "Chaosscherbe"
+// finds nothing when handed an English fragment. Same configured value today
+// (see gameClientLang), a different question, and a different failure mode: a
+// wrong entry here highlights the wrong stash slots, it can never misprice
+// anything.
+//
+// ── Why the whole universe has to move languages together ──────────────────
+// The generator shortens a wanted name against the universe. Localizing only
+// the WANTED names while the universe stayed English would shorten against the
+// wrong universe — fragments that look unambiguous among English names but
+// collide among German ones — which is the "14 slots instead of 9" failure the
+// universe was introduced to fix, reintroduced through the back door. So the
+// endpoint ships the universe in the client's language, and the ref -> client
+// name table needed to move the wanted names into that same language, in ONE
+// answer. They cannot get out of step because they are built from one file.
+//
+// Payload shape avoids saying every localized name twice:
+//   { lang, names: [...], byRef: { englishRefName: clientName } }
+// `names` holds only the entries that need no translation; the universe the
+// page uses is names ∪ values(byRef). For the primary language `byRef` is empty
+// and `names` is exactly the list this endpoint has always returned.
+const itemNamesJsonByLang = new Map() // lang -> serialized body
 
-async function loadItemNamesJson () {
-  if (itemNamesJson) return itemNamesJson
-  const raw = await readFile(itemNamesPath, 'utf8')
+async function loadItemNamesJson (lang = PRIMARY_LANG) {
+  const cached = itemNamesJsonByLang.get(lang)
+  if (cached) return cached
+  const raw = await readFile(dataRefresher.itemsNdjsonPath(lang), 'utf8')
   const set = new Set()
+  const pairs = new Map() // refName -> client name, or null once ambiguous
   for (const line of raw.split('\n')) {
     if (!line.trim()) continue
     let e
     try { e = JSON.parse(line) } catch { continue }
-    // name = display name, refName = the English reference name; for uniques
-    // and a few bases they differ, and BOTH can show up in a stash search.
-    if (typeof e.name === 'string' && e.name) set.add(e.name)
-    if (typeof e.refName === 'string' && e.refName) set.add(e.refName)
+    const name = typeof e.name === 'string' && e.name ? e.name : null
+    const ref = typeof e.refName === 'string' && e.refName ? e.refName : null
+    if (lang === PRIMARY_LANG) {
+      // name = display name, refName = the English reference name; for uniques
+      // and a few bases they differ, and BOTH can show up in a stash search.
+      if (name) set.add(name)
+      if (ref) set.add(ref)
+      continue
+    }
+    // Localized set: `name` is what the client PRINTS, and that is the only
+    // string its stash search can match — the English refName is invisible in
+    // that client and would only make every fragment longer for nothing. So
+    // every localized name goes into the universe here, translated or not.
+    if (!name) continue
+    set.add(name)
+    if (!ref || ref === name) continue
+    // Ambiguous (two lines claim one refName with different spellings) -> no
+    // translation for that ref, exactly like the display table: that one name
+    // keeps its English spelling in the regex. Both spellings stay in the
+    // universe above, because the client really does print both somewhere. A
+    // locally generated German set was measured for this: zero such refNames —
+    // a shape guard, not a live case.
+    if (pairs.has(ref)) { if (pairs.get(ref) !== name) pairs.set(ref, null); continue }
+    pairs.set(ref, name)
   }
-  itemNamesJson = JSON.stringify({ names: [...set].sort() })
-  return itemNamesJson
+  const byRef = {}
+  for (const [ref, name] of pairs) if (name) byRef[ref] = name
+  // Say every localized spelling ONCE: whatever `byRef` already carries as a
+  // value drops out of `names`, and the page unions the two back together.
+  // Halves the German payload; for the primary language byRef is empty and the
+  // list is byte-for-byte the one this endpoint always returned.
+  for (const name of Object.values(byRef)) set.delete(name)
+  const json = JSON.stringify({ lang, names: [...set].sort(), byRef })
+  itemNamesJsonByLang.set(lang, json)
+  return json
 }
 
 function readBody (req) {
@@ -521,20 +1192,21 @@ const REPOST_DEDUP_MS = 2000
 // Keep the NEWEST N; adding an (N+1)th card evicts the OLDEST alive one (and
 // tells that room via `item-removed`). N=50 is far above a realistic on-screen
 // working set, so a normal session never notices the cap.
-// Parse a positive-integer env cap with a floor of 1: a negative/0 override
-// would make the `size > cap` while-loops (eviction, reconnect-trim) below
-// permanently true and spin forever. `Number(x) || fallback` also catches
-// unset/NaN/0; Math.max(1, …) additionally clamps negatives up to 1.
-const positiveEnvInt = (raw, fallback) => Math.max(1, Number(raw) || fallback)
-const MAX_ITEMS_PER_ROOM = positiveEnvInt(process.env.POE_MAX_ITEMS_PER_ROOM, 50)
+// A cap of 0 would make the `size > cap` while-loops below (eviction,
+// reconnect-trim) delete every card as fast as it is created, so the table
+// refuses it with a floor of 1 — and says so, which `Math.max(1, …)` never did.
+const MAX_ITEMS_PER_ROOM = envNum('POE_MAX_ITEMS_PER_ROOM')
 // Cap on how many priceless cards a single WS reconnect re-enqueues. After a
 // poe.ninja/Trade outage a room can hold many cards without a valid price; a
 // reconnect used to re-queue ALL of them at once -> a queue flood the moment
 // the service came back. Re-queue only the NEWEST N; the rest still replay as
 // `queued` and the user can trigger a search on demand.
-const MAX_REQUEUE_ON_RECONNECT = positiveEnvInt(process.env.POE_MAX_REQUEUE_ON_RECONNECT, 10)
-const users = new Map() // user -> { clients:Set<ws>, items:Map, league:string, recentPosts:Map }
-for (const u of USERS) users.set(u, { clients: new Set(), items: new Map(), league: LEAGUE, recentPosts: new Map() })
+// 0 is honoured here and means "re-queue nothing": a re-queued card is an
+// `auto` Trade-API search, so this is the one of the seven late converts that
+// used to cost requests (docs/bugs.md B13).
+const MAX_REQUEUE_ON_RECONNECT = envNum('POE_MAX_REQUEUE_ON_RECONNECT')
+const users = new Map() // user -> { clients:Set<ws>, items:Map, league:string, lang:string, recentPosts:Map }
+for (const u of USERS) users.set(u, { clients: new Set(), items: new Map(), league: LEAGUE, lang: LANG_BY_USER.get(u), recentPosts: new Map() })
 
 const jobs = []            // waiting jobs (FIFO; priority ones get pulled forward); each carries `user`
 const bgJobs = []           // three-tier queue, lowest tier: background jobs
@@ -625,30 +1297,125 @@ const tradeStatIndex = createTradeStatIndex({
 
 // A corruption implicit (or any unresolved mod) is PERMANENT on the item — it
 // can't be rerolled away — so it goes in ACTIVE (disabled:false) with min = the
-// item's own roll, matching how every other mod defaults ("rolls >= mine"). No
-// bounds are known for an unvendored stat, so the card shows a checkbox without
-// a slider (modsOf only emits valueRange when bounds exist) — honest: we know
-// the stat, not its roll range.
-async function spliceResolvedUnknownMods (item, preset) {
+// item's own roll, matching how every other mod defaults ("rolls >= mine"). The
+// roll range comes from the line itself when the copy carried it (see
+// splitRollRanges); a line without one gets a checkbox and no slider (modsOf
+// only emits valueRange when bounds exist) — honest: we know the stat, not its
+// roll range.
+//
+// The catalogue is ENGLISH, so a localized mod line needs one more step before
+// it: the de->en text pair table (design doc, section 5). resolveUnknownMod
+// keeps that step out of the primary language entirely — for English this
+// function is the call that has always been here, not a lookup that happens to
+// come out the same.
+async function resolveUnknownMod (text, type, lang) {
+  if (lang === PRIMARY_LANG) return tradeStatIndex.resolve(text, type)
+  // Unknown OR ambiguous both arrive as null, and both end the same way: the
+  // line stays read-only on the card and is counted in the gap view. Falsely
+  // priced is worse than unpriced.
+  const english = await modTextBridge.toEnglish(text, lang)
+  if (!english) return null
+  // The pair table's English side is APT's matcher form, which carries no
+  // literal sign — resolveMatcherForm is the entry point that knows that.
+  return tradeStatIndex.resolveMatcherForm(english, type)
+}
+
+// Ctrl+Alt+C ("Advanced Mod Descriptions") — the copy form this tool asks its
+// users to bind — writes the ROLL together with the range it came out of:
+//
+//   +310(260-320) zu Rüstung        20(20-22)% erhöhten Schaden
+//   1(0-3) Füllung                  Fügt 12(10-15) bis 25(20-30) Schaden hinzu
+//
+// GGG's stat catalogue lists none of that, only "+# to Armour", and
+// normalizeStatText masks digits without touching the brackets — so the two
+// texts can never meet and the repair path is dead for the NORMAL copy form, in
+// every language (English hits it identically). The bracket has to go before
+// the lookup; the number in front of it must not.
+//
+// Same shape the vendored engine reads a roll in (_statPlaceholderGenerator,
+// renderer/src/parser/stat-translations.ts) — deliberately, so "what is a roll"
+// cannot drift between the parser and this. Sign optional, decimal point
+// optional, a bracket with one bound ("# uses remaining") as well as two, and a
+// negative lower bound (the leading `.` in the min group) all come from there.
+const ADVANCED_ROLL = /(?<!\d|\))([+-]?\d+(?:\.\d+)?)\((.[^)-]*)(?:-([^)]+))?\)/g
+const ROLL_NUMBER = /^[+-]?\d+(?:\.\d+)?$/
+
+/**
+ * A rolled mod line, split into what the lookup needs and what the card needs.
+ *
+ *   text    the line with every roll RANGE removed, rolls kept  ("+310 zu …")
+ *   masked  the same line with the rolls as '#'                 ("+# zu …")
+ *   rolls   [{ value, min, max }] per bracket, in reading order
+ *
+ * An empty `rolls` means the line carried no range at all (plain Ctrl+C) — then
+ * `masked` is exactly what it has always been and nothing downstream changes.
+ */
+function splitRollRanges (raw) {
+  // "Passives in Radius of Wicked Ward() can be Allocated" — GGG writes an
+  // EMPTY bracket where it has no advanced description; the engine drops it.
+  const src = String(raw ?? '').replace(/\(\)/g, '')
+  const rolls = []
+  let text = ''
+  let masked = ''
+  let last = 0
+  for (const m of src.matchAll(ADVANCED_ROLL)) {
+    const [whole, value, min, max = min] = m
+    // Not a numeric range -> not a roll bracket. Wording that happens to sit
+    // behind a number is left alone rather than mangled.
+    if (!ROLL_NUMBER.test(min) || !ROLL_NUMBER.test(max)) continue
+    const lead = src.slice(last, m.index)
+    text += lead + value
+    masked += lead + normalizeStatTextForCard(value) // digits only, sign stays
+    const v = Number(value)
+    // Bounds swapped (legacy translations) or a roll outside its own range
+    // (legacy roll) — both are real on old items, and neither may produce a
+    // slider whose handle sits outside its track.
+    rolls.push({ value: v, min: Math.min(Number(min), Number(max), v), max: Math.max(Number(min), Number(max), v) })
+    last = m.index + whole.length
+  }
+  if (!rolls.length) return { text: src, masked: normalizeStatTextForCard(src), rolls }
+  return { text: text + src.slice(last), masked: masked + src.slice(last), rolls }
+}
+
+// Two rolled values in one line ("Fügt # bis # Schaden hinzu") are ONE number on
+// the trade site — their average. Same fold as the engine's getRollOrMinmaxAvg
+// (stat-translations.ts), which is where the pair of values comes from.
+const avgOrFirst = xs => (xs.length === 2 ? (xs[0] + xs[1]) / 2 : xs[0])
+
+async function spliceResolvedUnknownMods (item, preset, lang = PRIMARY_LANG) {
   const unknown = item.unknownModifiers
   if (!Array.isArray(unknown) || unknown.length === 0) return
   const keep = []
   for (const um of unknown) {
-    const text = um?.text
-    if (!text) continue
+    if (!um?.text) continue
+    // Ranges off FIRST, then the same path as ever with the cleaned line —
+    // English straight into the catalogue, German through the pair table. One
+    // cleanup for both, so the two sides cannot start disagreeing about which
+    // texts are lookup-able.
+    const { text, masked, rolls } = splitRollRanges(um.text)
     let tradeId = null
     try {
-      tradeId = await tradeStatIndex.resolve(text, um.type)
+      tradeId = await resolveUnknownMod(text, um.type, lang)
     } catch { tradeId = null } // catalogue trouble must never break a price-check
     if (!tradeId) { keep.push(um); continue }
+    // The value the trade search filters on. With the ranges present the rolled
+    // numbers are exactly the ones that carried a bracket, so a static number in
+    // the wording ("… alle 3 Sekunden 1(0-3) Füllung") can no longer be mistaken
+    // for the roll; without them, the first number is still all there is.
     const num = /[+-]?\d+(?:\.\d+)?/.exec(text)
-    const value = num ? Number(num[0]) : undefined
+    const value = rolls.length ? avgOrFirst(rolls.map(r => r.value)) : (num ? Number(num[0]) : undefined)
     preset.stats.push({
-      text: normalizeStatTextForCard(text),
+      text: masked,
       tag: um.type || 'implicit',
       tradeId: [tradeId],
       disabled: false,
-      roll: { value, min: value, max: undefined },
+      // roll.default = the slider's track (modsOf -> valueRange). It exists only
+      // when the line brought its own range along; an unvendored stat has no
+      // bounds anywhere else, and then the card shows a checkbox without a
+      // slider — honest: we know the stat, not its roll range.
+      roll: rolls.length
+        ? { value, min: value, max: undefined, default: { min: avgOrFirst(rolls.map(r => r.min)), max: avgOrFirst(rolls.map(r => r.max)) } }
+        : { value, min: value, max: undefined },
       resolvedFromCatalogue: true, // provenance, for debugging
     })
     keep.push(null) // resolved -> drop from unknownModifiers (no "not searchable" row)
@@ -1074,6 +1841,13 @@ function toPriceResult (id, price, kind, league, cdRatio) {
 // traded at that hour and rides along as `exchangeRange` so the card can show
 // how wide the market is instead of just the single derived number.
 //
+// `ageHours` (optional) is how old the OBSERVATION behind `chaos` is, in whole
+// hours, and only when that exceeds the lag the pipeline cannot avoid — null
+// otherwise (networth/faustus-age.mjs staleHours). It rides along as
+// `exchangeAgeHours` so the card can say the headline is not from now. This is
+// the field the "206.6c on the card, 147c in the game" report needed: both
+// numbers were real, they were from different hours, and nothing said so.
+//
 // `itemName` is display-only, for the ask-conflict log line below — it never
 // affects pricing.
 //
@@ -1090,20 +1864,24 @@ function toPriceResult (id, price, kind, league, cdRatio) {
 // everything measurably broken sat at 9x or more. 4 halves that gap with
 // margin on both sides (only ~1.0% of lines exceed it) and is the same number
 // AND the same meaning as BRIDGE_TOLERANCE in networth/faustus.mjs.
-const ASK_CONFLICT_RATIO = positiveEnvInt(process.env.POE_ASK_CONFLICT_RATIO, 4)
+const ASK_CONFLICT_RATIO = envNum('POE_ASK_CONFLICT_RATIO')
 // Absolute floor on top of the ratio. Sub-chaos fungibles (lifeforce trades
 // near 0.018c while the trade site can't list below 1c) would otherwise fire
 // on pure granularity, and the over-direction would fire constantly on
 // near-floor junk where 1c walls are endemic — the ratio alone can't tell
 // "22c vs 1c" (real conflict) from "1.5c vs 1c" (rounding noise).
-const ASK_CONFLICT_ABS_GAP_C = positiveEnvInt(process.env.POE_ASK_CONFLICT_ABS_GAP_C, 5)
+// 0 is honoured: "no absolute gap required, the ratio alone decides".
+const ASK_CONFLICT_ABS_GAP_C = envNum('POE_ASK_CONFLICT_ABS_GAP_C')
 // Below this many fetched asks, the ask median is itself noise.
-const MIN_ASK_EVIDENCE = positiveEnvInt(process.env.POE_MIN_ASK_EVIDENCE, 5)
+// 0 is honoured: "no minimum listing count". The listings are already in hand
+// when this is read, so it is a confidence bar and never a request cap.
+const MIN_ASK_EVIDENCE = envNum('POE_MIN_ASK_EVIDENCE')
 // Same granularity problem as the abs-gap, from the other end: below 1c the
 // exchange rate is honestly sub-chaos and the trade site's floor is the whole
 // reason for the gap, not evidence of a wrong headline.
-const MIN_CONFLICT_HEADLINE_C = positiveEnvInt(process.env.POE_MIN_CONFLICT_HEADLINE_C, 1)
-function withExchangeMain (result, chaos, cdRatio, range, itemName) {
+// 0 is honoured: "mark sub-chaos headlines too".
+const MIN_CONFLICT_HEADLINE_C = envNum('POE_MIN_CONFLICT_HEADLINE_C')
+function withExchangeMain (result, chaos, cdRatio, range, itemName, ageHours = null) {
   if (typeof chaos !== 'number' || !(chaos > 0) || !result) return result
   const ratio = Number(cdRatio) > 0 ? Number(cdRatio) : 0
   const toChaos = v => (result.currency === 'chaos'
@@ -1142,6 +1920,10 @@ function withExchangeMain (result, chaos, cdRatio, range, itemName) {
   // Only a real span: no range, a degenerate one or garbage -> the field stays
   // absent and the card shows nothing there (never a made-up placeholder).
   if (isFinite(lo) && isFinite(hi) && lo > 0 && lo < hi) out.exchangeRange = { low: rc(lo), high: rc(hi) }
+  // Same rule for the age: absent means "as fresh as this source gets", not
+  // "unknown" — faustusStaleHoursFor only returns a number past the unavoidable
+  // lag, so a present field always means the headline is genuinely behind.
+  if (typeof ageHours === 'number' && isFinite(ageHours) && ageHours > 0) out.exchangeAgeHours = ageHours
 
   // ---- Ask-conflict marker ---------------------------------------------------
   // Gates: ALL required or there is no comparison at all — thin/exotic/floor
@@ -1224,7 +2006,8 @@ const broadcastQueue = () => broadcastAll(queueStatusMsg())
 // default 60s) is treated as "actually rate-limited". The banner clears on the
 // next successful price (searches got through again) and self-expires once its
 // `until` passes, so a stale ban never lingers on screen.
-const RATE_LIMIT_BANNER_MIN_SEC = positiveEnvInt(process.env.POE_RATE_LIMIT_BANNER_MIN_SEC, 60)
+// 0 is honoured: "banner every rate-limit wait, however short". Display only.
+const RATE_LIMIT_BANNER_MIN_SEC = envNum('POE_RATE_LIMIT_BANNER_MIN_SEC')
 let rateLimit = null // { retryAfterSec, until, message } | null
 
 // The gate is written to disk, not just held in memory, because APT's
@@ -1269,6 +2052,24 @@ function rateLimitMsg () {
   return rateLimit
     ? { type: 'rate-limit', active: true, retryAfterSec: rateLimit.retryAfterSec, until: rateLimit.until, message: rateLimit.message }
     : { type: 'rate-limit', active: false }
+}
+
+// The same gate, as the question the NET-WORTH REFRESHER asks before every tick
+// (B14). While it is up, the stash path stops too — and it is the same `until`
+// pump() gates on, so the two can never disagree about whether a ban is on.
+//
+// Why the stash path listens to a TRADE ban at all: a ban on this deployment
+// was reported to apply to the whole address rather than to an account, and to
+// have ended only by taking a new one. A cookie-authenticated stash read during
+// such a ban is still a request from a banned address. The counter-argument is
+// real and is documented where the decision is (docs/bugs.md B14): the net
+// worth freezes for the length of the ban. It heals; a ban does not, and it
+// costs every user of the deployment at once.
+//
+// A pause with an end time, not a bare boolean: the refresher hands it to the
+// status line so a user reads "resumes at 19:40" instead of an open-ended stop.
+function tradeBanPause () {
+  return (rateLimit && Date.now() < rateLimit.until) ? { until: rateLimit.until } : false
 }
 
 // Called from pump()'s rate-limit retry branch with the parsed Retry-After.
@@ -1415,6 +2216,16 @@ async function pump () {
     const room = users.get(job.user)
     const rec = room && room.items.get(job.id)
     if (rec && rec.alive) {
+      // Pricing switched off (POE_PRICE_CHECK_DISABLED=1): the card stays, no
+      // request goes out. 'error' rather than leaving it on 'queued' or
+      // 'searching', because no price is ever going to arrive for it — a card
+      // that claims to be searching when nothing is searching is the same lie
+      // the status field exists to prevent.
+      if (PRICE_CHECK_DISABLED) {
+        rec.status = 'error'
+        broadcast(job.user, itemAddedFor(rec, 'error'))
+        return
+      }
       // Mod selection/corrupted filter apply for every manual ('priority')
       // search, regardless of route: for true bulk items (real currency)
       // preset.stats is empty anyway (no-op loop), so this is harmless there
@@ -1435,8 +2246,8 @@ async function pump () {
       // poe.ninja bulk routing (NINJA_BULK_CLASSES, see above): these item
       // classes have no exchange tradeTag (bulkPriceItem can't price them
       // either) and their single-listing trade search comes back full of
-      // stale/dead offers (Divination Cards being the poster child — see
-      // FEATURES-report.md) -> use poe.ninja's aggregated market value
+      // stale/dead offers (Divination Cards being the poster child: a card
+      // like "The Fortunate" shows a handful of long-dead listings) -> use poe.ninja's aggregated market value
       // instead, no trade call at all. `ninjaBulkPrice` returns null (not
       // this item class / name not in poe.ninja's data / poe.ninja
       // unreachable) -> falls straight through to the normal trade routing
@@ -1454,6 +2265,11 @@ async function pump () {
       // that routes through the stat search and still has an exchange rate gets
       // priced by the exchange too. Unknown to Faustus (null) -> everything
       // below behaves exactly as before.
+      // Read ONCE per pass. POE_MAX_LISTINGS is live (config-overrides.mjs), so
+      // a save between the bulk call and the fallback search below would put
+      // two different limits into one result — a price built from ten listings
+      // and a fallback built from three, with nothing on the card saying so.
+      const listings = maxListings()
       const faustusChaos = faustusChaosFor(rec.item, room.league)
       // poe.ninja is only asked when the exchange has no rate — an aggregated
       // ninja value must never outrank the live exchange.
@@ -1480,10 +2296,10 @@ async function pump () {
         price = useBulk
           ? await bulkPriceItemAs(rec.item, rec.preset.filters, {
               league: room.league,
-              maxListings: MAX_LISTINGS,
+              maxListings: listings,
               cdRatio: cdMsgFor(room.league).chaosPerDivine
             })
-          : await searchPresetAs(rec.preset, { league: room.league, maxListings: MAX_LISTINGS })
+          : await searchPresetAs(rec.preset, { league: room.league, maxListings: listings })
 
         // Defensive fallback: even WITH a tradeTag, the bulk exchange can come
         // back empty for a genuinely thin/dead exchange pair -> fall back to
@@ -1499,7 +2315,7 @@ async function pump () {
             tradeKind = null
             exchangePrice = { chaos: round1(faustusChaos), count: null, url: null }
           } else {
-            price = await searchPresetAs(rec.preset, { league: room.league, maxListings: MAX_LISTINGS })
+            price = await searchPresetAs(rec.preset, { league: room.league, maxListings: listings })
             tradeKind = 'search'
           }
         }
@@ -1511,7 +2327,8 @@ async function pump () {
           ? toNinjaPriceResult(job.id, ninjaPrice, room.league)
           : exchangePrice
             ? toNinjaPriceResult(job.id, exchangePrice, room.league, {
-                source: 'exchange', label: 'Currency Exchange', note: 'market rate'
+                source: 'exchange', label: 'Currency Exchange', note: 'market rate',
+                ageHours: faustusStaleHoursFor(rec.item, room.league)
               })
             // Faustus rate + real trade listings: the exchange rate becomes the
             // headline, the trade result keeps its listings/trade link and its
@@ -1521,7 +2338,8 @@ async function pump () {
                 faustusChaos,
                 cdMsgFor(room.league).chaosPerDivine,
                 faustusRangeFor(rec.item, room.league),
-                rec.item.name || rec.item.info?.name || 'Unknown'
+                rec.item.name || rec.item.info?.name || 'Unknown',
+                faustusStaleHoursFor(rec.item, room.league)
               )
         rec.status = 'done'
         rec.lastPrice = result
@@ -1574,7 +2392,42 @@ async function pump () {
 // ---------------------------------------------------------------------------
 let leaguesCache = { at: 0, list: null }
 
+// The THIRD kind of outbound traffic, and the one no switch covered. The four
+// background switches cover schedules, POE_REFERENCE_DISABLED covers the warm-up
+// at boot, POE_REFERENCE_ON_CONNECT_DISABLED covers what a WebSocket sets off,
+// and POE_PRICE_CHECK_DISABLED covers the foreground price check. This is none
+// of those: it is a REQUEST — the browser asks `GET /leagues` to fill its
+// dropdown, once per page load — so no amount of disabling schedules silences
+// it. That is why it survived the round of switches added in B12 and was still
+// the only thing a measured suite run reached out for in B25.
+//
+// A switch of its own rather than a wider meaning for an existing one, for the
+// reason spelt out at POE_REFERENCE_ON_CONNECT_DISABLED: stretching a documented
+// switch changes what an existing compose file does, silently.
+//
+// It is not only a test switch. An installation with no route to poe.ninja pays
+// for this on every page load — the fetch has to fail before the dropdown can be
+// drawn — and this turns that into no request at all.
+//
+// What it costs when set: the dropdown offers the leagues this installation
+// already knows rather than the current list. Not the bare fallback pair, which
+// would leave out the league everybody here is actually on: the leagues the
+// configured users are in are known without asking anybody.
+const LEAGUE_LIST_DISABLED = process.env.POE_LEAGUE_LIST_DISABLED === '1'
+if (LEAGUE_LIST_DISABLED) {
+  console.log('[leagues] list lookup disabled via POE_LEAGUE_LIST_DISABLED=1 — the dropdown offers the configured leagues and the fallbacks')
+}
+
+/** What this installation can answer without asking poe.ninja. */
+function knownLeagues () {
+  return [...new Set([
+    ...USERS.map(u => users.get(u)?.league).filter(Boolean),
+    ...FALLBACK_LEAGUES
+  ])]
+}
+
 async function fetchLeagues () {
+  if (LEAGUE_LIST_DISABLED) return knownLeagues()
   if (leaguesCache.list && Date.now() - leaguesCache.at < NINJA_MIN_MS) return leaguesCache.list
   try {
     const r = await fetch(`${NINJA_BASE}/leagues`, { headers: { 'User-Agent': NINJA_UA, Accept: 'application/json' } })
@@ -1776,7 +2629,13 @@ function sellRevenuePerItem (sell) {
 function sellRow (row, league, ratio) {
   const sell = railSellFor(row.faustusName, league, ratio)
   const chaos = sellRevenuePerItem(sell)
-  const base = { name: row.name, key: `s:${row.faustusName}`, invert: true }
+  // `name` is the SHORTENED English wording the rail prints ("Vivid Lifeforce"
+  // for "Vivid Crystallised Lifeforce") and exists nowhere in the data set, so
+  // it can never be looked up. `refName` is the real reference name and is what
+  // the localized-name table is keyed by (GET /item-name-map): without it these
+  // three rows are the only ones on the rail that could not be translated. The
+  // other rows already carry the reference name in `name` itself.
+  const base = { name: row.name, refName: row.faustusName, key: `s:${row.faustusName}`, invert: true }
   // invert: these rows print a QUANTITY per currency unit, so a rising number
   // means the item got cheaper — bad news for the seller reading the rail.
   // `src` names where the PRINTED NUMBER comes from; it stays absent while the
@@ -1921,8 +2780,7 @@ async function refreshReference (league) {
 //                 carry the name directly — same endpoint refreshReference's
 //                 beast rows and ninjaRefFor's unique lookups already use)
 //
-// Populated ONLY with classes verified live against poe.ninja (see the
-// feature's commit message / report for the exact requests) — anything
+// Populated ONLY with classes verified live against poe.ninja — anything
 // dropped here simply keeps going through the existing trade routing below.
 //
 // Divination Cards: `item.category === 'Divination Card'` is exact and
@@ -1930,7 +2788,7 @@ async function refreshReference (league) {
 // poe.ninja, unconditionally. THE reason this feature exists: div cards have
 // no exchange tradeTag (bulkPriceItem can't price them) and PoE's stat search
 // (searchPreset) returns single "listings" for them that are overwhelmingly
-// stale (see FEATURES-report.md's "The Fortunate" example).
+// stale (a card like "The Fortunate" shows a handful of long-dead listings).
 //
 // Captured Beasts: same story — `category === 'Captured Beast'`, no
 // tradeTag, single-listing trade search only.
@@ -2008,6 +2866,49 @@ function ninjaBulkClassFor (item) {
   return null
 }
 
+// ---------------------------------------------------------------------------
+// The key an item is looked up by in an ENGLISH price source
+// ---------------------------------------------------------------------------
+// `item.name` is the DISPLAY name and follows the client language: on a German
+// parse it reads "Chaos-Kugel", and poe.ninja's lines, the Faustus digest and
+// the trade site all only know "Chaos Orb". `info.refName` is the reference
+// name the data set keeps English in EVERY language (the design's tragendes
+// Prinzip — data/de carries a German `name` next to the same English
+// `refName`), so it, not the display name, is what those sources are indexed
+// by. Everything user-facing keeps using the display name; this is purely the
+// lookup key.
+//
+// The guard is what makes the swap safe. `info` describes THIS name only when
+// its own display name is the one on the name plate, and findInDatabase
+// (engine.bundle.mjs) deliberately breaks that for a few classes:
+//
+//   - a Voidstone is resolved as ITEM_BY_REF("ITEM", "Charged Compass"), and
+//     "Charged Compass" has its own Currency-Exchange rate (it is in
+//     base-names.json) — handing that refName to faustusStore.getPrice would
+//     price every Voidstone as a compass,
+//   - a rare/normal item resolves to its BASE (`item.baseType ?? item.name`),
+//     so refName is the base type and never the item's own name,
+//   - a captured beast does the same when the clipboard carries a base line.
+//
+// Where the two disagree, the display name stays the only honest key and the
+// caller falls back to it — which is bit-for-bit the old behaviour.
+//
+// For English the whole thing is a no-op by construction: in
+// data/en/items.ndjson `name === refName` holds for every single entry
+// (4738/4738 at the time of writing), so whenever the guard passes, refName IS
+// what the old `item.name || item.info?.name` expression already returned.
+function refNameOf (item) {
+  const info = item?.info
+  if (!info?.refName) return null
+  const shown = item.name || info.name
+  if (shown && info.name && shown !== info.name) return null
+  return info.refName
+}
+
+// The lookup key for the English price sources: reference name first, display
+// name only as the last resort (see refNameOf for when that happens).
+const priceKeyOf = item => refNameOf(item) || item?.name || item?.info?.name || null
+
 // Best-effort poe.ninja lookup for a NINJA_BULK_CLASSES item. Returns
 // `{ chaos, count, sparkline }` or `null` — null covers ALL miss cases alike
 // (item class not in the map, poe.ninja doesn't know this exact name yet, the
@@ -2017,7 +2918,9 @@ function ninjaBulkClassFor (item) {
 async function ninjaBulkPrice (item, league) {
   const cls = ninjaBulkClassFor(item)
   if (!cls) return null
-  const name = item.name || item.info?.name || item.info?.refName
+  // poe.ninja indexes its lines by the English name (`l.name === name` /
+  // `nameToId`), so this has to be the reference name — see priceKeyOf.
+  const name = priceKeyOf(item)
   if (!name) return null
   const url = ninjaUrlFor(cls, name, league)
 
@@ -2064,6 +2967,10 @@ function toNinjaPriceResult (id, ninjaPrice, league, opts = {}) {
     priceSource: opts.source || 'ninja',
     sourceLabel: opts.label || 'poe.ninja',
     sourceNote: opts.note || null,
+    // Only the Currency-Exchange caller passes this, and only past the
+    // unavoidable lag — see withExchangeMain. poe.ninja's own aggregates carry
+    // no comparable per-item observation time, so they never set it.
+    ...(typeof opts.ageHours === 'number' && opts.ageHours > 0 ? { exchangeAgeHours: opts.ageHours } : {}),
     currency: 'chaos',
     priceLow: ninjaPrice.chaos,
     priceHigh: ninjaPrice.chaos,
@@ -2085,10 +2992,37 @@ function faustusChaosFor (item, league) {
   if (typeof faustusStore?.getPrice !== 'function') return null
   if (typeof faustusStore.league === 'function' && faustusStore.league() !== league) return null
   if (typeof faustusStore.isFresh === 'function' && !faustusStore.isFresh(FAUSTUS_TTL_MS)) return null
-  const name = item?.name || item?.info?.name || item?.info?.refName
+  // The digest is keyed by the English currency name (base-names.json bridges
+  // GGG's metadata ids to it), so the lookup key is the reference name — see
+  // priceKeyOf. Without it a German parse silently loses the exchange headline,
+  // i.e. exactly the price that IS correct, and falls back to trade asks.
+  const name = priceKeyOf(item)
   if (!name) return null
   const v = faustusStore.getPrice(name)
-  return typeof v === 'number' && v > 0 ? v : null
+  if (!(typeof v === 'number' && v > 0)) return null
+  // Per-item age gate, the SAME one the net-worth valuator applies
+  // (networth/valuator.mjs fromFaustus) — on purpose: a card and the net worth
+  // that disagree about one item are worse than either being wrong alone. Too
+  // old -> null -> this item routes exactly like one Faustus never quoted
+  // (poe.ninja bulk, else the trade search).
+  if (typeof faustusStore.getHour === 'function' &&
+      faustusTooOld(faustusStore.getHour(name), { maxMs: FAUSTUS_MAX_AGE_MS })) return null
+  return v
+}
+
+// Whole hours of age worth printing on the card for a Faustus-priced item, or
+// null when the price is as fresh as the pipeline can make it. Null is the
+// normal case by design: a label that is always there is not read (see
+// networth/faustus-age.mjs staleHours). Guards match faustusChaosFor's, so a
+// price it refuses never carries an age here either.
+function faustusStaleHoursFor (item, league) {
+  if (FAUSTUS_DISABLED) return null
+  if (typeof faustusStore?.getHour !== 'function') return null
+  if (typeof faustusStore.league === 'function' && faustusStore.league() !== league) return null
+  if (typeof faustusStore.isFresh === 'function' && !faustusStore.isFresh(FAUSTUS_TTL_MS)) return null
+  const name = priceKeyOf(item)
+  if (!name) return null
+  return faustusStaleHours(faustusStore.getHour(name), { refreshMs: FAUSTUS_REFRESH_MS })
 }
 
 // The chaos range that same digest hour actually traded at ({min,max}), or null
@@ -2099,7 +3033,7 @@ function faustusRangeFor (item, league) {
   if (typeof faustusStore?.getRange !== 'function') return null
   if (typeof faustusStore.league === 'function' && faustusStore.league() !== league) return null
   if (typeof faustusStore.isFresh === 'function' && !faustusStore.isFresh(FAUSTUS_TTL_MS)) return null
-  const name = item?.name || item?.info?.name || item?.info?.refName
+  const name = priceKeyOf(item) // English key, same reason as in faustusChaosFor
   if (!name) return null
   const r = faustusStore.getRange(name)
   return (r && r.min > 0 && r.min < r.max) ? r : null
@@ -2111,8 +3045,20 @@ async function ninjaRefFor (item, league) {
   if (!type) return null
   const lines = await fetchItemOverview(league, type)
   if (!lines || !lines.length) return null
-  const name = item.name || item.info?.name
-  const base = item.info?.refName
+  // poe.ninja's unique lines carry the English unique name -> reference name,
+  // not the display name (see priceKeyOf). For a Unique `info` IS the UNIQUE
+  // entry, so refName is the unique's own English name and the guard passes.
+  const name = priceKeyOf(item)
+  // …which is exactly why the baseType tiebreak must NOT read refName: for a
+  // Unique that IS the unique's own name and never a base type, so the
+  // comparison could not come out true and the first line always won. The base a
+  // Unique sits on is `info.unique.base` (English in the data whatever the
+  // client language) — the same field fromItemOverview joins on in
+  // networth/valuator.mjs. It decides between the five uniques that carry one
+  // name on several bases (Precursor's Emblem on five ring bases, Combat Focus
+  // and Grand Spectrum on three jewels each), where poe.ninja keeps one line per
+  // base under the one name.
+  const base = item.info?.unique?.base
   const cands = lines.filter(l => l.name === name)
   if (!cands.length) return null
   const pick = (base && cands.find(l => l.baseType === base)) || cands[0]
@@ -2132,6 +3078,7 @@ async function ninjaRefFor (item, league) {
 // Fetch ninja ref best-effort + broadcast as `ninja-ref` into the user's room
 // (never blocking). Uses the user's league.
 function pushNinjaRef (user, id) {
+  if (PRICE_CHECK_DISABLED) return // same switch: pricing an item sends nothing at all
   const room = users.get(user)
   if (!room) return
   const rec = room.items.get(id)
@@ -2142,13 +3089,207 @@ function pushNinjaRef (user, id) {
   }).catch(() => {})
 }
 
+// The reference traffic a CONNECTED CLIENT sets off, as opposed to the one-time
+// warm-up at boot that POE_REFERENCE_DISABLED covers. Two paths lead into it: a
+// WS connect whose league has no warm cache, and a user switching leagues. Each
+// sends two poe.ninja requests, and neither had a switch — so "boot the real
+// server and let it reach nothing" was not expressible, and the two server test
+// files each sent those two requests on every run (docs/bugs.md B12).
+//
+// A SWITCH OF ITS OWN RATHER THAN A WIDER MEANING FOR THE BOOT ONE.
+// POE_REFERENCE_DISABLED is documented precisely as "skips the one-time warm-up
+// done at boot"; stretching it to cover a client-triggered fetch would change
+// what an existing compose file does, silently, in the direction of less data.
+// The precedent is POE_PRICE_CHECK_DISABLED, which was added for exactly this
+// class — the foreground path the four background switches never covered —
+// rather than folded into one of them.
+//
+// What it costs when set: a room whose league has no cached C:D ratio or
+// reference rail keeps the fallback values until the periodic refresh reaches
+// that league. Nothing is retried and nothing is queued for later.
+const REFERENCE_ON_CONNECT_DISABLED = process.env.POE_REFERENCE_ON_CONNECT_DISABLED === '1'
+if (REFERENCE_ON_CONNECT_DISABLED) {
+  console.log('[reference] on-connect warm-up disabled via POE_REFERENCE_ON_CONNECT_DISABLED=1 — a league with a cold cache stays on its fallback values')
+}
+
 // Warm up a league (cd + ref) and then broadcast to the room of users on this
 // league. For fresh connections whose league doesn't have a warm cache yet.
 function warmLeague (league) {
+  if (REFERENCE_ON_CONNECT_DISABLED) return
   refreshCdRatio(league)
     .then(() => { broadcastLeague(league, cdMsgFor(league)); return refreshReference(league) })
     .then(() => broadcastLeague(league, refMsgFor(league)))
     .catch(() => {})
+}
+
+// ---------------------------------------------------------------------------
+// Client language at runtime (see user-lang-store.mjs)
+// ---------------------------------------------------------------------------
+
+/** The languages a user may actually be switched to right now. */
+function availableLangs () { return engines.liveLanguages() }
+
+/**
+ * setUserLang(user, lang) -> { ok: true, persisted } | { ok: false, error }
+ *
+ * Checked against the LIVE parsers, not against SUPPORTED_LANGS: the latter is
+ * the list of languages the tool can support in principle, and moving a user
+ * onto one this container has no parser for would swap his 503-free item route
+ * for a permanent one.
+ *
+ * Order matters and is: validate -> persist -> apply in memory -> tell the
+ * browsers. Persisting first means a failing write can never leave a language
+ * that is in force but nowhere on disk, i.e. one that reverts at the next
+ * restart with nothing to show for it.
+ */
+async function setUserLang (user, lang) {
+  const room = users.get(user)
+  if (!room) return { ok: false, status: 400, error: `unknown user "${user}"` }
+  const available = availableLangs()
+  if (typeof lang !== 'string' || !available.includes(lang)) {
+    return {
+      ok: false,
+      status: 400,
+      error: `language "${lang}" is not available on this server`,
+      available
+    }
+  }
+  if (lang === room.lang) return { ok: true, persisted: userLangStore.writable, unchanged: true }
+
+  let persisted
+  try {
+    persisted = await userLangStore.set(user, lang)
+  } catch (e) {
+    console.warn(`[user-langs] could not persist the language for "${user}": ${e?.code || e?.message || e}`)
+    return { ok: false, status: 500, error: 'the language could not be saved' }
+  }
+  room.lang = lang
+  LANG_BY_USER.set(user, lang)
+  // The page learns its language from `league-state` (PROTOCOL.md) — the same
+  // message it already gets on connect, so nothing new has to be understood on
+  // the other side and every open tab of this user follows immediately.
+  broadcast(user, { type: 'league-state', active: room.league, lang: room.lang })
+  return { ok: true, persisted }
+}
+
+// ---------------------------------------------------------------------------
+// Runtime configuration view (admin area)
+// ---------------------------------------------------------------------------
+
+/**
+ * The settings that are NOT editable from the web UI, as this process really
+ * resolved them — built from the server's own constants rather than re-derived
+ * from env, so the view cannot drift away from what is actually running.
+ *
+ * NOTHING SECRET IS BUILT INTO THIS LIST, and `redactView()` in
+ * config-overrides.mjs drops anything whose name looks like a secret on the way
+ * out anyway. No POESESSID, no account name, no admin password, no path to the
+ * credential file — not the value, not a mask, not a length.
+ */
+function runtimeConfigEntries () {
+  const bool = v => (v ? '1' : '0')
+  const entries = [
+    { name: 'PORT', value: String(server.address()?.port ?? PORT) },
+    { name: 'POE_USERS', value: USERS.join(',') },
+    // The environment variable as given, and — separately — what is actually in
+    // force. Those two are NOT the same thing: a language a user picked himself
+    // beats the variable (user-lang-store.mjs), so printing the effective
+    // mapping under the variable's name would describe a compose line that does
+    // not exist. Two rows, each honest about which of the two it is.
+    { name: 'POE_USER_LANGS (starting value from the environment)', value: process.env.POE_USER_LANGS || '' },
+    { name: 'client language per user, in force (including each user’s own choice)', value: [...LANG_BY_USER].map(([u, l]) => `${u}:${l}`).join(',') },
+    { name: 'POE_CD_RATIO', value: String(CD_FALLBACK) },
+    { name: 'POE_CD_REFRESH_MS', value: String(CD_REFRESH_MS) },
+    { name: 'POE_MAX_ITEMS_PER_ROOM', value: String(MAX_ITEMS_PER_ROOM) },
+    { name: 'POE_MAX_REQUEUE_ON_RECONNECT', value: String(MAX_REQUEUE_ON_RECONNECT) },
+    { name: 'POE_RATE_LIMIT_BANNER_MIN_SEC', value: String(RATE_LIMIT_BANNER_MIN_SEC) },
+    { name: 'POE_RATE_LIMIT_STATE', value: RATE_LIMIT_STATE },
+    { name: 'POE_NETWORTH_STORE', value: NETWORTH_STORE },
+    { name: 'POE_NETWORTH_HISTORY', value: NETWORTH_HISTORY },
+    { name: 'POE_NETWORTH_LIST_TTL_MS', value: String(NETWORTH_LIST_TTL_MS) },
+    { name: 'POE_NETWORTH_COOLDOWN_MS', value: String(NETWORTH_COOLDOWN_MS) },
+    { name: 'POE_NETWORTH_SLOW_STEP_MS', value: String(NETWORTH_SLOW_STEP_MS) },
+    { name: 'POE_NETWORTH_GUARD_FACTOR', value: String(NETWORTH_GUARD.factor) },
+    { name: 'POE_NETWORTH_GUARD_SHARE', value: String(NETWORTH_GUARD.share) },
+    { name: 'POE_NETWORTH_GUARD_HOLD_MS', value: String(NETWORTH_GUARD.maxHoldMs) },
+    { name: 'POE_NETWORTH_GUARD_ARRIVAL_MIN_DIVINE', value: String(NETWORTH_GUARD.arrivalMinDivine) },
+    { name: 'POE_FAUSTUS_STORE', value: FAUSTUS_STORE },
+    { name: 'POE_FAUSTUS_UNION_HOURS', value: String(FAUSTUS_UNION_HOURS ?? 'default') },
+    { name: 'POE_FAUSTUS_REFRESH_MS', value: String(FAUSTUS_REFRESH_MS) },
+    { name: 'POE_FAUSTUS_TTL_MS', value: String(FAUSTUS_TTL_MS) },
+    { name: 'POE_CORPSE_STORE', value: CORPSE_STORE },
+    { name: 'POE_CORPSE_TTL_MS', value: String(CORPSE_TTL_MS) },
+    { name: 'POE_CORPSE_BUDGET_PER_HOUR', value: String(CORPSE_BUDGET_PER_HOUR) },
+    { name: 'POE_CORPSE_INTERVAL_MS', value: String(CORPSE_INTERVAL_MS) },
+    { name: 'POE_REFERENCE_HISTORY', value: REFERENCE_HISTORY },
+    { name: 'POE_DATA_REFRESH_MS', value: String(DATA_REFRESH_MS) },
+    { name: 'POE_DATA_REFRESH_DIR', value: DATA_REFRESH_DIR },
+    { name: 'POE_DATA_STALE_TICKS', value: String(DATA_STALE_TICKS) },
+    { name: 'POE_DATA_STATUS_REASON_MAX', value: String(DATA_STATUS_REASON_MAX) },
+    { name: 'POE_DATA_CHECK_NOW_COOLDOWN_MS', value: String(DATA_CHECK_NOW_COOLDOWN_MS) },
+    { name: 'POE_GAP_LOG_MAX', value: String(GAP_LOG_MAX) },
+    { name: 'POE_GAP_LOG_TEXT_MAX', value: String(GAP_LOG_TEXT_MAX) },
+    { name: 'POE_LANG_SKEW_WARN_RATIO', value: String(LANG_SKEW_WARN_RATIO) },
+    { name: 'POE_LANG_MAX_COVERAGE_LOSS_RATIO', value: String(LANG_MAX_COVERAGE_LOSS_RATIO) },
+    { name: 'POE_TRADE_AUDIT_THRESHOLD', value: String(TRADE_AUDIT_THRESHOLD) },
+    { name: 'POE_USER_LANG_STORE', value: userLangStore.path },
+    // The update round trip (host-update.mjs). The commit this image was built
+    // from is NOT repeated here — it is shown once, in the update block that
+    // needs it, because one page must not give two answers to one question.
+    { name: 'POE_UPDATE_DIR', value: hostUpdate.dir },
+    { name: 'POE_UPDATE_HEARTBEAT_MAX_AGE_MS', value: String(hostUpdate.heartbeatMaxAgeMs) },
+    // Facts rather than variables, but they are what somebody opening this view
+    // wants to know and would otherwise go looking for over SSH.
+    { name: 'live parsers', value: engines.liveLanguages().join(', ') },
+    { name: 'snapshot languages', value: dataRefresher.activeLanguages().join(', ') },
+    { name: 'net-worth store writable', value: bool(networthStoreWritable) },
+    { name: 'user-language store writable', value: bool(userLangStore.writable) }
+  ]
+  // The editable ones are shown by the settings block above with their source;
+  // repeating them here would invite two different answers on one page.
+  return entries.filter(e => !SETTABLE_BY_NAME.has(e.name))
+}
+
+/**
+ * The provenance of every generated language set that is live: what
+ * `build-info.json` says next to the data the container is really serving.
+ *
+ * Nothing is computed here and nothing is guessed. A set without the file is
+ * reported as `present: false` rather than as zeroes — an old set generated
+ * before the file existed, and a set that was never built, are both "we do not
+ * know", which is a different statement from "nothing was translated".
+ */
+async function langBuildInfo (langs) {
+  const out = []
+  for (const lang of langs) {
+    let info = null
+    try {
+      info = JSON.parse(await readFile(dataRefresher.buildInfoPath(lang), 'utf8'))
+    } catch { info = null }
+    if (!info || typeof info !== 'object') { out.push({ lang, present: false }); continue }
+    out.push({
+      lang,
+      present: true,
+      patch: typeof info.patch === 'string' ? info.patch : null,
+      builtAt: typeof info.builtAt === 'string' ? info.builtAt : null,
+      // The run's own numbers, passed through as they were written. `null` when
+      // the set predates them (build-info.json without a `run` block).
+      run: info.run && typeof info.run === 'object' ? info.run : null
+    })
+  }
+  return out
+}
+
+/** 401 + a body that says which of the two cases it is. Same as /admin/gaps. */
+async function adminGate (req, res) {
+  const auth = await adminAuth.check(req.headers)
+  if (auth.ok) return true
+  res.writeHead(401, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+    .end(JSON.stringify({
+      error: auth.reason === ADMIN_MISSING ? 'admin password required' : 'wrong admin password',
+      reason: auth.reason
+    }))
+  return false
 }
 
 // ---------------------------------------------------------------------------
@@ -2161,20 +3302,61 @@ const server = createServer(async (req, res) => {
     res.writeHead(200, { 'content-type': 'text/plain' }).end('ok'); return
   }
 
-  // User list for the identity gate (no auth, just routing).
+  // User list for the identity gate (no auth, just routing). `langs` is the
+  // browser half of the language mapping (the daemon half is X-User on
+  // /item): the page picks a user here and knows its language from the same
+  // answer, no second round trip and no second source of truth.
   if (req.method === 'GET' && path === '/users') {
-    res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ users: USERS, appName: APP_NAME })); return
+    res.writeHead(200, { 'content-type': 'application/json' })
+      .end(JSON.stringify({ users: USERS, appName: appName(), langs: Object.fromEntries(LANG_BY_USER) })); return
   }
 
-  // Every item name the game knows — the exclusion set for the Stash-Highlight
-  // token generator (see loadItemNamesJson). Static per build -> cacheable.
+  // Every item name the game knows, in the language THE GAME runs in — the
+  // exclusion set for the Stash-Highlight token generator, plus the table that
+  // moves the wanted names into that same language (see loadItemNamesJson).
+  //
+  // Identity via the same ppt_user cookie as /item-name-map, because the answer
+  // is now per user. `no-store` for the same two reasons that endpoint gives:
+  // the body is user-specific (a shared cache must never hand player1's German
+  // list to player2), and a data refresh swaps the snapshot underneath.
   if (req.method === 'GET' && path === '/item-names') {
+    const user = parseCookies(req.headers.cookie).ppt_user
+    if (!user || !users.has(user)) {
+      res.writeHead(400, { 'content-type': 'application/json' })
+        .end(JSON.stringify({ error: 'unknown user', users: USERS })); return
+    }
     try {
-      const body = await loadItemNamesJson()
-      res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'public, max-age=86400' }).end(body)
+      const body = await loadItemNamesJson(gameClientLang(user))
+      res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }).end(body)
     } catch (e) {
       res.writeHead(500, { 'content-type': 'application/json' }).end(JSON.stringify({ error: String(e?.message || e) }))
     }
+    return
+  }
+
+  // English reference name -> the name to SHOW, for the language THIS user
+  // plays in. The mapping user -> language is the one configuration already
+  // holds (POE_USER_LANGS, user-langs.mjs) and /users already answers with;
+  // identity comes from the same ppt_user cookie as /events, so no language
+  // ever has to be named in a URL or guessed from a header.
+  //
+  // Strictly the display side of the bridge: names travel English in every
+  // message and stay English in every trade link, join and price lookup (see
+  // loadLocalNamesByRefName). The primary language gets an EMPTY table rather
+  // than one that happens to be an identity — there is nothing to translate,
+  // and the page can tell the difference in one branch.
+  //
+  // no-store: a data-refresh swaps the snapshot underneath, and a page holding
+  // last week's names would be wrong in a way nobody could see. It is one
+  // request per page load of a self-hosted tool.
+  if (req.method === 'GET' && path === '/item-name-map') {
+    const user = parseCookies(req.headers.cookie).ppt_user
+    if (!user || !users.has(user)) {
+      res.writeHead(400, { 'content-type': 'application/json' })
+        .end(JSON.stringify({ error: 'unknown user', users: USERS })); return
+    }
+    res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+      .end(itemNameMapJson(LANG_BY_USER.get(user) || PRIMARY_LANG))
     return
   }
 
@@ -2290,6 +3472,46 @@ const server = createServer(async (req, res) => {
     return
   }
 
+  // Client language of the requesting user (settings page). NO admin password:
+  // this is the user's own setting, sitting on the same page as his own
+  // POESESSID, and gating it behind the operator's password would put the
+  // problem back that the store exists to remove. Identity from the same
+  // `ppt_user` cookie as everything else.
+  if (path === '/user-lang' && (req.method === 'GET' || req.method === 'POST')) {
+    const user = parseCookies(req.headers.cookie).ppt_user
+    if (!user || !users.has(user)) {
+      res.writeHead(400, { 'content-type': 'application/json' })
+        .end(JSON.stringify({ error: 'unknown user', users: USERS })); return
+    }
+    if (req.method === 'GET') {
+      res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+        .end(JSON.stringify({
+          user,
+          lang: users.get(user).lang,
+          available: availableLangs(),
+          // false on a local run without a writable /config: the switch works,
+          // it just will not survive a restart. Said out loud rather than
+          // discovered later.
+          persisted: userLangStore.writable
+        }))
+      return
+    }
+    let body
+    try { body = JSON.parse(await readBody(req)) } catch {
+      res.writeHead(400, { 'content-type': 'application/json' })
+        .end(JSON.stringify({ error: 'invalid JSON body' })); return
+    }
+    const result = await setUserLang(user, body?.lang)
+    if (!result.ok) {
+      res.writeHead(result.status, { 'content-type': 'application/json' })
+        .end(JSON.stringify({ error: result.error, available: result.available ?? availableLangs() }))
+      return
+    }
+    res.writeHead(200, { 'content-type': 'application/json' })
+      .end(JSON.stringify({ ok: true, user, lang: users.get(user).lang, available: availableLangs(), persisted: result.persisted }))
+    return
+  }
+
   // League list (poe.ninja, cached) + active league for the frontend dropdown.
   // Multi-user: `active` = league of USERS[0] (the frontend uses its own from
   // `league-state`); pure convenience for the initial dropdown highlight.
@@ -2297,6 +3519,251 @@ const server = createServer(async (req, res) => {
     const leagues = await fetchLeagues()
     res.writeHead(200, { 'content-type': 'application/json' })
       .end(JSON.stringify({ leagues, active: users.get(USERS[0]).league })); return
+  }
+
+  // ---- Admin: what the tool could not do (design doc, section 6) -----------
+  // The one endpoint behind the password partition. Checked on EVERY request
+  // out of the header — there is no session to establish and none to expire, so
+  // there is also no login endpoint and no logout: the page holds the value in
+  // sessionStorage and the state ends with the tab (admin-auth.mjs).
+  //
+  // Deliberately a single endpoint rather than one per section: the page is a
+  // pull view that is opened rarely, and three round trips to build one screen
+  // would only spread the same data over more code.
+  if (req.method === 'GET' && path === '/admin/gaps') {
+    const auth = await adminAuth.check(req.headers)
+    if (!auth.ok) {
+      // 401 for both cases; the body says which, because "you sent nothing"
+      // and "that was wrong" are different things to show under a form. This
+      // is a partition, not a login — there is nothing here worth being coy
+      // about.
+      res.writeHead(401, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+        .end(JSON.stringify({ error: auth.reason === ADMIN_MISSING ? 'admin password required' : 'wrong admin password', reason: auth.reason }))
+      return
+    }
+    // English first: it is the yardstick every skew row is measured against.
+    const configured = [PRIMARY_LANG, ...engines.languages().filter(l => l !== PRIMARY_LANG)]
+    let skew
+    try {
+      skew = await langSkew.compute({ languages: configured })
+    } catch (e) {
+      // A diagnostic view must not go blank because a diagnostic failed.
+      skew = { base: PRIMARY_LANG, basePresent: false, warn: true, languages: [], error: String(e?.message || e), generatedAt: Date.now() }
+    }
+    res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+      .end(JSON.stringify({
+        gaps: gapLog.snapshot(),
+        skew,
+        // Where the localized sets that are LIVE came from (build-info.json in
+        // the active snapshot). The skew block says how far apart the languages
+        // are and cannot say when, or from what, the last run made them — so
+        // "does this still run" was a question only the container log answered.
+        langBuild: await langBuildInfo(configured.filter(l => l !== PRIMARY_LANG)),
+        // The other half of "is the localized side still following": the display
+        // texts. English client_strings.js is refreshed daily, the localized one
+        // ships with the image, and a key upstream added is simply absent for
+        // that language until the container is updated.
+        clientStrings: dataRefresher.clientStringDrift(),
+        languages: configured,
+        liveLanguages: engines.liveLanguages(),
+        limits: { maxEntriesPerKind: GAP_LOG_MAX, maxTextLength: GAP_LOG_TEXT_MAX }
+      }))
+    return
+  }
+
+  // ---- Admin: configuration (config-overrides.mjs) -------------------------
+  // Same partition as /admin/gaps — the password out of the header, checked on
+  // every request, no session. Unlike /user-lang these are the OPERATOR's
+  // settings, so they are gated.
+  if (req.method === 'GET' && path === '/config-view') {
+    if (!(await adminGate(req, res))) return
+    const overrides = await readOverrideFile(configOverrideState.path)
+    // THE ONE HARD RULE OF THIS ENDPOINT: nothing secret, in no form. The
+    // allow-list holds no secret key, the read-only block is built from
+    // non-secret constants, and configView() filters both by name again.
+    // `config-override-endpoint.test.mjs` walks the whole answer and fails on
+    // any key that could name a credential.
+    const view = configView({
+      state: configOverrideState,
+      overrides,
+      runtime: runtimeConfigEntries()
+    })
+    // Whether the admin password is still the published default. A boolean, to
+    // somebody who has just proved he knows the password anyway — it tells him
+    // nothing he could not try himself, and it is the only place the notice can
+    // reach an operator who never reads container logs.
+    //
+    // NAMED AFTER THE GATE, NOT THE PASSWORD, on purpose: this endpoint refuses
+    // every field whose NAME could name a credential, and that rule has no
+    // exceptions — not even for a field that holds no credential.
+    view.adminGateIsDefault = await adminAuth.usingDefault()
+    res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+      .end(JSON.stringify(view))
+    return
+  }
+
+  // Set or (value: null) remove one override. The way back has to exist, or the
+  // first bad value would need an SSH session to undo — which is the state this
+  // whole feature is meant to end.
+  if (req.method === 'POST' && path === '/config-override') {
+    if (!(await adminGate(req, res))) return
+    let body
+    try { body = JSON.parse(await readBody(req)) } catch {
+      res.writeHead(400, { 'content-type': 'application/json' })
+        .end(JSON.stringify({ error: 'invalid JSON body' })); return
+    }
+    const name = typeof body?.key === 'string' ? body.key : (typeof body?.name === 'string' ? body.name : '')
+    const result = await setOverride({
+      path: configOverrideState.path,
+      state: configOverrideState,
+      name,
+      value: body?.value ?? null
+    })
+    if (!result.ok) {
+      res.writeHead(result.status, { 'content-type': 'application/json' })
+        .end(JSON.stringify({ error: result.error, settable: result.settable })); return
+    }
+    console.log(`[config-overrides] ${result.value === null ? `removed override ${name}` : `set override ${name}=${result.value}`} (${result.applied})`)
+    res.writeHead(200, { 'content-type': 'application/json' })
+      .end(JSON.stringify(result))
+    return
+  }
+
+  // Restart the process. THE DELIBERATE ALTERNATIVE TO MOUNTING THE DOCKER
+  // SOCKET: handing a container the socket that controls its own host daemon,
+  // for a tool that has no authentication and sits behind a plaintext password,
+  // is a far bigger hole than the button is worth. Exiting cleanly reaches the
+  // same result through the supervisor that is already there —
+  // `restart: unless-stopped` in docker-compose.yml starts the container again
+  // within a second.
+  //
+  // Run WITHOUT docker (`node backend/v2/server.mjs`) this button does exactly
+  // what it says it does and nothing more: it ends the process, and starting it
+  // again is the operator's job. That is honest — a button that silently did
+  // nothing outside docker would be worse than one that does the one thing it
+  // can.
+  if (req.method === 'POST' && path === '/restart') {
+    if (!(await adminGate(req, res))) return
+    res.writeHead(200, { 'content-type': 'application/json' })
+      .end(JSON.stringify({ ok: true, restarting: true }))
+    // After the response has left, not before.
+    setTimeout(() => {
+      console.log('[admin] restart requested over /restart — shutting down (the container supervisor brings it back)')
+      // 1012 = Service Restart: the browsers reconnect on their own.
+      for (const client of wss.clients) { try { client.close(1012, 'server restart') } catch { /* already gone */ } }
+      wss.close()
+      server.close(() => process.exit(0))
+      // A connection that refuses to close must not turn a restart into a hang.
+      setTimeout(() => process.exit(0), 2000).unref()
+    }, 50)
+    return
+  }
+
+  // Run the data checks now. BEHIND THE ADMIN PASSWORD, like the restart
+  // button and for the same kind of reason: it starts outbound traffic on
+  // demand, and an unauthenticated way to do that is a way for anyone on the
+  // network to spend this installation's rate-limit budget.
+  //
+  // WHY IT EXISTS. Every remedy this tool offers is followed by up to 24 hours
+  // of the same old failure on screen, because the next scheduled tick is the
+  // only thing that can clear it. Somebody who has just corrected the pin
+  // cannot tell "my fix did not work" from "my fix has not been tried yet" —
+  // and the second is what they are looking at. This is how they find out.
+  //
+  // The guards live in the refresher (checkNow), not here: the busy flags and
+  // the cooldown clock belong next to the schedule they protect. This turns
+  // its answer into a status code — 409 while one is running, 429 while the
+  // cooldown stands, with the wait in the body so the page can say how long.
+  if (req.method === 'POST' && path === '/admin/data-check') {
+    if (!(await adminGate(req, res))) return
+    // POE_DATA_REFRESH_DISABLED is the switch the test suite and a local run
+    // use to keep the process off the network entirely. A button that ignored
+    // it would be a hole straight through that promise.
+    const r = DATA_REFRESH_DISABLED
+      ? { ok: false, ran: false, reason: 'disabled' }
+      : await dataRefresher.checkNow()
+    const code = r.ran ? 200 : (r.running ? 409 : (r.retryAfterMs ? 429 : 503))
+    res.writeHead(code, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+      .end(JSON.stringify({
+        ok: !!r.ran,
+        running: !!r.running,
+        retryAfterMs: r.retryAfterMs ?? null,
+        cooldownMs: dataRefresher.checkNowCooldownMs(),
+        // The fresh status, so the page can redraw the answer it just caused
+        // instead of waiting for the push that reports it.
+        status: dataStatusMsg()
+      }))
+    return
+  }
+
+  // The release check's answer, for any page. OPEN, no admin gate: it carries
+  // the installed version of a public tool and the latest public release, and
+  // the WebSocket message with the same content goes to every connection anyway.
+  if (req.method === 'GET' && path === '/release-status') {
+    res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+      .end(JSON.stringify(releaseCheck.status()))
+    return
+  }
+
+  // Ask GitHub for the latest release now. BEHIND THE ADMIN PASSWORD: it spends
+  // this server's GitHub quota, and the operator is the one who updates the
+  // server. Unlike /admin/data-check it is NOT locked by its disabled flag: the
+  // flag turns the automatic check off, and the button works either way. The
+  // guards (one at a time, 60 s cooldown) live in the check itself; this turns
+  // its answer into a status code — 409 while running, 429 with the wait.
+  if (req.method === 'POST' && path === '/admin/release-check') {
+    if (!(await adminGate(req, res))) return
+    const r = await releaseCheck.checkNow()
+    const code = r.ok ? 200 : (r.running ? 409 : 429)
+    res.writeHead(code, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+      .end(JSON.stringify(r.ok
+        ? { ok: true, status: r.status }
+        : r.running
+          ? { running: true, cooldownMs: releaseCheck.cooldownMs }
+          : { retryAfterMs: r.retryAfterMs, cooldownMs: releaseCheck.cooldownMs }))
+    return
+  }
+
+  // ---- Admin: update (host-update.mjs) -------------------------------------
+  // A SECOND ENDPOINT RATHER THAN A FIELD ON /config-view, deliberately:
+  //
+  //  - /config-view answers what THIS process resolved its configuration to,
+  //    built from our own constants, under one rule with no exceptions —
+  //    nothing secret, in no form, proven by a test that walks the whole
+  //    answer. The update status is the opposite kind of data: three files a
+  //    script on the host writes, one of which holds an excerpt of a build log.
+  //    Folding foreign text into the answer whose whole point is "everything in
+  //    here is ours and safe" would blunt that rule for both of them.
+  //  - it is POLLED. The page reads it once when the admin area opens and then
+  //    every couple of seconds while it waits for the host, where /config-view
+  //    is a one-shot page build.
+  //
+  // Same partition, same header, same check on every request.
+  if (req.method === 'GET' && path === '/update-status') {
+    if (!(await adminGate(req, res))) return
+    res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+      .end(JSON.stringify(await hostUpdate.status()))
+    return
+  }
+
+  // Ask the host to update. This writes a FILE and nothing else — no command
+  // is built here, none is run here, and nothing the caller sends becomes part
+  // of one on the other side either (host-update.mjs, and the head of
+  // deploy/host-update.sh). The only thing recorded besides the time is who
+  // pressed it, and only if it is one of the configured users: the identity
+  // cookie is freely settable, so an unknown value is written as `unknown`
+  // rather than passed through into a file on a shared volume.
+  if (req.method === 'POST' && path === '/update-request') {
+    if (!(await adminGate(req, res))) return
+    const who = parseCookies(req.headers.cookie).ppt_user
+    const result = await hostUpdate.request({ user: users.has(who) ? who : null })
+    if (!result.ok) {
+      res.writeHead(500, { 'content-type': 'application/json' })
+        .end(JSON.stringify({ error: result.error })); return
+    }
+    res.writeHead(200, { 'content-type': 'application/json' })
+      .end(JSON.stringify({ ok: true, requestedAt: result.requestedAt }))
+    return
   }
 
   if (req.method === 'POST' && path === '/item') {
@@ -2320,8 +3787,26 @@ const server = createServer(async (req, res) => {
     }
     const user = hdrName || USERS[0]
     const room = users.get(user)
+    // The parse instance follows the user's client language. Parse-only for
+    // every non-primary language: the wrapper has no trade calls on it at all
+    // (engine-instances.mjs). If that language has no live parser (its data set
+    // is missing from the snapshot), say so — routing the text into the English
+    // parser instead would produce a plausible-looking wrong item, which is the
+    // one outcome this project treats as worse than no result.
+    const parser = engines.parserFor(room.lang)
+    if (!parser) {
+      console.warn(`[server] POST /item: no parser for language "${room.lang}" (user ${user}) — rejecting`)
+      // Counts as a gap, not just as a log line: this is the state in which the
+      // German user gets no card at all, and it is the one he will never
+      // report. From the admin view it is indistinguishable in shape from a
+      // parse failure, which is exactly right — for him it IS one.
+      gapLog.recordParseFailure({ lang: room.lang, text, reason: `no parser for language "${room.lang}"` })
+      res.writeHead(503, { 'content-type': 'application/json' })
+        .end(JSON.stringify({ error: `no parser for language "${room.lang}"`, user, lang: room.lang }))
+      return
+    }
     try {
-      const { item, presets } = await engine.parseItem(text, { league: room.league })
+      const { item, presets } = await parser.parseItem(text, { league: room.league })
       const preset = engine.activePreset(presets)
 
       // Linked sockets: default-active filter (this feature's whole point) —
@@ -2332,7 +3817,16 @@ const server = createServer(async (req, res) => {
       // GGG/engine supports links.min ONLY in this build (no max/colors).
       // Pull mods GGG knows but the bundled stat DB doesn't back into the
       // searchable set (active), BEFORE the fingerprint/card/enqueue below.
-      await spliceResolvedUnknownMods(item, preset)
+      await spliceResolvedUnknownMods(item, preset, room.lang)
+      // What is LEFT in unknownModifiers after the catalogue path had its turn
+      // is a real gap: the card shows the line read-only and the trade search
+      // ignores it, so the price that comes back is the price of a different
+      // item. Recorded per language, because a line that only the German set
+      // misses is a generator problem and one that both miss is an upstream
+      // one — and the view separates them for exactly that reason.
+      for (const um of item.unknownModifiers || []) {
+        if (um?.text) gapLog.recordUnknownMod({ lang: room.lang, text: um.text })
+      }
       pinNearMaxGemLevel(item, preset)
       addBasePercentileFilter(item, preset) // armour: base percentile as an (unticked) filter row
 
@@ -2389,6 +3883,10 @@ const server = createServer(async (req, res) => {
       pushNinjaRef(user, id)                 // F3: send poe.ninja reference price best-effort afterwards
       res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ id, user }))
     } catch (e) {
+      // The engine refused the text. The daemon POSTs fire-and-forget, so this
+      // 400 is read by nobody — the gap log is the only place this ever
+      // surfaces (design doc, section 6).
+      gapLog.recordParseFailure({ lang: room.lang, text, reason: String(e?.message || e) })
       res.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ error: String(e?.message || e) }))
     }
     return
@@ -2419,14 +3917,17 @@ wss.on('connection', (ws, req) => {
   ws.on('error', () => room.clients.delete(ws))
 
   // Opening: user's league + their ratio + their reference + global
-  // queue status + replay of their own items (reconnect).
-  send(ws, { type: 'league-state', active: room.league })
+  // queue status + replay of their own items (reconnect). `lang` rides on the
+  // opening league-state so the page knows, from the cookie identity alone,
+  // which language it is serving (used by the UI string table).
+  send(ws, { type: 'league-state', active: room.league, lang: room.lang })
   send(ws, cdMsgFor(room.league))
   send(ws, refMsgFor(room.league)) // reference rail (currency/lifeforce/beasts)
   send(ws, queueStatusMsg())
   send(ws, rateLimitMsg()) // shared trade-queue ban banner (active or inactive)
   send(ws, { type: 'networth-latest', snapshot: networthSnapshot(user) })
   send(ws, dataStatusMsg()) // M2 status line: freshness of the auto-updated data
+  send(ws, releaseStatusMsg()) // is a newer release of this tool out (status line, settings page)
   // Sync status for the M2 status line (async: reads the credential file).
   networthSyncStatus(user).then(st => send(ws, syncStatusMsg(st))).catch(() => {})
 
@@ -2480,10 +3981,15 @@ wss.on('connection', (ws, req) => {
         broadcast(user, { type: 'league-state', active: room.league })
         // New league -> fetch C:D again, then (exchange cache is warm by then ->
         // no double fetch) fetch reference again + broadcast only to THIS room.
-        refreshCdRatio(lg)
-          .then(() => { broadcast(user, cdMsgFor(lg)); return refreshReference(lg) })
-          .then(() => broadcast(user, refMsgFor(lg)))
-          .catch(() => {})
+        // Same switch as warmLeague: this is the other client-triggered
+        // reference fetch, and one switch has to cover both or "the server
+        // reaches nothing" depends on which message a browser happens to send.
+        if (!REFERENCE_ON_CONNECT_DISABLED) {
+          refreshCdRatio(lg)
+            .then(() => { broadcast(user, cdMsgFor(lg)); return refreshReference(lg) })
+            .then(() => broadcast(user, refMsgFor(lg)))
+            .catch(() => {})
+        }
       }
     } else if (msg.type === 'dismiss') {
       const rec = room.items.get(msg.id)
@@ -2511,8 +4017,10 @@ if (REFERENCE_DISABLED) {
 
 // ---------------------------------------------------------------------------
 // Net-Worth background refresher: syncs ONE stash tab per interval (default
-// 30s) per user into the per-tab store — quiet and continuous, staying far
-// under GGG's rate limit instead of the manual full scan's ~115-request burst
+// 30s) into the per-tab store — one step per tick in TOTAL, walked round-robin
+// across the configured users, NOT one per user (a second user halves each
+// one's turn rate, it does not double the traffic). Quiet and continuous,
+// staying far under GGG's rate limit instead of the manual full scan's ~115-request burst
 // (which is what tripped the 429). Only started when creds exist + the store is
 // writable + it isn't disabled. One tab sync broadcasts the refreshed snapshot
 // into the user's room -> an open page nudges live. The POESESSID cookie never
@@ -2528,13 +4036,20 @@ const networthBootCreds = await loadNetworthUsers({ defaultUser: USERS[0] }).cat
 if (NETWORTH_AUTOSYNC && networthStoreWritable) {
   // One valuator per league — its poe.ninja exchange map is built once and
   // cached (>=15min), so re-using it across ticks keeps the ninja request count
-  // tiny (the whole point of valuator.mjs). Fresh client per tick is fine
-  // (createStashClient does no network at construction; the 30s interval IS the
-  // pacing, so the client's per-request backoff state isn't needed across ticks).
+  // tiny (the whole point of valuator.mjs). A fresh stash client per tick is
+  // still fine — createStashClient does no network at construction, and the
+  // credentials and the league may change between ticks — but the reason it
+  // used to be given for it ("the 30s interval IS the pacing") was wrong for a
+  // folder tab, which spends 1+N requests inside ONE tick and against windows
+  // 30 minutes long. The pacing state therefore no longer lives in the client:
+  // networth/stash-pacer.mjs holds it for the whole process, which is also the
+  // only scope an `Ip` budget can honestly be held at (it is shared across
+  // users). Nothing has to be passed in here for that — a shared default cannot
+  // be forgotten at a call site.
   const valuatorByLeague = new Map()
   const valuatorFor = league => {
     let v = valuatorByLeague.get(league)
-    if (!v) { v = createValuator({ league, deps: { faustusStore, corpseStore, faustusTtlMs: FAUSTUS_TTL_MS } }); valuatorByLeague.set(league, v) }
+    if (!v) { v = createValuator({ league, deps: { faustusStore, corpseStore, faustusTtlMs: FAUSTUS_TTL_MS, faustusMaxAgeMs: FAUSTUS_MAX_AGE_MS } }); valuatorByLeague.set(league, v) }
     return v
   }
   networthRefresher = createNetworthRefresher({
@@ -2553,19 +4068,26 @@ if (NETWORTH_AUTOSYNC && networthStoreWritable) {
     }),
     cdRatioFor: (user, league) => cdMsgFor(league).chaosPerDivine,
     // Broadcast the refreshed snapshot so an open page pulls the new tab in live.
-    onTabSynced: user => {
+    onTabSynced: (user, coverage) => {
       broadcast(user, { type: 'networth-result', snapshot: networthSnapshot(user) })
-      recordNetworthHistory(user) // throttled to <=1 point/min inside
+      // Throttled to <=1 point/min inside, and skipped entirely while the store
+      // has not been past every live tab (coverage.complete === false).
+      recordNetworthHistory(user, coverage)
     },
     // Pause/cooldown entered or lifted -> push the new state to the status line.
     onStatus: user => broadcastSyncStatus(user),
+    // B14: a real trade-API ban holds this path as well. Passed as the live
+    // question rather than as a value — the refresher asks it every tick.
+    isPaused: tradeBanPause,
     intervalMs: NETWORTH_SYNC_INTERVAL_MS,
     listTtlMs: NETWORTH_LIST_TTL_MS,
-    cooldownMs: NETWORTH_COOLDOWN_MS
+    cooldownMs: NETWORTH_COOLDOWN_MS,
+    slowStepMs: NETWORTH_SLOW_STEP_MS
   })
   networthRefresher.start()
-  console.log('[networth] background auto-sync on (interval=%dms listTtl=%dms cooldown=%dms users=%d)',
-    NETWORTH_SYNC_INTERVAL_MS, NETWORTH_LIST_TTL_MS, NETWORTH_COOLDOWN_MS, Object.keys(networthBootCreds).length)
+  console.log('[networth] background auto-sync on (interval=%dms listTtl=%dms cooldown=%dms slowStep=%dms users=%d)',
+    NETWORTH_SYNC_INTERVAL_MS, NETWORTH_LIST_TTL_MS, NETWORTH_COOLDOWN_MS, NETWORTH_SLOW_STEP_MS,
+    Object.keys(networthBootCreds).length)
 }
 
 // One-shot probe for folder tabs (POE_STASH_PROBE=<tabIndex>): runs exactly
@@ -2620,10 +4142,17 @@ await new Promise((resolve) => {
     const actualPort = server.address().port
     console.log(`[server] http + ws on http://localhost:${actualPort}  (ws: /events)`)
     console.log(`[server] serving ${FE_DIR}`)
-    console.log(`[server] users=[${USERS.join(', ')}]  league=${LEAGUE}  maxListings=${MAX_LISTINGS}  cd=${cdMsgFor(LEAGUE).chaosPerDivine} (${cdMsgFor(LEAGUE).trendHint})`)
+    console.log(`[server] users=[${USERS.join(', ')}]  league=${LEAGUE}  maxListings=${maxListings()}  cd=${cdMsgFor(LEAGUE).chaosPerDivine} (${cdMsgFor(LEAGUE).trendHint})`)
     resolve()
   })
 })
+
+// The closing half of the override boot quarantine: from here the start counts
+// as successful, so the next boot must NOT reject /config/overrides.json. Put
+// exactly here — after `listening`, before anything else can throw — because
+// "the server came up" is the only definition of success that stops a restart
+// loop (config-overrides.mjs).
+clearApplyingMarker(configOverrideState)
 
 // Restore a still-running ban gate BEFORE anything can enqueue a search, so a
 // restart mid-ban resumes paused instead of probing GGG (see RATE_LIMIT_STATE).
@@ -2642,19 +4171,40 @@ if (DATA_REFRESH_DISABLED) {
     // in-flight during the few ms of the swap may see mixed old/new lookups —
     // harmless (worst case one odd result), and the alternative would be
     // stalling the whole item pipeline for every update.
-    async onAptData ({ publicDataUrl, previousPublicDataUrl, itemsNdjsonPath }) {
+    async onAptData ({ publicDataUrl, itemsNdjsonPath, languages }) {
+      // A snapshot that does not carry every LIVE language would silently pull
+      // the data root out from under one of the instances. Say so by name
+      // instead of letting it surface as an ENOENT inside the data loader; the
+      // throw is a veto, so the refresher discards the snapshot and the
+      // previous one stays live for both languages.
+      const lost = engines.liveLanguages().filter(l => !(languages || [PRIMARY_LANG]).includes(l))
+      if (lost.length) {
+        throw new Error(`snapshot carries no data/${lost.join(', data/')} — a live parser would lose its data root`)
+      }
       try {
-        await engine.reload({ lang: 'en', publicDataDir: publicDataUrl })
+        // Serial reload of every instance; on failure engine-instances puts
+        // ALL of them back on the previous (validated, still on disk) snapshot
+        // and rethrows, so the refresher discards the new one.
+        await engines.reload({ publicDataDir: publicDataUrl })
       } catch (e) {
-        // Roll back to the previous (validated, still on disk) snapshot so the
-        // engine keeps working; rethrow so the refresher discards the new one.
-        console.warn(`[data-refresh] engine reload failed (${e?.message || e}) — rolling back to the previous data`)
-        await engine.reload({ lang: 'en', publicDataDir: previousPublicDataUrl })
+        console.warn(`[data-refresh] engine reload failed (${e?.message || e}) — rolled back to the previous data`)
         throw e
       }
       itemsIndex = await loadItemsIndex(itemsNdjsonPath)
-      itemNamesPath = itemsNdjsonPath
-      itemNamesJson = null // lazily rebuilt from the new snapshot on next use
+      // Same snapshot, same rebuild: the localized name bridge must never
+      // describe a data set the engine has already left behind, or a corpse
+      // name would be resolved against the wrong league's items.
+      await reloadRefNamesByLang()
+      // Same snapshot again, the other direction: the names the browser prints
+      // must come from the data set the engine now parses with, or the page
+      // shows last week's wording for this week's items.
+      await reloadLocalNamesByLang()
+      // Same reason, one level further: a pair table from the previous snapshot
+      // would translate mod lines for a data set the engine has already left.
+      modTextBridge.reload()
+      // Same reason once more, for the stash-search name universe: every
+      // language's body is lazily rebuilt from the new snapshot on next use.
+      itemNamesJsonByLang.clear()
     },
     // New base-names map: swap it into the (single) Faustus pricer — effective
     // with the next hourly Faustus tick.
@@ -2667,6 +4217,11 @@ if (DATA_REFRESH_DISABLED) {
   })
 }
 
+// ---- Release check: start the daily schedule -------------------------------
+// Always started; the disabled flag is read at each tick (see above), so turning
+// the setting back on needs no restart. Tests keep it off via QUIET_ENV.
+releaseCheck.start()
+
 // ---------------------------------------------------------------------------
 // Test/integration exports. Minimal refactor for task 8 (server integration
 // lets tests drive the three-tier queue
@@ -2674,4 +4229,6 @@ if (DATA_REFRESH_DISABLED) {
 // HTTP/WS requests. The existing price path remains untouched by this —
 // these exports are purely additive (no existing function changed).
 // ---------------------------------------------------------------------------
-export { server, enqueue, enqueueBackground, pump, jobs, bgJobs, users, dataRefresher, LEAGUE, leaguesToRefresh, positiveEnvInt, networthStore, networthHistory, networthRefresher, referenceHistory, refreshReference, faustusStore, faustusRefresher, corpseStore, corpsePricer, corpseTradeClient, rateLimitMsg, noteRateLimit, clearRateLimit, rateLimitSeconds, maxLinkGroup, LINKS_MOD_TEXT, modsOf, buildItemAdded, applySelection, selectionOf, itemAddedFor, toNinjaPriceResult, toPriceResult, withExchangeMain, faustusChaosFor, faustusRangeFor }
+export { gapLog, langSkew, adminAuth, ADMIN_PASSWORD_PATH, modTextBridge }
+export { userLangStore, setUserLang, availableLangs, configOverrideState, runtimeConfigEntries }
+export { server, enqueue, enqueueBackground, pump, jobs, bgJobs, users, dataRefresher, engines, LANG_BY_USER, LEAGUE, leaguesToRefresh, networthStore, networthHistory, networthRefresher, referenceHistory, refreshReference, faustusStore, faustusRefresher, corpseStore, corpsePricer, corpseTradeClient, rateLimitMsg, noteRateLimit, clearRateLimit, rateLimitSeconds, tradeBanPause, maxLinkGroup, LINKS_MOD_TEXT, splitRollRanges, spliceResolvedUnknownMods, modsOf, buildItemAdded, applySelection, selectionOf, itemAddedFor, toNinjaPriceResult, toPriceResult, withExchangeMain, faustusChaosFor, faustusRangeFor, faustusStaleHoursFor, ninjaBulkPrice, ninjaRefFor, priceKeyOf, collectCorpseNames, englishCorpseName, loadLocalNamesByRefName, localNamesByLang, itemNameMapJson }

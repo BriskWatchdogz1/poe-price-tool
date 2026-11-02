@@ -12,6 +12,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createServer } from 'node:net'
 import WebSocket from 'ws'
+import { QUIET_ENV } from '../test-quiet-env.mjs'
 
 const ROOT = fileURLToPath(new URL('../../..', import.meta.url))
 const CHROME = process.env.CHROME_BIN || 'google-chrome-stable'
@@ -77,6 +78,10 @@ test('a collapsed group stays collapsed: re-render and reload', { timeout: 120_0
     cwd: ROOT,
     env: {
       ...process.env,
+      // The full set that keeps a booted server off the network — one list,
+      // imported, because every file that wrote it out by hand got it wrong.
+      // Spread first, so anything below may still override it deliberately.
+      ...QUIET_ENV,
       PORT: String(port),
       POE_USERS: 'player1,player2',
       POE_NETWORTH_STORE: join(tmp, 'networth-store.json'),

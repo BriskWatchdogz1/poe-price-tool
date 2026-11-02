@@ -3,7 +3,8 @@ import assert from 'node:assert/strict'
 import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { createNetworthHistory, downsample, RANGES } from './history.mjs'
+import { createNetworthHistory, downsample, foldSources, RANGES } from './history.mjs'
+import { createPriceGuard } from './price-guard.mjs'
 
 async function tmpFile (name = 'networth-history.ndjson') {
   const dir = await mkdtemp(join(tmpdir(), 'nwhist-'))
@@ -300,4 +301,141 @@ test('file size stays bounded (48h x 1/min, with item deltas)', async () => {
   const wire = JSON.stringify(h.series('player1', RANGES['24h'], { at: c.now() })).length
   console.log(`[size] 24h payload: ${(wire / 1024).toFixed(0)} KB`)
   assert.ok(wire < 120 * 1024, `payload ${(wire / 1024).toFixed(0)} KB`)
+})
+
+// --- a point belongs to a COMPLETED sync ------------------------------------
+// The snapshot handed in is the union of whatever the per-tab store holds, and
+// the refresher fills that store one tab per tick. Between an empty (or freshly
+// pruned) store and the end of the first round-robin pass, that union is a sum
+// over a subset of the account — a dip in the curve that no stock movement
+// explains. See the note on append().
+test('no point is written while the sync behind it is still incomplete', async () => {
+  const c = clock()
+  const file = await tmpFile()
+  const h = createNetworthHistory(file, { now: c.now })
+  await h.load()
+
+  assert.equal(await h.append('player1', { totalChaos: 4000, cdRatio: 200, syncComplete: false }), false)
+  assert.equal(h.points.length, 0)
+  assert.equal(h.lastAt('player1'), null, 'a refused point must not consume the throttle either')
+  await assert.rejects(readFile(file, 'utf8'), 'nothing was written to disk')
+
+  assert.equal(await h.append('player1', { totalChaos: 20000, cdRatio: 200, syncComplete: true }), true)
+  assert.equal(h.points.length, 1)
+  assert.equal(h.points[0].c, 20000, 'the first recorded point is the complete one, not the partial sum')
+})
+
+test('a caller that cannot tell whether the sync finished still records', async () => {
+  const c = clock()
+  const h = createNetworthHistory(await tmpFile(), { now: c.now })
+  await h.load()
+  assert.equal(await h.append('player1', { totalChaos: 100, cdRatio: 200 }), true)
+  c.advance(60_000)
+  assert.equal(await h.append('player1', { totalChaos: 100, cdRatio: 200, syncComplete: true }), true)
+})
+
+// --- what the price guard is told about a point -----------------------------
+test('the guard gets this point rate and the source of every price', async () => {
+  const c = clock()
+  const seen = []
+  const h = createNetworthHistory(await tmpFile(), {
+    now: c.now,
+    priceGuard: {
+      apply: (user, prevMap, curMap, prevTotal, opts) => {
+        seen.push({ user, prevTotal, opts })
+        return { items: curMap, adjust: 0, notes: [] }
+      }
+    }
+  })
+  await h.load()
+  const items = [
+    { name: 'The Twilight Moon', qty: 1, chaosTotal: 11702.4, source: 'exchange:DivinationCard' },
+    { name: 'Divine Orb', qty: 40, chaosTotal: 8480, source: 'exchange' }
+  ]
+  await h.append('player1', { totalChaos: 20182.4, cdRatio: 212, items })
+  c.advance(60_000)
+  await h.append('player1', { totalChaos: 20182.4, cdRatio: 212, items })
+
+  assert.equal(seen.length, 1, 'the first point has no predecessor to diff against')
+  assert.equal(seen[0].prevTotal, 20182.4)
+  assert.equal(seen[0].opts.cdRatio, 212)
+  assert.equal(seen[0].opts.sourceOf.get('The Twilight Moon'), 'exchange:DivinationCard')
+  assert.equal(seen[0].opts.sourceOf.get('Divine Orb'), 'exchange')
+})
+
+test('foldSources: one name priced from two feeds names both, sorted', () => {
+  const m = foldSources([
+    { name: 'Chaos Orb', qty: 1, chaosTotal: 1, source: 'faustus' },
+    { name: 'Chaos Orb', qty: 1, chaosTotal: 1, source: 'exchange' },
+    { name: 'Chaos Orb', qty: 1, chaosTotal: 1, source: 'faustus' },
+    { name: 'Nameless', qty: 1, chaosTotal: 1 }
+  ])
+  assert.equal(m.get('Chaos Orb'), 'exchange+faustus')
+  assert.equal(m.has('Nameless'), false, 'a row without a source contributes nothing')
+  assert.equal(foldSources(null).size, 0)
+})
+
+// --- a withheld arrival is released as STOCK, not as a price move ------------
+// Driven against the real price guard, not a stub: these two are the whole
+// point of the withholding, and both of them were broken by it.
+const CD = 212
+const SILENT = () => {}
+const realGuard = now => createPriceGuard({ now, maxHoldMs: 6 * 3600e3, log: SILENT })
+
+test('the moment the guard accepts a withheld arrival, the events list says so', async () => {
+  const c = clock()
+  const REST = 94 * CD                     // ~19,928c — the account of the live case
+  const FIND = 25 * CD                     // 5,300c — a genuine 25 divine find
+  const h = createNetworthHistory(await tmpFile(), { now: c.now, priceGuard: realGuard(c.now) })
+  await h.load()
+  const rest = [{ name: 'Rest', qty: 1, chaosTotal: REST, source: 'faustus' }]
+  const found = [...rest, { name: 'Big Unique', qty: 1, chaosTotal: FIND, source: 'faustus' }]
+
+  await h.append('player1', { totalChaos: REST, cdRatio: CD, items: rest })
+  c.advance(60_000)
+  await h.append('player1', { totalChaos: REST + FIND, cdRatio: CD, items: found })
+  assert.equal(h.points.at(-1).c, REST, 'the arrival is withheld — that part works')
+  c.advance(6 * 3600e3)
+  await h.append('player1', { totalChaos: REST + FIND, cdRatio: CD, items: found })
+  assert.equal(h.points.at(-1).c, REST + FIND, '…and is accepted after the hold window')
+
+  // The stored row must carry the value on the QUANTITY side: the stock was
+  // never counted before, so this is an inflow, not a revaluation.
+  assert.deepEqual(h.points.at(-1).d.i, [['Big Unique', 1, FIND, 0]])
+
+  const ev = h.events('player1', 7 * 3600e3)
+  const rows = ev.events.flatMap(e => e.items).filter(r => r[0] === 'Big Unique')
+  assert.equal(rows.length, 1, 'a 25 divine find is in no event list at all')
+  assert.deepEqual(rows[0], ['Big Unique', 1, FIND])
+})
+
+test('a real find the guard held back is not deleted as a spike on the next start', async () => {
+  const c = clock()
+  const REST = 4 * CD                      // 848c — a small, early-league account
+  const FIND = 21 * CD                     // 4,452c — 6.25x that account when it lands
+  const file = await tmpFile()
+  const h = createNetworthHistory(file, { now: c.now, priceGuard: realGuard(c.now) })
+  await h.load()
+  const rest = [{ name: 'Rest', qty: 1, chaosTotal: REST }]
+  const found = [...rest, { name: 'Big Unique', qty: 1, chaosTotal: FIND }]
+  const step = async (ms, items, chaos) => {
+    c.advance(ms)
+    await h.append('player1', { totalChaos: chaos, cdRatio: CD, items })
+  }
+
+  await h.append('player1', { totalChaos: REST, cdRatio: CD, items: rest })
+  await step(60_000, found, REST + FIND)          // arrives -> withheld
+  await step(6 * 3600e3, found, REST + FIND)      // stood the window -> accepted
+  await step(31 * 60_000, found, REST + FIND)     // kept for half an hour
+  await step(60_000, rest, REST)                  // and traded away
+  await step(60_000, rest, REST)
+  assert.equal(h.points.length, 6)
+
+  // Next start: load() runs the retro-cleanup over what is on disk. The wealth
+  // rose 6x and fell straight back inside 31 minutes, so the only thing that
+  // separates it from the Scavenger artefact is that stock moved — which is
+  // exactly what the release has to record.
+  const again = createNetworthHistory(file, { now: c.now, priceGuard: realGuard(c.now) })
+  await again.load()
+  assert.equal(again.points.length, 6, 'pruneSpikes deleted points a real find explains')
 })

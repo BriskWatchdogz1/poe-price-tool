@@ -36,7 +36,11 @@
 //     requests EACH of our consumers made inside the offending window.
 
 import { AsyncLocalStorage } from 'node:async_hooks'
-import { parseRateLimitHeaders } from './networth/stash-client.mjs'
+// The header parser only — NOT out of networth/stash-client.mjs, where it used
+// to come from: that made the trade path import the whole net-worth stack, and
+// once the stash client learnt to read a numeric setting it closed an import
+// cycle through data-refresher.mjs. See rate-limit-headers.mjs.
+import { parseRateLimitHeaders } from './rate-limit-headers.mjs'
 
 export const CONSUMER = Object.freeze({
   PRICE_CHECK: 'price-check',

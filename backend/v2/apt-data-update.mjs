@@ -25,15 +25,20 @@ import path from 'node:path'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const RENDERER_DIR = path.join(HERE, '../../renderer')
-const DATA_DIR = path.join(RENDERER_DIR, 'public/data/en')
+// This script only ever touches the ENGLISH set — that is the one with an
+// upstream. The German set is generated locally from the game data and is
+// never fetched or overwritten from here (its client_strings.js is hand
+// written and checked in).
+const UPSTREAM_LANG = 'en'
+const DATA_DIR = path.join(RENDERER_DIR, `public/data/${UPSTREAM_LANG}`)
 
-// Upstream is the APT repo's master branch. Only the `en` snapshot is vendored:
-// the backend runs the engine with the English data set (engine.mts), the other
+// Upstream is the APT repo's master branch. Only the `en` snapshot has one:
+// the localized set this tool serves is built locally, and the remaining
 // language dirs under renderer/public/data are dead weight we never read.
 // Exported: the background data refresher (data-refresher.mjs) pulls from the
 // same upstream — one source of truth for URL and file list.
 export const UPSTREAM_BASE =
-  'https://raw.githubusercontent.com/SnosMe/awakened-poe-trade/master/renderer/public/data/en'
+  `https://raw.githubusercontent.com/SnosMe/awakened-poe-trade/master/renderer/public/data/${UPSTREAM_LANG}`
 
 // The four SOURCE files. The *.index.bin next to them are NOT listed on purpose:
 // they are generated from these (make-index-files.mjs, see regenerateIndices),
@@ -123,7 +128,9 @@ async function readIfPresent (file) {
 }
 
 /**
- * Regenerates the *.index.bin files from the freshly written ndjson. The
+ * Regenerates the *.index.bin files from the freshly written ndjson — for
+ * every language dir that HAS one, so a locally generated data/de gets fresh
+ * indices too instead of keeping offsets into the old English file. The
  * upstream script uses relative paths (./public/data/...), so it has to start
  * from within renderer/, and it needs renderer's devDependency @sindresorhus/
  * fnv1a. A missing renderer/node_modules is a warning, not an error: the

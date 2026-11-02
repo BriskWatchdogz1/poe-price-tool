@@ -1,0 +1,478 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Settings — Path of Exile</title>
+  <link rel="stylesheet" href="styles.css">
+  <style>
+    /* ---------- Settings — page-local styling, reuses styles.css vars ----------
+       The tool had no settings page. The net-worth sync credentials lived in a
+       modal on the Net Worth page and the gap view had nowhere to live at all;
+       both are here now, so there is ONE place where something gets configured
+       and ONE place where the tool reports what it could not do.
+
+       Two sections, deliberately unequal in weight: sync settings are for the
+       user, the admin area is for whoever runs the box — which is why it sits
+       below and behind a password. */
+
+    .main{padding:0 0 40px; display:flex; flex-direction:column;}
+    .mhead{position:static; padding-left:22px; padding-right:22px; margin-bottom:0;}
+    .statusline{margin:0 22px 12px;}
+
+    .sect{margin:0 22px 26px; padding-top:16px; border-top:1px solid var(--border-soft);}
+    .sect:first-of-type{border-top:0; padding-top:4px;}
+    .sect h2{font-size:16px; font-weight:650; letter-spacing:.02em; margin:0 0 6px;}
+    .sect .lead{font-size:12.5px; color:var(--faint); line-height:1.55; margin:0 0 14px; max-width:70ch;}
+    .form{max-width:440px;}
+    .form .setstate{font-family:var(--mono); font-size:12.5px; color:var(--muted); margin:0 0 16px; line-height:1.45;}
+    .form .setstate.warn{color:var(--warn);}
+    .form label{display:block; font-size:12px; letter-spacing:.06em; text-transform:uppercase;
+      color:var(--faint); margin:0 0 12px;}
+    .form label input,.form label select{display:block; width:100%; margin-top:5px; font-family:var(--mono); font-size:13.5px;
+      color:var(--text); background:var(--sunk); border:1px solid var(--border); border-radius:8px; padding:8px 10px;}
+    .form label input:focus-visible,.form label select:focus-visible{outline:2px solid var(--chaos); outline-offset:1px;}
+    .form label select:disabled{opacity:.6; cursor:not-allowed;}
+    .form .sethint{font-size:12px; color:var(--warn); margin:-6px 0 12px; line-height:1.45;}
+    .form .seterr{font-size:12.5px; color:#e69a93; margin:0 0 12px; line-height:1.45;}
+    .form .sethint[hidden],.form .seterr[hidden]{display:none;}
+    .form .setnote{font-size:11.5px; color:var(--faint); margin:14px 0 0; line-height:1.5; max-width:70ch;}
+    .btnrow{display:flex; align-items:center; gap:10px; margin-top:4px;}
+    .btnrow button{font:inherit; font-size:13.5px; border-radius:8px; padding:7px 16px; cursor:pointer;
+      background:transparent; border:1px solid var(--border); color:var(--muted);}
+    .btnrow button:hover{border-color:#3a4650; color:var(--text);}
+    .btnrow button.primary{background:rgba(82,200,174,.14); border-color:var(--chaos-deep); color:var(--chaos); font-weight:600;}
+    .btnrow button.primary:hover{border-color:var(--chaos);}
+    .btnrow button:disabled{opacity:.55; cursor:default;}
+    .btnrow .ok{font-size:12.5px; color:var(--chaos);}
+    .btnrow .ok[hidden]{display:none;}
+
+    /* ---- admin ---- */
+    .admgate{max-width:440px;}
+    .admgate .gatenote{font-size:11.5px; color:var(--faint); margin:12px 0 0; line-height:1.5; max-width:70ch;}
+    .admview[hidden]{display:none;}
+    .admmeta{font-family:var(--mono); font-size:11.5px; color:var(--faint); margin:0 0 18px; line-height:1.6;}
+    .admblock{margin:0 0 26px;}
+    .admblock h3{font-size:13px; font-weight:600; margin:0 0 4px;}
+    .admblock .note{display:block; font-size:11.5px; color:var(--faint); line-height:1.5; margin:0 0 10px; max-width:80ch;}
+    .admblock .empty{font-size:12.5px; color:var(--faint);}
+    .admlang{font-size:11px; letter-spacing:.16em; text-transform:uppercase; color:var(--muted); margin:14px 0 6px;}
+    table.admtab{width:100%; border-collapse:collapse; font-size:12.5px;}
+    table.admtab th{text-align:left; font-weight:500; font-size:11px; letter-spacing:.09em; text-transform:uppercase;
+      color:var(--faint); padding:4px 10px 4px 0; border-bottom:1px solid var(--border-soft);}
+    table.admtab td{padding:5px 10px 5px 0; border-bottom:1px solid var(--border-soft); vertical-align:top;}
+    table.admtab td.n{font-family:var(--mono); text-align:right; width:64px; color:var(--text);}
+    table.admtab td.t{font-family:var(--mono); word-break:break-word;}
+    table.admtab td.r{color:var(--muted); word-break:break-word;}
+    table.admtab td.w{font-family:var(--mono); color:var(--faint); white-space:nowrap; width:130px;}
+    .admsample{margin:4px 0 0; font-size:11.5px; color:var(--faint);}
+    .admsample summary{cursor:pointer;}
+    .admsample pre{margin:4px 0 0; white-space:pre-wrap; word-break:break-word; font-size:11.5px; color:var(--muted);}
+    .admdrop{font-size:11.5px; color:var(--warn); margin:8px 0 0;}
+    .skewrow{display:flex; gap:12px; align-items:baseline; padding:4px 0; font-size:12.5px;
+      border-bottom:1px solid var(--border-soft);}
+    .skewrow .k{flex:1; min-width:0;}
+    .skewrow .v{font-family:var(--mono); color:var(--muted);}
+    .skewrow.warn .v{color:var(--warn);}
+    .skewhead{font-size:12.5px; margin:12px 0 6px;}
+    .skewhead.warn{color:var(--warn);}
+    .skewhead.ok{color:var(--chaos);}
+
+    /* ---- admin: server settings ----
+       The table carries three things a bare form would not: where the value
+       came from, whether it is doing anything yet, and whether it is quietly
+       beating the compose file. Each of those is a coloured line under the
+       name, not a column, so a healthy row stays quiet. */
+    .cfgalarm{border:1px solid #7a3b36; border-left-width:3px; border-radius:8px; background:rgba(217,112,102,.09);
+      padding:12px 14px; margin:0 0 18px;}
+    .cfgalarm h3{font-size:13px; font-weight:650; color:#e69a93; margin:0 0 6px;}
+    .cfgalarm p{font-size:12.5px; color:var(--text); line-height:1.55; margin:0 0 6px; max-width:80ch;}
+    .cfgalarm ul{margin:6px 0 0 18px; font-size:12.5px; color:var(--muted); line-height:1.55;}
+    /* Same shape as the alarm, warn-coloured: this one says "decide something",
+       not "something is broken". */
+    .cfgwarn{border:1px solid #7a6a36; border-left-width:3px; border-radius:8px; background:rgba(217,180,102,.09);
+      padding:12px 14px; margin:0 0 18px;}
+    .cfgwarn h3{font-size:13px; font-weight:650; color:var(--warn); margin:0 0 6px;}
+    .cfgwarn p{font-size:12.5px; color:var(--text); line-height:1.55; margin:0; max-width:80ch;}
+    .cfgpath{font-family:var(--mono); font-size:11.5px; color:var(--faint); margin:0 0 10px; word-break:break-all;}
+    .cfgpend{font-size:12.5px; color:var(--warn); margin:0 0 10px;}
+    .cfgpend[hidden],.cfgmsg[hidden],.cfgstate[hidden]{display:none;}
+    .cfgmsg{font-size:12.5px; color:var(--chaos); margin:10px 0 0;}
+    .cfgmsg.bad{color:#e69a93;}
+    .cfggroup{font-size:11px; letter-spacing:.16em; text-transform:uppercase; color:var(--muted); margin:16px 0 6px;}
+    table.cfgtab{width:100%; border-collapse:collapse; font-size:12.5px;}
+    table.cfgtab th{text-align:left; font-weight:500; font-size:11px; letter-spacing:.09em; text-transform:uppercase;
+      color:var(--faint); padding:4px 12px 4px 0; border-bottom:1px solid var(--border-soft);}
+    table.cfgtab td{padding:9px 12px 9px 0; border-bottom:1px solid var(--border-soft); vertical-align:top;}
+    table.cfgtab td:last-child,table.cfgtab th:last-child{padding-right:0;}
+    table.cfgtab .k{font-family:var(--mono); color:var(--text); word-break:break-all;}
+    table.cfgtab .d{display:block; font-family:var(--sans); color:var(--muted); font-size:12px; line-height:1.5;
+      margin-top:4px; max-width:62ch;}
+    table.cfgtab td.val{width:210px;}
+    table.cfgtab td.src{width:190px; color:var(--muted);}
+    table.cfgtab td.act{width:104px; text-align:right;}
+    .cfgtab input[type=text],.cfgtab input[type=number],.cfgtab select{width:100%; font-family:var(--mono); font-size:12.5px;
+      color:var(--text); background:var(--sunk); border:1px solid var(--border); border-radius:7px; padding:6px 8px;}
+    .cfgtab input:focus-visible,.cfgtab select:focus-visible{outline:2px solid var(--chaos); outline-offset:1px;}
+    .cfgbool{display:flex; align-items:center; gap:8px; font-family:var(--mono); color:var(--muted);}
+    .cfgbool input{width:16px; height:16px; accent-color:var(--chaos);}
+    .cfgtab button.reset{font:inherit; font-size:12px; border-radius:7px; padding:5px 10px; cursor:pointer;
+      background:transparent; border:1px solid var(--border); color:var(--muted);}
+    .cfgtab button.reset:hover{border-color:#3a4650; color:var(--text);}
+    /* The settings that decide how much traffic goes out. Set off from the rest
+       on purpose: a number somebody turns up out of curiosity here is answered
+       by GGG with a rate limit, so it must not sit flush against the display
+       name and the league picker as though it were the same kind of dial. */
+    .cfgtraffic{margin-top:26px; padding-top:14px; border-top:1px solid var(--border-soft);}
+    .cfgtraffic h4{font-size:12.5px; font-weight:600; margin:0 0 4px; color:var(--warn);}
+    .cfgtraffic > .note{display:block; font-size:11.5px; color:var(--faint); line-height:1.55; margin:0; max-width:80ch;}
+    .cfgtraffic .cfggroup{margin-top:14px;}
+    .cfgflag{display:block; font-size:11.5px; line-height:1.5; margin-top:6px; max-width:62ch;}
+    .cfgflag.traffic{color:var(--warn);}
+    .cfgflag.shadow{color:var(--warn);}
+    .cfgflag.pending{color:var(--warn);}
+    .cfgflag.invalid{color:#e69a93;}
+    .cfgflag.def{color:var(--faint); font-family:var(--mono);}
+    .cfgrestart{margin-top:22px; padding-top:14px; border-top:1px solid var(--border-soft);}
+    .cfgrestart h4{font-size:12.5px; font-weight:600; margin:0 0 4px;}
+    .cfgrestart .note{display:block; font-size:11.5px; color:var(--faint); line-height:1.5; margin:0 0 10px; max-width:80ch;}
+    .cfgstate{font-size:12.5px; color:var(--warn);}
+    .cfgstate.ok{color:var(--chaos);}
+    .cfgstate.bad{color:#e69a93;}
+    /* Update: a block of its own, so it cannot be mistaken for a second flavour
+       of the restart button right above it. */
+    .updbuild{font-size:11.5px; font-family:var(--mono); color:var(--muted); margin:0 0 8px; word-break:break-all;}
+    .updsetup{font-size:11.5px; color:var(--warn); line-height:1.5; margin:0 0 10px; max-width:80ch;}
+    /* Louder than .updsetup on purpose: "not set up" is a state an installation
+       can sit in forever without harm, "stuck" is one somebody has to fix. */
+    .updstuck{font-size:11.5px; color:#e69a93; line-height:1.5; margin:0 0 10px; max-width:80ch;}
+    /* Releases block (visible without the admin password) and its button. */
+    .relline{font-size:12.5px; color:var(--muted); line-height:1.55; margin:0 0 6px; max-width:80ch;}
+    .relline.newer{color:var(--chaos);}
+    .relline.bad{color:var(--warn);}
+    .relline a{color:inherit; margin-left:6px;}
+    .relpointer{font-size:11.5px; color:var(--faint); line-height:1.5; margin:10px 0 0; max-width:80ch;}
+    .relpointer a{color:inherit;}
+    .updlast{font-size:11.5px; color:var(--faint); line-height:1.5; margin:10px 0 0; max-width:80ch;}
+    /* The host's build output, and the sentence that says how far its filtering
+       goes. Scrolls rather than stretching the page, and wraps rather than
+       reaching sideways. */
+    .updoutnote{font-size:11px; color:var(--faint); line-height:1.5; margin:10px 0 0; max-width:80ch;}
+    .updout{margin:10px 0 0; padding:10px 12px; max-height:260px; overflow:auto;
+      background:var(--bg-sunken,rgba(0,0,0,.25)); border:1px solid var(--border-soft);
+      border-radius:4px; font-family:var(--mono); font-size:11px; line-height:1.5;
+      color:var(--muted); white-space:pre-wrap; overflow-wrap:anywhere;}
+    .rtrow{display:flex; gap:12px; align-items:baseline; padding:4px 0; font-size:12.5px;
+      border-bottom:1px solid var(--border-soft);}
+    .rtrow .k{flex:0 0 44%; font-family:var(--mono); color:var(--muted); word-break:break-all;}
+    .rtrow .v{flex:1; min-width:0; font-family:var(--mono); color:var(--text); word-break:break-all;}
+
+    @media (max-width:900px){
+      table.cfgtab td.val,table.cfgtab td.src,table.cfgtab td.act{width:auto;}
+    }
+
+    @media (max-width:600px){
+      .mhead,.statusline,.sect{padding-left:14px; padding-right:14px;}
+      .statusline{margin-left:0; margin-right:0;}
+    }
+  </style>
+</head>
+<body>
+<div class="app">
+  <!-- RAIL — identical slots on every page (see shell.js) -->
+  <aside class="rail">
+    <div class="logo">
+      <span class="sq"></span>
+      <div><b>Trade Console</b><span data-i18n="app.subtitle">Path of Exile</span></div>
+      <div class="navlinks">
+        <button class="whoami" id="whoami" type="button" title="Switch user" data-i18n-title="nav.switchUser" hidden>
+          <span id="whoamiName">—</span><span class="caret">▾</span>
+        </button>
+        <a class="backlink" href="/" data-i18n="nav.pricecheck">Price Check</a>
+        <a class="backlink" href="/networth.html" data-i18n="nav.networth">Net Worth</a>
+        <a class="backlink" href="/history.html" data-i18n="nav.history">History</a>
+        <span class="backlink on" aria-current="page" data-i18n="nav.settings">Settings</span>
+      </div>
+    </div>
+
+    <div class="leaguebar">
+      <label for="leagueSel" data-i18n="rail.league">League</label>
+      <select id="leagueSel" aria-label="Active league" data-i18n-aria="rail.leagueAria"><option>Standard</option></select>
+    </div>
+
+    <div class="cd">
+      <div class="cap" data-i18n="rail.cdCap">Chaos → Divine</div>
+      <div class="rate"><span class="v" id="cdValue">—</span><span class="u" data-i18n="rail.cdUnit">chaos / div</span></div>
+      <div class="conv"><span class="d" data-i18n="rail.cdOneDivine">1 Divine</span> = <span class="c" id="cdConv">—</span> <span data-i18n="rail.cdChaos">Chaos</span></div>
+      <svg class="spark" viewBox="0 0 240 34" preserveAspectRatio="none" aria-hidden="true">
+        <defs><linearGradient id="sg" x1="0" x2="0" y1="0" y2="1">
+          <stop offset="0" stop-color="#e4bb52" stop-opacity=".28"/><stop offset="1" stop-color="#e4bb52" stop-opacity="0"/>
+        </linearGradient></defs>
+        <path id="cdArea" d="M0,24 L240,11 L240,34 L0,34 Z" fill="url(#sg)"/>
+        <path id="cdLine" d="M0,24 L240,11" fill="none" stroke="#e4bb52" stroke-width="1.5"/>
+        <circle id="cdDot" cx="240" cy="11" r="2.4" fill="#e4bb52"/>
+      </svg>
+      <div class="foot"><span data-i18n="rail.cdLive">live ratio</span><span class="up" id="cdTrend">—</span></div>
+    </div>
+  </aside>
+
+  <!-- MAIN -->
+  <main class="main">
+    <div class="mhead">
+      <h1 data-i18n="set.heading">Settings</h1>
+      <span class="conn" id="conn"><span class="cdot"></span><span id="connlbl" data-i18n="conn.connecting">connecting…</span></span>
+    </div>
+    <div class="statusline" id="appStatus" role="status" hidden></div>
+
+    <!-- ---- Client language (the user's own setting, no password) -------------
+         FIRST on the page on purpose. It decides whether a pasted item is
+         understood at all — a wrong value here produces silence, not a wrong
+         price — while the sync credentials below only feed the optional
+         net-worth tracker. The thing that can break the main feature goes
+         where it is read without scrolling. -->
+    <section class="sect">
+      <h2 data-i18n="lang.title">Client language</h2>
+      <p class="lead" data-i18n="lang.lead">Pick the language your game client runs in — the language of the item
+        text you copy. This is not a setting for the language of this website; the pages follow it, but that is a
+        side effect. Get it wrong and your item is not priced wrongly, it is not recognised at all: no card turns
+        up here, and the game itself tells you nothing.</p>
+      <div class="form">
+        <label for="langSel"><span data-i18n="lang.label">Language of your game client</span>
+          <select id="langSel" disabled></select>
+        </label>
+        <p class="sethint" id="langOnly" hidden></p>
+        <p class="seterr" id="langErr" hidden></p>
+        <div class="btnrow">
+          <span class="ok" id="langOk" data-i18n="set.saved" hidden>saved</span>
+        </div>
+        <p class="setnote" id="langNote" hidden></p>
+      </div>
+    </section>
+
+    <!-- ---- Net-Worth sync credentials (was a modal on the Net Worth page) ----
+         The POESESSID field is always empty — the stored value is never
+         delivered to the browser in any form. Empty submit = keep the stored
+         cookie. -->
+    <section class="sect">
+      <h2 data-i18n="nw.syncSettings">Sync settings</h2>
+      <div class="form">
+        <p class="setstate" id="setState" data-i18n="nw.setLoading">Loading…</p>
+        <label><span data-i18n="nw.setAccount">Account name</span>
+          <input id="setAccount" type="text" autocomplete="off" spellcheck="false" placeholder="Name#1234">
+        </label>
+        <label><span data-i18n="nw.setSessid">POESESSID</span>
+          <input id="setSessid" type="password" autocomplete="off" spellcheck="false"
+                 placeholder="leave empty to keep the stored one" data-i18n-ph="nw.setSessidPh">
+        </label>
+        <p class="sethint" id="setHint" hidden></p>
+        <p class="seterr" id="setErr" hidden></p>
+        <div class="btnrow">
+          <button id="setSave" type="button" class="primary" data-i18n="nw.setSave">Save</button>
+          <span class="ok" id="setOk" data-i18n="set.saved" hidden>saved</span>
+        </div>
+        <p class="setnote" id="setNote" data-i18n="nw.setNote">The stored POESESSID is never shown here — not even masked.
+          To renew it, paste a new one; leaving the field empty keeps the stored value.
+          Saving takes effect on the next background sync tick, no restart needed.</p>
+      </div>
+    </section>
+
+    <!-- ---- Releases: which version runs here, which one is out ----------------
+         In the part everybody sees, not behind the password: the installed
+         version of a public tool and the latest public release are not secrets,
+         and the status line on every page sends people HERE. The button that
+         spends the server's GitHub request budget is in the admin area below. -->
+    <section class="sect" id="relBlock">
+      <h2 data-i18n="rel.title">Releases</h2>
+      <p class="relline" id="relInstalled"></p>
+      <p class="relline" id="relLatest"></p>
+      <p class="relline" id="relLastCheck"></p>
+      <p class="relpointer" id="relPointer"></p>
+    </section>
+
+    <!-- ---- Admin area (design doc, section 6) ----
+         Behind a plaintext password from a file on the server. The value is
+         held in sessionStorage and sent on every request; there is no session
+         on the server and nothing to expire. -->
+    <section class="sect">
+      <h2 data-i18n="set.adminTitle">Admin area</h2>
+      <p class="lead" data-i18n="set.adminLead">For whoever runs the server: the settings this installation can
+        change while it is running, a restart button, and what the tool could not do — texts it failed to parse,
+        mod lines it could not resolve, and how far a localized data set has fallen behind English. Nothing here
+        is needed to play.</p>
+
+      <div class="admgate form" id="admGate">
+        <label><span data-i18n="set.adminPassword">Admin password</span>
+          <input id="admPass" type="password" autocomplete="off" spellcheck="false">
+        </label>
+        <p class="seterr" id="admErr" hidden></p>
+        <div class="btnrow">
+          <button id="admOpen" type="button" class="primary" data-i18n="set.adminOpen">Open</button>
+        </div>
+        <p class="gatenote" data-i18n="set.adminGateNote">One plaintext password from a file on the server
+          (default: admin). This is a partition, not a security mechanism — it keeps the ordinary user out of a
+          view that is none of their business.</p>
+      </div>
+
+      <div class="admview" id="admView" hidden>
+        <div class="btnrow" style="margin-bottom:14px">
+          <button id="admReload" type="button" data-i18n="set.adminReload">Reload</button>
+          <button id="admClose" type="button" data-i18n="set.adminClose">Close</button>
+        </div>
+        <!-- Alarm slot. Nothing in it while the overrides are healthy; when the
+             last start died on them it is the first thing in the area, because
+             everything below it is then describing a configuration that is NOT
+             running. -->
+        <div id="cfgAlarm"></div>
+        <!-- Second slot, under the alarm: the admin password is still the one
+             printed in this repository. Not an alarm about something broken — a
+             warning about a decision nobody has made yet, and it belongs here
+             because the restart button and the configuration below it are what
+             that password stands in front of. -->
+        <div id="cfgPwWarn"></div>
+
+        <p class="admmeta" id="admMeta"></p>
+
+        <!-- Server settings — built entirely from GET /config-view's `settings`
+             array. There is deliberately no second list of keys here. -->
+        <div class="admblock">
+          <h3 data-i18n="cfg.title">Server settings</h3>
+          <span class="note" data-i18n="cfg.note">The settings this installation can change while it is running.
+            They are written to a file in the /config volume, and that file wins over the values the container was
+            started with. Nothing secret can be set or read here.</span>
+          <p class="cfgpath" id="cfgPath"></p>
+          <p class="cfgpend" id="cfgPend" hidden></p>
+          <div id="cfgTables"></div>
+          <p class="cfgmsg" id="cfgMsg" hidden></p>
+
+          <div class="cfgrestart">
+            <h4 data-i18n="cfg.restartTitle">Restart</h4>
+            <p class="note" id="cfgRestartNote"></p>
+            <div class="btnrow">
+              <button id="cfgRestart" type="button" data-i18n="cfg.restartBtn">Restart now</button>
+              <span class="cfgstate" id="cfgRestartState" hidden></span>
+            </div>
+          </div>
+
+          <!-- Inside the settings block and directly under the values, because
+               that is what it is for: a setting saved here — the patch version
+               above all — takes effect at the next daily check, and until then
+               the status line keeps showing the failure the change was meant to
+               end. Whoever just repaired something cannot otherwise tell "it did
+               not work" from "it has not been tried yet". -->
+          <div class="cfgrestart">
+            <h4 data-i18n="cfg.checkNowTitle">Check the data sources</h4>
+            <p class="note" id="cfgCheckNowNote"></p>
+            <div class="btnrow">
+              <button id="cfgCheckNow" type="button" data-i18n="cfg.checkNowBtn">Check now</button>
+              <span class="cfgstate" id="cfgCheckNowState" hidden></span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Update — a block of its own, NOT a second button next to the
+             restart. A restart is harmless and frequent; an update replaces the
+             code that is running, takes minutes and goes through the host. The
+             two must not look like variants of the same thing.
+
+             `updOut` is filled with textContent and never with innerHTML: it
+             holds an excerpt of the host's build output, which is foreign text
+             (the server bounds and filters it as well — see host-update.mjs).
+             `updOutNote` says how far that filtering goes, because it catches
+             shapes and names and cannot catch a bare token. -->
+        <div class="admblock">
+          <h3 data-i18n="upd.title">Update to a newer version</h3>
+          <span class="note" data-i18n="upd.note">Pulls the newest code on the server and rebuilds the container.
+            This needs a small script on the host — the tool cannot do it by itself, and deliberately has no access to
+            the host's Docker daemon.</span>
+          <p class="updbuild" id="updBuild"></p>
+          <p class="updsetup" id="updSetup" hidden></p>
+          <!-- Installed, reporting in, and still unable to do anything: a run
+               that died left the script's lock behind. Its own paragraph and
+               its own colour, because it is the one case where "the heartbeat
+               is fresh" and "an update will happen" come apart. -->
+          <p class="updstuck" id="updStuck" hidden></p>
+          <div class="btnrow">
+            <button id="updBtn" type="button" disabled data-i18n="upd.btn">Update now</button>
+            <span class="cfgstate" id="updState" hidden></span>
+          </div>
+          <p class="updlast" id="updLast"></p>
+          <p class="updoutnote" id="updOutNote" hidden data-i18n="upd.outNote">Output from the host, filtered:
+            lines naming something that could be a credential are dropped and credentials inside a URL are masked.
+            That is a filter, not a guarantee — a bare token in a line that names nothing passes it.</p>
+          <pre class="updout" id="updOut" hidden></pre>
+        </div>
+
+        <!-- Releases: ask GitHub now. Its own block next to the update block and
+             not a button inside it: this one only reports, the update block
+             replaces the running code. Shut until the admin area has loaded,
+             like the update button. -->
+        <div class="admblock">
+          <h3 data-i18n="rel.checkTitle">Check for a newer release</h3>
+          <span class="note" data-i18n="rel.checkNote">Asks GitHub now whether a newer release of this tool exists. It
+            only reports; nothing is downloaded or installed. This works whether or not the daily automatic check is
+            switched on.</span>
+          <div class="btnrow">
+            <button id="relCheckBtn" type="button" disabled data-i18n="rel.checkBtn">Check for updates</button>
+            <span class="cfgstate" id="relCheckState" hidden></span>
+          </div>
+        </div>
+
+        <div class="admblock">
+          <h3 data-i18n="adm.skewTitle">Dataset offset between the languages</h3>
+          <span class="note" id="admSkewNote"></span>
+          <div id="admSkew"></div>
+          <!-- Where the set that is live came from: when it was generated, out
+               of which patch, and what that run measured. The rows above say how
+               far the languages are apart and cannot say whether anything is
+               still generating them — which is the question somebody opening
+               this page has. Filled from build-info.json in the ACTIVE snapshot
+               (GET /admin/gaps, `langBuild`). -->
+          <h4 data-i18n="adm.buildTitle">Where the localized set comes from</h4>
+          <span class="note" data-i18n="adm.buildNote">Read from the data set the container is serving right
+            now. Empty numbers mean the set predates this bookkeeping — not that nothing was translated.</span>
+          <div id="admBuild"></div>
+          <!-- The display texts, which are a different question from the data
+               sets above: English client_strings.js is refreshed daily from
+               upstream, the localized one is hand written and ships with the
+               image, so a key upstream adds is simply absent for that language
+               until the container is updated. Empty while the two agree. -->
+          <div id="admStrings"></div>
+        </div>
+
+        <div class="admblock">
+          <h3 data-i18n="adm.gapsTitle">Gaps the tool found by itself</h3>
+          <span class="note" data-i18n="adm.gapsNote">Collected while price-checking, grouped by language and
+            sorted by frequency. Held in memory only: the list starts empty after a restart, and it is a page you
+            have to open — the tool sends nothing on its own.</span>
+          <div id="admGaps"></div>
+        </div>
+
+        <!-- Read-only, and last: it answers "what is this box actually running
+             with" without an SSH session, but it is a reference, not a control. -->
+        <div class="admblock">
+          <h3 data-i18n="cfg.runtimeTitle">Everything else this server runs with</h3>
+          <span class="note" data-i18n="cfg.runtimeNote">Read-only. These come from the compose file or are facts
+            about the running process, and none of them can be changed here. The list exists so that nobody has to
+            open a shell on the server to look them up.</span>
+          <div id="cfgRuntime"></div>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<!-- Identity gate: mirrored from index.html (ppt_user cookie). -->
+<div class="idgate" id="idgate" hidden>
+  <div class="idcard">
+    <div class="idlogo"><span class="sq"></span></div>
+    <h2 data-i18n="idgate.title">Who are you?</h2>
+    <p data-i18n="idgate.hintLeague">Used only for routing (your own league). No password.</p>
+    <div class="idbtns" id="idbtns"></div>
+  </div>
+</div>
+
+<script src="i18n.js"></script>
+<script src="shell.js"></script>
+<script type="module" src="settings.js"></script>
+</body>
+</html>

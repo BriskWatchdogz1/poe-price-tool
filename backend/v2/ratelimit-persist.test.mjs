@@ -8,6 +8,7 @@ import assert from 'node:assert/strict'
 import { mkdtemp, rm, writeFile, readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+import { quietEnv } from './test-quiet-env.mjs'
 
 const dir = await mkdtemp(path.join(tmpdir(), 'ppt-rl-'))
 const statePath = path.join(dir, 'rate-limit.json')
@@ -17,6 +18,11 @@ const statePath = path.join(dir, 'rate-limit.json')
 const until = Date.now() + 3600_000
 await writeFile(statePath, JSON.stringify({ until, retryAfterSec: 3600 }))
 
+// The full set that keeps a booted server off the network. One list, imported:
+// every file that wrote it out by hand left something out, and what kept being
+// left out was the switch a WebSocket needs (test-quiet-env.mjs, docs/bugs.md
+// B25). Applied FIRST — anything this file sets below overrides it on purpose.
+quietEnv()
 process.env.PORT = '0'
 process.env.POE_FAUSTUS_DISABLED = '1'
 process.env.POE_CORPSE_DISABLED = '1'

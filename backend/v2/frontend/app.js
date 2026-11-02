@@ -27,6 +27,16 @@ const esc = s => String(s == null ? '' : s)
 const fmtK = n => n >= 1000 ? (n % 1000 === 0 ? (n/1000)+'k' : (n/1000).toFixed(1)+'k') : String(n)
 const cap  = s => s ? s[0].toUpperCase() + s.slice(1) : s
 
+// i18n shorthands (i18n.js is loaded before this script on every page).
+const T   = (k, p) => I18n.t(k, p)
+const TN  = (k, n, p) => I18n.tn(k, n, p)
+const SRV = txt => I18n.srv(txt)
+const FLT = txt => I18n.filterLabel(txt)
+// An item name to PRINT: the localized one when the data set has it, the
+// English reference name when it does not. Display only — every caller keeps
+// the reference name for links and lookups.
+const INAME = (ref, fallback) => I18n.itemName(ref) || fallback || ref
+
 // gold currencies vs teal (chaos-ish)
 const GOLD = new Set(['divine','div','exalted','ex','mirror','mir'])
 const curUnit = c => ({divine:'div', chaos:'c', exalted:'ex', mirror:'mir'}[c] || c)
@@ -41,7 +51,7 @@ function ageLabel (m) {
 
 function tierLabel (t) {
   if (t == null) return ''
-  return typeof t === 'number' ? 'Tier ' + t : t
+  return typeof t === 'number' ? T('pc.card.tier', { n: t }) : t
 }
 
 // Derive a sensible slider step from the roll range. Integer ranges with
@@ -71,7 +81,16 @@ function rangeStep (lo, hi) {
 // insert the value there. Multiple '#' (range mods like "Adds # to #
 // Lightning Damage") are left as-is; the slider shows their values (no sensible single fill).
 function modTextHtml (mod) {
-  const t = esc(mod.text)
+  // Mod texts come from the (already localized) data set and are not
+  // translated here. Two kinds of row are NOT from the data set and therefore
+  // are: the synthetic "Linked sockets" row the server invents (server.mjs
+  // LINKS_MOD_TEXT, mapped by srv), and the filter rows the vendored engine
+  // builds itself — Energy Shield, Base Percentile, the DPS split, the map and
+  // Heist rows (mapped by filterLabel). Everything else passes through
+  // untouched, and both mappers leave an unknown text exactly as it came.
+  // The `data-text` attribute keeps the ORIGINAL wording: it is the protocol
+  // key the `search` payload is built on, so it must never be translated.
+  const t = esc(SRV(FLT(mod.text)))
   if (mod.value != null) {
     const v = String(mod.value)
     const boldV = '<b class="live">' + esc(v) + '</b>'
@@ -91,30 +110,44 @@ function modTextHtml (mod) {
 // Linked-sockets filter, see server.mjs LINKS_MOD_TEXT) sits first so it's
 // the first thing the user sees — links matter more than mods this patch.
 const GROUP_ORDER = ['links','unknown','implicit','fractured','prefix','suffix','explicit','crafted']
-const GROUP_HEAD  = { links:'Sockets', unknown:'Not searchable', implicit:'Implicit', fractured:'Fractured', prefix:'Prefixes',
-                      suffix:'Suffixes', explicit:'Explicit', crafted:'Crafted' }
+const groupHead = kind => GROUP_ORDER.includes(kind) ? T('pc.group.' + kind) : cap(kind)
 const GROUP_CLASS = { prefix:'pfx', suffix:'sfx', fractured:'frac' }
+// The rarity word under the item name — the only part of the subline that is
+// ours; base type and item class come from the (already localized) data set.
+const RARITIES = ['normal','magic','rare','unique','currency','gem','divination']
+const rarityLabel = r => RARITIES.includes(r) ? T('rarity.' + r) : cap(r)
 
 // ---- Card building ---------------------------------------------------------
 function priceHtml (item) {
   const st = item.priceStatus
   const p  = item.price
   if (st === 'queued' || (!p && st !== 'error' && st !== 'searching' && st !== 'rate-limited')) {
-    return `<div class="pr wait">queued</div><div class="hits">in queue</div>`
+    return `<div class="pr wait">${esc(T('pc.price.queued'))}</div><div class="hits">${esc(T('pc.price.inQueue'))}</div>`
   }
   if (st === 'searching') {
-    return `<div class="pr wait"><span class="psp"></span>searching…</div><div class="hits">priority</div>`
+    return `<div class="pr wait"><span class="psp"></span>${esc(T('pc.price.searching'))}</div><div class="hits">${esc(T('pc.price.priority'))}</div>`
   }
   if (st === 'rate-limited') {
-    return `<div class="pr wait rl">rate-limited</div><div class="hits">searches paused</div>`
+    return `<div class="pr wait rl">${esc(T('pc.price.rateLimited'))}</div><div class="hits">${esc(T('pc.price.searchesPaused'))}</div>`
   }
   if (st === 'error') {
-    return `<div class="pr err">no price</div><div class="hits">try again</div>`
+    return `<div class="pr err">${esc(T('pc.price.noPrice'))}</div><div class="hits">${esc(T('pc.price.tryAgain'))}</div>`
   }
   // done
-  if (!p) return `<div class="pr wait">—</div><div class="hits">no data</div>`
+  if (!p) return `<div class="pr wait">—</div><div class="hits">${esc(T('pc.price.noData'))}</div>`
   const gold = isGold(p.currency)
   const unit = curUnit(p.currency)
+  // "not from now" marker. The server sets exchangeAgeHours ONLY when the
+  // observation behind a Currency-Exchange headline is older than the lag the
+  // pipeline cannot avoid (one hour of digest granularity plus one refresh
+  // interval — see networth/faustus-age.mjs), so its mere presence is the
+  // statement. A fresh price carries nothing and this renders to '': a label on
+  // every card would stop being read, and the one case worth reading is the
+  // card that disagrees with the game because it is describing an older hour.
+  const staleTxt = (typeof p.exchangeAgeHours === 'number' && p.exchangeAgeHours > 0)
+    ? `<div class="pstale" title="${esc(T('pc.price.exchangeAgeTitle'))}">` +
+      `${esc(T('pc.price.exchangeAge', { n: p.exchangeAgeHours }))}</div>`
+    : ''
   // poe.ninja market value (Divination Cards etc., see server.mjs
   // NINJA_BULK_CLASSES): a single aggregated value, no listings to count —
   // label the source instead of "N listings" so it's never mistaken for a
@@ -123,9 +156,12 @@ function priceHtml (item) {
     // Aggregated single value — the source varies (poe.ninja, or GGG's Currency
     // Exchange for a fungible the bulk exchange didn't answer), so name it.
     const prTxt = `${p.priceLow}<span class="u">${esc(unit)}</span>`
-    const label = esc(p.sourceLabel || 'poe.ninja')
-    const note = p.sourceNote ? esc(p.sourceNote) : (p.count != null ? p.count + ' data pts' : 'market value')
-    return `<div class="pr ${gold ? '' : 'c'}">${prTxt}</div><div class="hits"><b>${label}</b>${note}</div>`
+    const label = esc(SRV(p.sourceLabel) || 'poe.ninja')
+    const note = p.sourceNote
+      ? esc(SRV(p.sourceNote))
+      : esc(p.count != null ? T('pc.price.dataPoints', { n: p.count }) : T('pc.price.marketValue'))
+    return `<div class="pcol">${staleTxt}<div class="pr ${gold ? '' : 'c'}">${prTxt}</div></div>` +
+      `<div class="hits"><b>${label}</b>${note}</div>`
   }
   let prTxt
   if (p.display === 'bulk') {
@@ -140,12 +176,12 @@ function priceHtml (item) {
     // bottom, the 250 is one outlier). Requiring it strictly inside hid it in
     // that case. A degenerate range (low === high) took the branch above.
     const med = typeof p.priceMedian === 'number' && p.priceMedian > 0
-      ? `<span class="med" title="Median — the typical price, unmoved by outliers">${p.priceMedian}</span>` : ''
+      ? `<span class="med" title="${esc(T('pc.price.medianTitle'))}">${p.priceMedian}</span>` : ''
     prTxt = `${p.priceLow}–${p.priceHigh}<span class="u">${esc(unit)}</span>${med}`
   }
   const hits = p.display === 'bulk'
-    ? `<b>bulk</b>${p.count} sellers`
-    : `<b>${p.count}</b>listings`
+    ? `<b>${esc(T('pc.price.bulk'))}</b>${esc(T('pc.price.sellers', { n: p.count }))}`
+    : `<b>${p.count}</b>${esc(T('pc.price.listings'))}`
   // Priced off the in-game Currency Exchange: name the source under the
   // headline and keep the trade site's ASK as a secondary line, so the gap
   // between "what it clears at" and "what people ask" stays visible instead of
@@ -161,11 +197,21 @@ function priceHtml (item) {
     // hour — the honest "how wide is this market" figure. No span known -> the
     // spot stays empty, no placeholder.
     const askTxt = p.tradeAsk
-      ? `<div class="pask">Trade-Ask: ${esc(askText(p.tradeAsk))}${p.count != null ? ` · ${p.count} listings` : ''}</div>`
+      ? `<div class="pask" title="${esc(T('pc.price.tradeAskTitle'))}">` +
+        `${esc(T('pc.price.tradeAsk', { value: askText(p.tradeAsk) }))}` +
+        `${p.count != null ? ` · ${esc(T('pc.price.listingsN', { n: p.count }))}` : ''}</div>`
       : ''
+    // The span is ONE digest hour's own low and high — the very hour the
+    // headline is the volume-weighted average of — not the span of the 8-hour
+    // union window the walk searched (networth/faustus.mjs buildDetailById
+    // takes it off the winning market, and the window is walked to FIND that
+    // market, not to blend hours). The wording says "that hour" for exactly
+    // that reason; a reader who takes it for the window would read a card whose
+    // rate is hours old as a card whose market is merely wide.
     const r = p.exchangeRange
     const range = (r && typeof r.low === 'number' && typeof r.high === 'number')
-      ? `<div class="hits"><span class="xrange" title="Range the exchange actually traded at this hour">range ${r.low}–${r.high} c</span></div>`
+      ? `<div class="hits"><span class="xrange" title="${esc(T('pc.price.exchangeRangeTitle'))}">` +
+        `${esc(T('pc.price.exchangeRange', { low: r.low, high: r.high }))}</span></div>`
       : ''
     // askConflict (see server.mjs withExchangeMain): the headline still wins —
     // this only DISCLOSES that the trade-derived asks disagree with it, it
@@ -174,24 +220,25 @@ function priceHtml (item) {
     // the marker just says to check them against each other.
     const conflict = p.askConflict
     const conflictTitle = conflict
-      ? (conflict.dir === 'over'
-          ? 'The trade site asks well below this rate (see Trade-Ask). One of the two is off — check before valuing the item at this number.'
-          : 'Even the cheapest trade ask is several times this rate (see Trade-Ask). The rate may be stale or from a thin hour — check before selling at this number.')
+      ? T(conflict.dir === 'over' ? 'pc.price.conflictOver' : 'pc.price.conflictUnder')
       : ''
     const headTxt = conflict
       ? `<div class="pr ${gold ? '' : 'c'}" title="${esc(conflictTitle)}">${prTxt}</div>`
       : head
     const srcTxt = conflict
-      ? `${esc(p.sourceLabel || 'Exchange')}<span class="pconflict"> — asks disagree</span>`
-      : esc(p.sourceLabel || 'Exchange')
-    return `<div class="pcol">${headTxt}<div class="psrc">${srcTxt}</div>${askTxt}</div>${range}`
+      ? `${esc(SRV(p.sourceLabel) || SRV('Exchange'))}<span class="pconflict">${esc(T('pc.price.conflictMark'))}</span>`
+      : esc(SRV(p.sourceLabel) || SRV('Exchange'))
+    return `<div class="pcol">${staleTxt}${headTxt}<div class="psrc">${srcTxt}</div>${askTxt}</div>${range}`
   }
+  // No exchange headline: the number IS the trade site's offers. Say so. Three
+  // divination cards can legitimately render three different ways here — one
+  // priced by the Currency Exchange, one by a poe.ninja aggregate, one by plain
+  // trade listings — and until this label existed the third shape was the only
+  // one that did not name its source, so the difference looked arbitrary.
+  const src = `<div class="psrc" title="${esc(T('pc.price.tradeOnlyTitle'))}">${esc(T('pc.price.tradeOnly'))}</div>`
   const ask = p.tradeAsk
-    ? `<div class="pask">Trade-Ask: ${esc(askText(p.tradeAsk))}</div>` : ''
-  if (ask) {
-    return `<div class="pcol">${head}${ask}</div><div class="hits">${hits}</div>`
-  }
-  return `${head}<div class="hits">${hits}</div>`
+    ? `<div class="pask" title="${esc(T('pc.price.tradeAskTitle'))}">${esc(T('pc.price.tradeAsk', { value: askText(p.tradeAsk) }))}</div>` : ''
+  return `<div class="pcol">${head}${src}${ask}</div><div class="hits">${hits}</div>`
 }
 
 // "0.7–1 div (75–107 c)" — the trade-site ask next to an exchange headline. The
@@ -250,17 +297,17 @@ function tradeBtnHtml (item) {
   if (p && p.priceSource === 'ninja') {
     if (p.ninjaUrl) {
       return `<button type="button" class="opentrade ninja" data-ninja-url="${esc(p.ninjaUrl)}"`
-        + ` title="Open this item on poe.ninja">Open Ninja ↗</button>`
+        + ` title="${esc(T('pc.openNinjaTitle'))}">${esc(T('pc.openNinja'))}</button>`
     }
-    return `<button type="button" class="opentrade" disabled title="Priced via poe.ninja — no trade search was run">Open Ninja ↗</button>`
+    return `<button type="button" class="opentrade" disabled title="${esc(T('pc.openNinjaNone'))}">${esc(T('pc.openNinja'))}</button>`
   }
   const id = p && p.tradeId
   if (!id) {
-    return `<button type="button" class="opentrade" disabled title="No trade search yet">Open Trade ↗</button>`
+    return `<button type="button" class="opentrade" disabled title="${esc(T('pc.openTradeNone'))}">${esc(T('pc.openTrade'))}</button>`
   }
   const kind = p.tradeKind === 'exchange' ? 'exchange' : 'search'
   return `<button type="button" class="opentrade" data-trade-id="${esc(id)}" data-trade-kind="${esc(kind)}"`
-    + ` data-trade-league="${esc(p.league)}" title="Open this search on pathofexile.com/trade">Open Trade ↗</button>`
+    + ` data-trade-league="${esc(p.league)}" title="${esc(T('pc.openTradeTitle'))}">${esc(T('pc.openTrade'))}</button>`
 }
 
 const LISTINGS_VISIBLE = 5   // visible by default; the rest sits behind the expander
@@ -285,7 +332,8 @@ function listingsHtml (item) {
   }).join('')
   const hidden = p.listings.length - LISTINGS_VISIBLE
   const toggle = hidden > 0
-    ? `<button class="lmore" type="button"><span class="lmi">+ ${hidden} more</span><span class="lmi less">− show less</span></button>`
+    ? `<button class="lmore" type="button"><span class="lmi">${esc(T('pc.listings.more', { n: hidden }))}</span>` +
+      `<span class="lmi less">${esc(T('pc.listings.less'))}</span></button>`
     : ''
   // .lwrap carries the expanded state; it's recreated on every render -> resets to 5.
   return `<div class="lwrap">${rows}${toggle}</div>`
@@ -300,7 +348,7 @@ function modsSummaryHtml (item) {
     .map(m => `<span class="mod">${modTextHtml(m)}</span>`)
   // Facts = filters the search applies that aren't mods (quality, item level).
   // Summary-only, no editor row: they're context for reading the price.
-  const facts = (item.facts || []).map(f => `<span class="mod fact">${esc(f)}</span>`)
+  const facts = (item.facts || []).map(f => `<span class="mod fact">${esc(I18n.fact(f))}</span>`)
   return facts.concat(mods).join('')
 }
 
@@ -314,7 +362,7 @@ function editorHtml (item) {
     if (!list) continue
     // header only when more than a single flat group is meaningful
     if (mods.some(m => m.kind !== kind)) {
-      rows += `<div class="gh ${GROUP_CLASS[kind] || ''}">${GROUP_HEAD[kind] || cap(kind)}</div>`
+      rows += `<div class="gh ${GROUP_CLASS[kind] || ''}">${esc(groupHead(kind))}</div>`
     }
     for (const m of list) rows += modRowHtml(m)
   }
@@ -322,27 +370,27 @@ function editorHtml (item) {
   // The tier is only in the clipboard when "Advanced Mod Descriptions" is on in
   // game. No tier information, no T2+ button.
   const hasTopTier = mods.some(m => typeof m.tier === 'number' && m.tier <= TOP_TIER)
-  const noun = selCount === 1 ? 'mod' : 'mods'
+  const noun = TN('pc.ed.mod', selCount)
   // Corruption filter default: a CORRUPTED item prices in a separate market (it
   // can't be modified further), so default to "yes" — searching "any" drowns it
   // in cheap non-corrupted twins and reads as near-worthless. Non-corrupted items
   // stay "any" (don't care). Matches the backend auto-search default. The chosen
   // value rides along in the `search` payload (corrupted: "any"|"yes"|"no").
   const cpref = item.corrupted ? 'yes' : 'any'
-  const cbtn = (v, lbl) => `<button type="button" data-c="${v}"${v === cpref ? ' class="on"' : ''}>${lbl}</button>`
+  const cbtn = (v, lbl) => `<button type="button" data-c="${v}"${v === cpref ? ' class="on"' : ''}>${esc(lbl)}</button>`
   return `<div class="editor"><div class="ed-inner">
       <div class="ed-head">
-        <div class="ed-lead">Tick the mods to require and set each roll range (min–max). <b>Nothing runs until you hit Search.</b></div>
-        ${hasTopTier ? '<button class="toptier" type="button" title="Tick only the mods that rolled tier 1 or 2">T2+</button>' : ''}
-        <button class="allmods" type="button" title="Tick every mod — click again to untick all">All mods</button>
+        <div class="ed-lead">${T('pc.ed.lead_html')}</div>
+        ${hasTopTier ? `<button class="toptier" type="button" title="${esc(T('pc.ed.topTierTitle'))}">${esc(T('pc.ed.topTier'))}</button>` : ''}
+        <button class="allmods" type="button" title="${esc(T('pc.ed.allModsTitle'))}">${esc(T('pc.ed.allMods'))}</button>
       </div>
-      <div class="corruptbar"><span class="cl">Corrupted</span>
-        <div class="ctog" data-val="${cpref}">${cbtn('any', 'any')}${cbtn('yes', 'yes')}${cbtn('no', 'no')}</div></div>
+      <div class="corruptbar"><span class="cl">${esc(T('pc.ed.corrupted'))}</span>
+        <div class="ctog" data-val="${cpref}">${cbtn('any', T('pc.ed.corruptAny'))}${cbtn('yes', T('pc.ed.corruptYes'))}${cbtn('no', T('pc.ed.corruptNo'))}</div></div>
       <div class="mgroup">${rows}</div>
       <div class="ed-foot">
-        <div class="flow"><span class="sel">${selCount}</span><span>${noun}</span><span class="arw">→</span><span class="chip">Search</span><span>refreshes prices</span>
-          <button class="resetbtn" type="button" title="Reset ranges & ticks to this item's defaults">↺ Reset</button></div>
-        <button class="searchbtn"><span class="sp"></span><span class="lbl">Search</span></button>
+        <div class="flow"><span class="sel">${selCount}</span><span>${esc(noun)}</span><span class="arw">→</span><span class="chip">${esc(T('pc.ed.search'))}</span><span>${esc(T('pc.ed.refreshes'))}</span>
+          <button class="resetbtn" type="button" title="${esc(T('pc.ed.resetTitle'))}">${esc(T('pc.ed.reset'))}</button></div>
+        <button class="searchbtn"><span class="sp"></span><span class="lbl">${esc(T('pc.ed.search'))}</span></button>
       </div>
     </div></div>`
 }
@@ -355,7 +403,7 @@ function modRowHtml (m) {
   // user can add it via Open Trade.
   if (m.searchable === false) {
     return `<div class="mrow unsearch" data-text="${esc(m.text)}"><span class="mtxt">${modTextHtml(m)}</span>`
-      + `<span class="fracbadge" title="Not in the vendored trade data — add it manually via Open Trade">not searchable</span></div>`
+      + `<span class="fracbadge" title="${esc(T('pc.ed.notSearchableTitle'))}">${esc(T('pc.ed.notSearchable'))}</span></div>`
   }
   const on = m.selected ? ' on' : ''
   const implClass = m.kind === 'implicit' ? ' impl' : ''
@@ -364,7 +412,7 @@ function modRowHtml (m) {
   // Fractured mods survive reforging and price very differently from a normal
   // explicit/implicit roll of the same stat -> always flag them right on the
   // row, not just via the (collapsible) group header above.
-  const frac = m.kind === 'fractured' ? `<span class="fracbadge">fractured</span>` : ''
+  const frac = m.kind === 'fractured' ? `<span class="fracbadge">${esc(T('pc.ed.fractured'))}</span>` : ''
   const top = `<label class="top"><input type="checkbox" class="chk"${m.selected ? ' checked' : ''}>`
     + `<span class="mtxt${implClass}${fracClass}">${modTextHtml(m)}${tier}${frac}</span></label>`
   let range = ''
@@ -378,8 +426,8 @@ function modRowHtml (m) {
     range = `<div class="range"><span class="mm">${esc(fmtK(lo))}</span>`
       + `<div class="dual" data-lo="${lo}" data-hi="${hi}" data-startmin="${startMin}">`
       +   `<div class="drail"><div class="dfill"></div></div>`
-      +   `<input type="range" class="sl slmin" min="${lo}" max="${hi}" step="${step}" value="${startMin}" aria-label="Minimum">`
-      +   `<input type="range" class="sl slmax" min="${lo}" max="${hi}" step="${step}" value="${hi}" aria-label="Maximum">`
+      +   `<input type="range" class="sl slmin" min="${lo}" max="${hi}" step="${step}" value="${startMin}" aria-label="${esc(T('pc.ed.min'))}">`
+      +   `<input type="range" class="sl slmax" min="${lo}" max="${hi}" step="${step}" value="${hi}" aria-label="${esc(T('pc.ed.max'))}">`
       + `</div>`
       + `<span class="mm hi">${esc(fmtK(hi))}</span>`
       + `<span class="val"><span class="vmin">${esc(fmtK(startMin))}</span>`
@@ -392,20 +440,20 @@ function modRowHtml (m) {
 function cardHtml (item) {
   const r = item.rarity || 'normal'
   const nameClass = ['unique','rare','magic','currency','gem','normal','divination'].includes(r) ? 'n-' + r : ''
-  const subParts = [item.baseType, cap(r), item.itemClass].filter(Boolean).map(esc)
+  const subParts = [item.baseType, rarityLabel(r), item.itemClass].filter(Boolean).map(esc)
   let sub = subParts.join(' · ')
-  if (item.corrupted) sub += ' · <span class="corrupt">Corrupted</span>'
+  if (item.corrupted) sub += ` · <span class="corrupt">${esc(T('pc.card.corrupted'))}</span>`
   // Every rarity renders as the same compact grid card (uniques used to get a
   // full-width `.wide` span). The poe.ninja price + sparkline lives in the
   // `.ninja` block below and is unaffected — uniques keep their trend line.
   return `<article class="card appearing tp-${esc(r)}" data-id="${esc(item.id)}">
-      <button class="x" aria-label="Dismiss">✕</button>
-      <div class="chead"><div class="name ${nameClass}">${esc(item.name)}<small>${sub}</small></div>${tradeBtnHtml(item)}</div>
+      <button class="x" aria-label="${esc(T('pc.card.dismiss'))}">✕</button>
+      <div class="chead"><div class="name ${nameClass}">${esc(SRV(item.name))}<small>${sub}</small></div>${tradeBtnHtml(item)}</div>
       <div class="pblock">${priceHtml(item)}</div>
       <div class="ninja">${ninjaHtml(item)}</div>
       <div class="mods">${modsSummaryHtml(item)}</div>
       <div class="listings">${listingsHtml(item)}</div>
-      <div class="modbar"><span class="tag">Match mods</span><span class="cnt">${(item.mods||[]).filter(m=>m.selected).length}</span><span class="chev">⌄</span></div>
+      <div class="modbar"><span class="tag">${esc(T('pc.card.matchMods'))}</span><span class="cnt">${(item.mods||[]).filter(m=>m.selected).length}</span><span class="chev">⌄</span></div>
       ${editorHtml(item)}
     </article>`
 }
@@ -448,7 +496,7 @@ function upsertItem (data) {
     // the user saw). Idempotent when the button isn't busy.
     if (item.priceStatus === 'rate-limited' || item.priceStatus === 'error') {
       const btn = el.querySelector('.searchbtn')
-      if (btn) { btn.classList.remove('busy'); btn.querySelector('.lbl').textContent = 'Search' }
+      if (btn) { btn.classList.remove('busy'); btn.querySelector('.lbl').textContent = T('pc.ed.search') }
       // 'error' is terminal (no retry) -> also drop it from the in-flight set.
       // 'rate-limited' keeps its slot: the server DID schedule a retry, so it is
       // genuinely still pending (just paused behind the ban gate).
@@ -472,7 +520,7 @@ function applyPriceResult (msg) {
     const hits = el.querySelector('.pblock .hits')
     if (hits && !reduce) { hits.classList.add('flash'); setTimeout(() => hits.classList.remove('flash'), 700) }
     const btn = el.querySelector('.searchbtn')
-    if (btn) { btn.classList.remove('busy'); btn.querySelector('.lbl').textContent = 'Search' }
+    if (btn) { btn.classList.remove('busy'); btn.querySelector('.lbl').textContent = T('pc.ed.search') }
     // New tradeId on every price-result (initial AND requery via `search`) ->
     // re-render so the button always opens the search that produced what's
     // currently on the card, never a stale one from a previous run.
@@ -494,7 +542,7 @@ function markSearching (id) {
 // ---- Counts ----------------------------------------------------------------
 function refreshCounts () {
   const n = grid.querySelectorAll('.card:not(.dismissing)').length
-  badge.textContent = n + ' active'
+  badge.textContent = T('pc.active', { n })
   empty.style.display = n ? 'none' : 'block'
 }
 
@@ -512,19 +560,17 @@ let rateSoft = null  // soft near-limit warning text (null = headroom is fine)
 function applyQueueStatus (msg) {
   const limits = (msg && msg.rateLimits) || []
   const worst = limits.reduce((m, rl) => Math.max(m, rl.limit ? rl.used / rl.limit : 0), 0)
-  rateSoft = worst >= 0.85
-    ? 'Trade API rate limit almost exhausted — searches may pause shortly.'
-    : null
+  rateSoft = worst >= 0.85 ? T('rate.soft') : null
   renderRateBanner()
 }
 
 function fmtWait (ms) {
   const s = Math.max(0, Math.round(ms / 1000))
-  if (s < 60) return `~${s}s`
+  if (s < 60) return T('rate.waitSec', { n: s })
   const m = Math.round(s / 60)
-  if (m < 60) return `~${m}m`
+  if (m < 60) return T('rate.waitMin', { n: m })
   const h = Math.floor(m / 60), rem = m % 60
-  return rem ? `~${h}h ${rem}m` : `~${h}h`
+  return rem ? T('rate.waitHourMin', { h, m: rem }) : T('rate.waitHour', { n: h })
 }
 
 function renderRateBanner () {
@@ -533,7 +579,7 @@ function renderRateBanner () {
   if (rateUntil && left > 0) {
     ratebanner.hidden = false
     if (rbmsg) rbmsg.textContent = rateMsg
-    if (rbwait) rbwait.textContent = ` Retry in ${fmtWait(left)}.`
+    if (rbwait) rbwait.textContent = T('rate.retryIn', { wait: fmtWait(left) })
   } else if (rateSoft) {
     rateUntil = 0
     ratebanner.hidden = false
@@ -548,7 +594,7 @@ function renderRateBanner () {
 function applyRateLimit (msg) {
   if (msg && msg.active && typeof msg.until === 'number' && msg.until > Date.now()) {
     rateUntil = msg.until
-    rateMsg = msg.message || "GGG's trade API rate-limited the app — searches are paused."
+    rateMsg = SRV(msg.message) || T('rate.defaultMessage')
   } else {
     rateUntil = 0
   }
@@ -627,26 +673,31 @@ function refSources (msg) {
   return out
 }
 
-const NO_SRC_HINT = 'No value, so no source: no trustworthy sell-side data for this row'
+const noSrcHint = () => T('ref.noSource')
 
 // The number's own attribution: style class (the marker) + the sentence that
 // names the source in plain words. A row without `src` gets no class and says
 // why it names none.
 function srcMark (r, sources) {
-  if (!SRC_LABEL[r.src]) return { cls: '', title: NO_SRC_HINT }
+  if (!SRC_LABEL[r.src]) return { cls: '', title: noSrcHint() }
   const ts = sources.get(r.src)
-  const when = ts ? ` · updated ${hhmm(ts)}` : ' · update time unknown'
-  return { cls: ` src-${r.src}`, title: `Value from ${SRC_LABEL[r.src]}${when}` }
+  const when = ts ? T('ref.updatedAt', { time: hhmm(ts) }) : T('ref.updateUnknown')
+  return { cls: ` src-${r.src}`, title: T('ref.valueFrom', { source: SRC_LABEL[r.src], when }) }
 }
 
 function refSection (title, rows, sources) {
   if (!Array.isArray(rows) || !rows.length) return ''
   const body = rows.map(r => {
     const m = srcMark(r, sources)
+    // `refName` is the row's reference name where its printed `name` is a
+    // shortened wording (the lifeforce rows); everywhere else the two are the
+    // same string. Falls back to the printed name, so a row the data set does
+    // not know stays readable in English instead of going blank.
+    const shown = INAME(r.refName || r.name, r.name)
     // The name column ellipsizes at the rail's ~218px content width ("Dead
     // Man's Sulphur" shows as "Dead …"), so it carries its full name as a
     // tooltip — a truncated row must stay identifiable without guessing.
-    return `<div class="rrow"><span class="n" title="${esc(r.name)}">${esc(r.name)}</span>`
+    return `<div class="rrow"><span class="n" title="${esc(shown)}">${esc(shown)}</span>`
       + `<span class="rv">`
       + `<span class="p${m.cls}" title="${esc(m.title)}">${esc(r.display)}</span>`
       + `${sparkSvg(r.sparkline, !!r.invert)}</span></div>`
@@ -662,7 +713,7 @@ function refFooter (sources) {
     const ts = sources.get(s)
     // Shorter than the number's tooltip on purpose: the footer line must stay
     // under the rail's ~218 px content width (see .rstamp in styles.css).
-    const when = ts ? `updated ${hhmm(ts)}` : 'time unknown'
+    const when = ts ? T('ref.footUpdated', { time: hhmm(ts) }) : T('ref.footUnknown')
     // The source NAME is set in the same style its rows' numbers are — that is
     // what ties the two together, so the legend needs no extra symbol column.
     return `<div class="rsrc"><span class="src-${s}">${esc(SRC_LABEL[s])}</span> · ${esc(when)}</div>`
@@ -670,14 +721,19 @@ function refFooter (sources) {
   return lines.length ? `<div class="rstamp">${lines.join('')}</div>` : ''
 }
 
+// The rail is drawn from a message, not from the DOM, so a redraw needs the
+// last one kept (section headings AND row names are language-dependent).
+let lastReference = null
+
 function applyReference (msg) {
   if (!ref) return
+  lastReference = msg
   const sources = refSources(msg)
-  const html = refSection('Currency', msg.currency, sources)
-    + refSection('Lifeforce — Selling', msg.lifeforce, sources)
-    + refSection('Beasts', msg.beasts, sources)
-  ref.innerHTML = (html || '<div class="rsec"><div class="rh">Reference</div>'
-    + '<div class="rrow"><span class="n">no data</span></div></div>')
+  const html = refSection(T('ref.currency'), msg.currency, sources)
+    + refSection(T('ref.lifeforce'), msg.lifeforce, sources)
+    + refSection(T('ref.beasts'), msg.beasts, sources)
+  ref.innerHTML = (html || `<div class="rsec"><div class="rh">${esc(T('ref.title'))}</div>`
+    + `<div class="rrow"><span class="n">${esc(T('ref.noData'))}</span></div></div>`)
     + refFooter(sources)
 }
 
@@ -724,7 +780,7 @@ function syncCard (card) {
   const cnt = card.querySelector('.modbar .cnt'); if (cnt) cnt.textContent = on
   const sel = card.querySelector('.ed-foot .sel'); if (sel) sel.textContent = on
   const noun = card.querySelector('.ed-foot .flow .sel + span')
-  if (noun) noun.textContent = on === 1 ? 'mod' : 'mods'
+  if (noun) noun.textContent = TN('pc.ed.mod', on)
 }
 
 // Reset: revert a card's roll ranges + checkboxes to the item defaults
@@ -859,7 +915,7 @@ grid.addEventListener('click', e => {
     // real request — exactly the pile-up that risks a fresh ban. The amber banner
     // already explains the pause; leave the button as-is so the click is a no-op.
     if (rateUntil > Date.now()) return
-    btn.classList.add('busy'); btn.querySelector('.lbl').textContent = 'Searching…'
+    btn.classList.add('busy'); btn.querySelector('.lbl').textContent = T('pc.ed.searching')
     const id = card.dataset.id
     markSearching(id)
     const tog = card.querySelector('.ctog')
@@ -921,6 +977,9 @@ const whoamiName = document.getElementById('whoamiName')
 
 // Fixed two-user assumption as a fallback; /users provides the real list.
 let USERS = ['player1', 'player2']
+// user -> client language, straight from GET /users (POE_USER_LANGS). Kept so a
+// user SWITCH picks up the new language without a second round trip.
+let USER_LANGS = {}
 let currentUser = null
 
 function readCookie (name) {
@@ -953,6 +1012,7 @@ function pickUser (u) {
   if (!USERS.includes(u)) return
   currentUser = u
   setUserCookie(u)
+  I18n.applyUsers(USER_LANGS, u)
   hideIdGate()
   showWhoami(u)
   // close the running connection -> reconnect uses the new cookie/room.
@@ -978,9 +1038,13 @@ async function initIdentity () {
     const r = await fetch('/users')
     const j = await r.json()
     if (Array.isArray(j.users) && j.users.length) USERS = j.users
+    if (j.langs && typeof j.langs === 'object') USER_LANGS = j.langs
     if (j.appName) Shell.applyBrand(j.appName)
   } catch { /* keep fallback list + fallback brand */ }
   const cookie = readCookie('ppt_user')
+  // The server's answer is the authority on the language; this corrects the
+  // cached guess this page booted with (see i18n.js).
+  I18n.applyUsers(USER_LANGS, cookie)
   if (cookie && USERS.includes(cookie)) {
     currentUser = cookie
     showWhoami(cookie)
@@ -1007,9 +1071,9 @@ function connect () {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
   ws = new WebSocket(`${proto}//${location.host}/events`)
 
-  ws.addEventListener('open', () => { retry = 0; setConn('live', 'live') })
+  ws.addEventListener('open', () => { retry = 0; setConn('live', T('conn.live')) })
   ws.addEventListener('close', () => {
-    setConn('down', 'reconnecting…')
+    setConn('down', T('conn.reconnecting'))
     retry = Math.min(retry + 1, 6)
     setTimeout(connect, 400 * retry)
   })
@@ -1029,6 +1093,8 @@ function connect () {
       case 'reference':    applyReference(msg); break
       case 'league-state': Shell.applyLeagueState(msg); break
       case 'data-status':  Shell.applyDataStatus(msg); break  // M2 data freshness
+      case 'release-status': Shell.applyReleaseStatus(msg); break // newer release -> status line
+      case 'networth-sync-status': Shell.applySyncStatus(msg); break // expired POESESSID -> status line
       case 'need-identity': // cookie didn't arrive -> show gate (server-side rejected)
         if (Array.isArray(msg.users) && msg.users.length) USERS = msg.users
         if (whoami) whoami.hidden = true
@@ -1038,5 +1104,27 @@ function connect () {
     }
   })
 }
+
+// A language change after boot has to redraw everything already on screen —
+// the cards were built with the previous table.
+I18n.onChange(() => {
+  const order = [...grid.querySelectorAll('.card')].map(el => el.dataset.id)
+  for (const id of order) {
+    const el = elFor(id)
+    const item = items.get(id)
+    if (el && item) el.outerHTML = cardHtml(item)
+  }
+  for (const id of order) {
+    const fresh = elFor(id)
+    const item = items.get(id)
+    if (!fresh) continue
+    fresh.querySelectorAll('.dual').forEach(d => updateDual(d, null))
+    if (item && item.selection) applyStoredSelection(fresh, item.selection)
+  }
+  refreshCounts()
+  renderRateBanner()
+  if (lastReference) applyReference(lastReference)
+  if (conn.classList.contains('live')) setConn('live', T('conn.live'))
+})
 
 initIdentity()

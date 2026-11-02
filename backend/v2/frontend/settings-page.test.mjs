@@ -1,7 +1,15 @@
 // Browser test (headless Chrome, same setup as shell-load.test.mjs): the
-// settings dialog on the net-worth page — the status line shows the sync state
-// and opens the dialog, saving writes the file and clears the status line away.
-// And: after saving, the POESESSID is NOWHERE in the DOM.
+// settings page — both halves of it.
+//
+// The sync credentials used to be a modal on the net-worth page. They are a
+// section of this page now, so the net-worth status line no longer opens
+// anything, it LINKS here; the rest of the promise is unchanged and still
+// checked: saving writes the file, the status line clears itself, and the
+// POESESSID is nowhere in the DOM afterwards.
+//
+// The second half is new: the admin area and its state model. The password goes
+// out as a header on every request, lives in sessionStorage and nowhere else,
+// and closing the view forgets it — there is no session on the server to end.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
@@ -11,6 +19,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createServer } from 'node:net'
 import WebSocket from 'ws'
+import { QUIET_ENV } from '../test-quiet-env.mjs'
 
 const ROOT = fileURLToPath(new URL('../../..', import.meta.url))
 const CHROME = process.env.CHROME_BIN || 'google-chrome-stable'
@@ -46,7 +55,7 @@ async function cdpConnect (wsUrl) {
   return { send, events, close: () => ws.close() }
 }
 
-test('settings dialog: status line -> open -> save -> status gone, file written', { timeout: 180_000 }, async () => {
+test('settings page: the net-worth line links here, saving works, the admin area unlocks', { timeout: 180_000 }, async () => {
   const tmp = await mkdtemp(join(tmpdir(), 'ppt-setdlg-'))
   const port = await freePort()
   const dbg = await freePort()
@@ -57,6 +66,10 @@ test('settings dialog: status line -> open -> save -> status gone, file written'
     cwd: ROOT,
     env: {
       ...process.env,
+      // The full set that keeps a booted server off the network — one list,
+      // imported, because every file that wrote it out by hand got it wrong.
+      // Spread first, so anything below may still override it deliberately.
+      ...QUIET_ENV,
       PORT: String(port),
       POE_USERS: 'player1,player2',
       POE_NETWORTH_CONFIG: credPath,
@@ -66,7 +79,8 @@ test('settings dialog: status line -> open -> save -> status gone, file written'
       POE_FAUSTUS_DISABLED: '1',
       POE_CORPSE_DISABLED: '1',
       POE_DATA_REFRESH_DISABLED: '1',
-      POE_REFERENCE_DISABLED: '1'
+      POE_REFERENCE_DISABLED: '1',
+      POE_ADMIN_PASSWORD_FILE: join(tmp, 'admin-password')
     },
     stdio: ['ignore', 'pipe', 'pipe']
   })
@@ -117,38 +131,37 @@ test('settings dialog: status line -> open -> save -> status gone, file written'
   }
 
   try {
+    // ---- the net-worth page now POINTS here instead of opening a modal ------
     await S('Page.navigate', { url: base + '/networth.html' })
     await waitFor(`document.getElementById('connlbl') && document.getElementById('connlbl').textContent === 'live'`, 'page never went live')
 
-    // part 1: the status line shows the 'missing' state
     await waitFor(`!document.getElementById('appStatus').hidden`, 'status line stayed empty despite missing credentials')
     assert.equal(await evalJs(`document.getElementById('appStatus').textContent`),
       'No credentials configured — open settings to add them.')
+    assert.equal(await evalJs(`new URL(document.getElementById('settingsBtn').href).pathname`), '/settings.html',
+      'the M1 action is a link to the settings page')
+    assert.ok(await evalJs(`!document.getElementById('setGate')`), 'the modal is gone for good')
 
-    // the status line opens the dialog
+    // Clicking the sync message navigates — the state it names is fixed there.
     await evalJs(`document.getElementById('appStatus').click()`)
-    assert.ok(!(await evalJs(`document.getElementById('setGate').hidden`)), 'clicking the status line opens the dialog')
-    // POESESSID field: type password, always empty, autocomplete off
-    assert.equal(await evalJs(`document.getElementById('setSessid').type`), 'password')
-    assert.equal(await evalJs(`document.getElementById('setSessid').value`), '')
-    assert.equal(await evalJs(`document.getElementById('setSessid').autocomplete`), 'off')
+    await waitFor(`location.pathname === '/settings.html'`, 'the status line did not navigate to the settings page')
 
-    // cancel, then re-open via the M1 button
-    await evalJs(`document.getElementById('setCancel').click()`)
-    assert.ok(await evalJs(`document.getElementById('setGate').hidden`), 'cancel closes the dialog')
-    await evalJs(`document.getElementById('settingsBtn').click()`)
-    assert.ok(!(await evalJs(`document.getElementById('setGate').hidden`)), 'the settings button opens it')
+    // ---- the sync credentials, now a section of this page -------------------
+    await waitFor(`document.getElementById('setState') && document.getElementById('setState').textContent.startsWith('No credentials configured')`,
+      'the settings page never showed the real credential state')
+    assert.equal(await evalJs(`document.getElementById('setSessid').type`), 'password')
+    assert.equal(await evalJs(`document.getElementById('setSessid').value`), '', 'the stored value is never delivered')
+    assert.equal(await evalJs(`document.getElementById('setSessid').autocomplete`), 'off')
 
     // length hint: shown at an unusual length, but it never blocks saving
     await evalJs(`(el => { el.value = 'kurz'; el.dispatchEvent(new Event('input')) })(document.getElementById('setSessid'))`)
     assert.ok(!(await evalJs(`document.getElementById('setHint').hidden`)), 'hint visible at 4 characters')
 
-    // save
     await evalJs(`document.getElementById('setAccount').value = 'Player#0001'`)
     await evalJs(`(el => { el.value = ${JSON.stringify(SECRET)}; el.dispatchEvent(new Event('input')) })(document.getElementById('setSessid'))`)
     assert.ok(await evalJs(`document.getElementById('setHint').hidden`), 'hint gone again at 32 characters')
     await evalJs(`document.getElementById('setSave').click()`)
-    await waitFor(`document.getElementById('setGate').hidden`, 'dialog did not close after saving')
+    await waitFor(`!document.getElementById('setOk').hidden`, 'saving never confirmed')
 
     // the status line clears itself (the server broadcasts the new state)
     await waitFor(`document.getElementById('appStatus').hidden`, 'status line did not disappear after saving')
@@ -163,10 +176,43 @@ test('settings dialog: status line -> open -> save -> status gone, file written'
     assert.ok(!(await evalJs(`document.documentElement.outerHTML.includes(${JSON.stringify(SECRET)})`)), 'secret must not appear in the DOM')
     assert.equal(await evalJs(`document.getElementById('setSessid').value`), '')
 
-    // re-open: accountName prefilled, POESESSID field empty
-    await evalJs(`document.getElementById('settingsBtn').click()`)
-    await waitFor(`document.getElementById('setAccount').value === 'Player#0001'`, 'accountName was not prefilled')
+    // reload: accountName prefilled from the server, POESESSID field empty
+    await S('Page.navigate', { url: base + '/settings.html' })
+    await waitFor(`document.getElementById('setAccount') && document.getElementById('setAccount').value === 'Player#0001'`, 'accountName was not prefilled')
     assert.equal(await evalJs(`document.getElementById('setSessid').value`), '')
+
+    // ---- the admin area -----------------------------------------------------
+    // Closed by default: the ordinary user never sees the diagnostics.
+    assert.ok(await evalJs(`document.getElementById('admView').hidden`), 'the admin view starts closed')
+    assert.ok(!(await evalJs(`document.getElementById('admGate').hidden`)), 'the password prompt is what is shown')
+
+    // A wrong password says so and changes nothing.
+    await evalJs(`document.getElementById('admPass').value = 'nope'`)
+    await evalJs(`document.getElementById('admOpen').click()`)
+    await waitFor(`!document.getElementById('admErr').hidden`, 'a wrong password produced no message')
+    assert.equal(await evalJs(`document.getElementById('admErr').textContent`), 'Wrong password.')
+    assert.ok(await evalJs(`document.getElementById('admView').hidden`), 'and the view stayed closed')
+    assert.equal(await evalJs(`sessionStorage.getItem('ppt_admin')`), null, 'nothing was remembered')
+
+    // The default password from the file the server created on boot.
+    await evalJs(`document.getElementById('admPass').value = 'admin'`)
+    await evalJs(`document.getElementById('admOpen').click()`)
+    await waitFor(`!document.getElementById('admView').hidden`, 'the admin view never opened')
+    assert.equal(await evalJs(`sessionStorage.getItem('ppt_admin')`), 'admin',
+      'the password lives in sessionStorage — that is the whole session model')
+    assert.ok(await evalJs(`document.getElementById('admSkew').textContent.length > 0`), 'the dataset offset is rendered')
+    assert.ok(await evalJs(`document.getElementById('admGaps').textContent.length > 0`), 'so is the gap list')
+
+    // A reload of the tab keeps it open, because the value survives in
+    // sessionStorage and the server re-checks it on every request.
+    await S('Page.navigate', { url: base + '/settings.html' })
+    await waitFor(`document.getElementById('admView') && !document.getElementById('admView').hidden`,
+      'the unlocked view did not survive a reload of the same tab')
+
+    // Closing forgets it again — the only "logout" there is.
+    await evalJs(`document.getElementById('admClose').click()`)
+    assert.ok(await evalJs(`document.getElementById('admView').hidden`))
+    assert.equal(await evalJs(`sessionStorage.getItem('ppt_admin')`), null)
   } finally {
     cdp.close()
     chrome.kill('SIGTERM')

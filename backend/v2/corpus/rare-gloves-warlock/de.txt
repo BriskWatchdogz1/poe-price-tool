@@ -1,0 +1,38 @@
+Gegenstandsklasse: Handschuhe
+Seltenheit: Selten
+Grauenvoller Kloben
+Hexenmeister-Handschuhe
+--------
+Qualität: +20% (augmented)
+Energieschild: 350 (augmented)
+Immaterialität: 26%
+--------
+Anforderungen:
+Stufe: 84
+Str: 111
+Ges: 68
+Int: 144
+--------
+Fassungen: R-B W-G 
+--------
+Gegenstandsstufe: 85
+--------
+{ Impliziter Modifikator des Brennenden Exarchen (Große(r)) — Schaden, Kreatur }
+Kreaturen verursachen 20(20-22)% erhöhten Schaden
+{ Impliziter Modifikator des Weltenfressers (Kleine(r)) }
++5% Chance, Zauberschaden zu unterdrücken
+(40% des Schadens von unterdrückten Treffern und Beeinträchtigungen, die sie verursachen, werden verhindert)
+--------
+{ Präfix-Modifikator "Siedender" (Level: 1) — Defensiven, Energieschild }
++42(39-49) zu maximalem Energieschild
+{ Präfix-Modifikator "Seraphimwürdiger" (Level: 1) — Defensiven, Energieschild }
+40(39-42)% erhöhter Energieschild
+17(16-17)% beschleunigte Betäubungs- und Blockerholung
+{ Präfix-Modifikator "Unangreifbarer" (Level: 1) — Defensiven, Energieschild }
+97(92-100)% erhöhter Energieschild
+{ Suffix-Modifikator "des Ephij" (Level: 1) — Elementar, Blitz, Widerstand }
++48(46-48)% zu Blitzwiderstand
+{ Suffix-Modifikator "des Tzteosh" (Level: 1) — Elementar, Feuer, Widerstand }
++47(46-48)% zu Feuerwiderstand
+Brennender Exarch-Gegenstand
+Weltenfresser-Gegenstand

@@ -1,0 +1,39 @@
+Gegenstandsklasse: Stiefel
+Seltenheit: Selten
+Animus-Huf
+Kreuzfahrerstiefel
+--------
+Qualität: +20% (augmented)
+Rüstung: 368 (augmented)
+Energieschild: 74 (augmented)
+Erinnerungsstränge: 38
+--------
+Anforderungen:
+Stufe: 67
+Str: 62
+Int: 62
+--------
+Fassungen: B-B-B-R
+--------
+Gegenstandsstufe: 85
+--------
+{ Impliziter Modifikator des Brennenden Exarchen (Größere(r)) — Geschwindigkeit }
+Während in der Präsenz eines einzigartigen Gegners: 5% erhöhte Aktionsgeschwindigkeit
+{ Impliziter Modifikator des Weltenfressers (Kleine(r)) }
+35(33-35)% erhöhte Rüstung von ausgerüstetem Helm und Handschuhen
+--------
+{ Präfix-Modifikator "Robuster" (Level: 4) — Leben }
++82(70-84) zu maximalem Leben
+{ Präfix-Modifikator "Seraphimwürdiger" (Level: 1) — Defensiven, Rüstung, Energieschild }
+39(39-42)% erhöhte Rüstung und Energieschild
+17(16-17)% beschleunigte Betäubungs- und Blockerholung
+{ Präfix-Modifikator "Eingefügter" (Level: 2) — Defensiven, Rüstung, Energieschild }
+90(80-91)% erhöhte Rüstung und Energieschild
+{ Suffix-Modifikator "des Eisbären" (Level: 3) — Elementar, Kälte, Widerstand }
++39(36-41)% zu Kältewiderstand
+{ Suffix-Modifikator "des Tzteosh" (Level: 1) — Elementar, Feuer, Widerstand }
++47(46-48)% zu Feuerwiderstand
+{ Suffix-Modifikator "des Blitzes" (Level: 2) — Elementar, Blitz, Widerstand }
++42(42-45)% zu Blitzwiderstand
+Brennender Exarch-Gegenstand
+Weltenfresser-Gegenstand

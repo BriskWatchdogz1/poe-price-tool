@@ -22,7 +22,12 @@ export async function valueTab ({ items, tab, valuator, normalize, cdRatio, leag
       entries.push({ desc: { kind: 'skip', reason: 'error', name: '?' }, tabIndex: tab.index, tabName: tab.name, value: null })
     }
   }
-  const per = aggregate({ entries, cdRatio, league, accountName })
+  // unpricedMax: Infinity — what comes out of here is WRITTEN TO THE STORE, not
+  // drawn on a page, and the net-worth recorder reads the stored unpriced names
+  // back as its proof that an item without a price is still in the stash. A cap
+  // here would put that proof out of reach for exactly the thinly traded items
+  // that need it, so the display cap stays where the display is (aggregate.mjs).
+  const per = aggregate({ entries, cdRatio, league, accountName, unpricedMax: Infinity })
   // Diagnostics (POE_NETWORTH_DEBUG=1): ONLY here can "the tab came back empty"
   // be told apart from "every item was skipped". Deliberately sits in valueTab
   // and not in scanTabs — the background refresher calls valueTab directly, and

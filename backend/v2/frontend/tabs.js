@@ -12,11 +12,18 @@
 
 // What the user sees for a tab. Unnamed tabs get a stable, distinguishable
 // label from their raw GGG index, so four of them are four different rows.
+// The synthetic label for an unnamed tab is UI text, so it goes through the
+// string table like everything else. In node (unit tests) there is no window —
+// the English wording is the built-in default there.
+const T = (key, params) => (typeof window !== 'undefined' && window.I18n)
+  ? window.I18n.t(key, params)
+  : (key === 'nw.tabFallback' ? `Tab #${params.n}` : 'Tab')
+
 export function tabLabel (t) {
   const name = t && typeof t.name === 'string' ? t.name : ''
   if (name.trim()) return name
   const i = Number(t ? t.index : NaN)
-  return Number.isFinite(i) ? `Tab #${i}` : 'Tab'
+  return Number.isFinite(i) ? T('nw.tabFallback', { n: i }) : T('nw.tabFallbackPlain')
 }
 
 // Sidebar display order: saved order (a list of indexes) first, then every tab

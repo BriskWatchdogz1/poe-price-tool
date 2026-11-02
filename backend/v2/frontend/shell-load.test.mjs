@@ -1,5 +1,5 @@
 // Browser smoke test of the global shell (gitignored, local): boots the REAL
-// server and loads all three pages in headless Chrome. Per page it checks: no
+// server and loads all four pages in headless Chrome. Per page it checks: no
 // JS exceptions, no 404s on our own assets, rail slots in the DOM
 // (nav/league/C:D), status line present and invisible, Shell API usable.
 // Structure mirrored from trend-click.test.mjs.
@@ -12,6 +12,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createServer } from 'node:net'
 import WebSocket from 'ws'
+import { QUIET_ENV } from '../test-quiet-env.mjs'
 
 const ROOT = fileURLToPath(new URL('../../..', import.meta.url))
 const CHROME = process.env.CHROME_BIN || 'google-chrome-stable'
@@ -47,7 +48,7 @@ async function cdpConnect (wsUrl) {
   return { send, events, close: () => ws.close() }
 }
 
-test('all three pages load without errors and show the global shell', { timeout: 180_000 }, async () => {
+test('all four pages load without errors and show the global shell', { timeout: 180_000 }, async () => {
   const tmp = await mkdtemp(join(tmpdir(), 'ppt-shell-'))
   const port = await freePort()
   const dbg = await freePort()
@@ -65,6 +66,10 @@ test('all three pages load without errors and show the global shell', { timeout:
     cwd: ROOT,
     env: {
       ...process.env,
+      // The full set that keeps a booted server off the network — one list,
+      // imported, because every file that wrote it out by hand got it wrong.
+      // Spread first, so anything below may still override it deliberately.
+      ...QUIET_ENV,
       PORT: String(port),
       POE_USERS: 'player1,player2',
       POE_NETWORTH_CONFIG: credPath,
@@ -122,7 +127,7 @@ test('all three pages load without errors and show the global shell', { timeout:
     // entries, collected per page and compared at the end — every entry must
     // sit at exactly the same spot on EVERY page.
     const navRects = {}
-    for (const path of ['/', '/networth.html', '/history.html']) {
+    for (const path of ['/', '/networth.html', '/history.html', '/settings.html']) {
       cdp.events.length = 0
       await S('Page.navigate', { url: base + path })
       // Wait until the page script has run (WS connected or gate open).
@@ -150,7 +155,7 @@ test('all three pages load without errors and show the global shell', { timeout:
         assert.ok(await evalJs(`!!document.querySelector(${JSON.stringify(sel)})`), `${path}: ${sel} missing`)
       }
       // nav: exactly one active entry, four targets
-      assert.equal(await evalJs(`document.querySelectorAll('.navlinks .backlink').length`), 3, `${path}: 3 nav entries`)
+      assert.equal(await evalJs(`document.querySelectorAll('.navlinks .backlink').length`), 4, `${path}: 4 nav entries`)
       assert.equal(await evalJs(`document.querySelectorAll('.navlinks .backlink.on').length`), 1, `${path}: 1 active entry`)
       // status line: present, empty -> invisible; Shell.setStatus reveals it
       assert.ok(await evalJs(`document.getElementById('appStatus').hidden`), `${path}: appStatus must be invisible while empty`)
@@ -192,12 +197,12 @@ test('all three pages load without errors and show the global shell', { timeout:
       navRects[path] = await evalJs(`[...document.querySelectorAll('.navlinks .whoami, .navlinks .backlink')]
         .map(el => { const r = el.getBoundingClientRect()
           return [Math.round(r.x), Math.round(r.y), Math.round(r.width), Math.round(r.height)] })`)
-      assert.equal(navRects[path].length, 4, `${path}: whoami + 3 nav entries`)
+      assert.equal(navRects[path].length, 5, `${path}: whoami + 4 nav entries`)
     }
 
     // fixed grid: every box sits at the same spot on every page
     const refRects = navRects['/']
-    for (const path of ['/networth.html', '/history.html']) {
+    for (const path of ['/networth.html', '/history.html', '/settings.html']) {
       navRects[path].forEach((r, i) => {
         r.forEach((v, j) => {
           assert.ok(Math.abs(v - refRects[i][j]) <= 1,

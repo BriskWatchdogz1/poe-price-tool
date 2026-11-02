@@ -4,7 +4,7 @@
 #  - build:   installs the root deps (ws + the esbuild devDependency) and the
 #             renderer deps (fnv1a, for the search indices),
 #             builds the self-contained engine bundle and generates the search indices.
-#  - runtime: slim node:20-slim, only what's needed at runtime. The path relation
+#  - runtime: slim node:24-slim, only what's needed at runtime. The path relation
 #             backend/v2/ <-> renderer/public/data MUST be preserved because the
 #             default data path in engine.mts is relative
 #             (new URL('../../renderer/public/', import.meta.url) from backend/v2).
@@ -12,7 +12,7 @@
 # ---------------------------------------------------------------------------
 # Build stage
 # ---------------------------------------------------------------------------
-FROM node:20 AS build
+FROM node:24 AS build
 WORKDIR /app
 
 # Copy only the manifests first (layer cache: deps only rebuild on manifest change).
@@ -42,16 +42,70 @@ RUN cd renderer && node src/assets/make-index-files.mjs
 # ---------------------------------------------------------------------------
 # Runtime stage
 # ---------------------------------------------------------------------------
-FROM node:20-slim AS runtime
+FROM node:24-slim AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
 ENV PORT=8788
 
-# Only what's needed at runtime. Runtime needs ONLY `ws` (the bundle is self-contained)
-# + the data. The backend/v2 <-> renderer/public/data path relation is preserved.
+# Which commit this image was built from — the first question anybody asks
+# before updating, and until now unanswerable from the running container.
+#
+# It is EMPTY unless the build is given one, and that is on purpose: docker has
+# no idea what git thinks, the build context does not even contain .git (see
+# .dockerignore), so the only honest source is whoever starts the build. The
+# admin area prints "unknown" when it is empty rather than inventing a value.
+#
+#   docker compose up -d --build                              -> unknown
+#   BUILD_COMMIT=$(git rev-parse --short HEAD) docker compose up -d --build
+#   deploy/host-update.sh                                     -> sets it itself
+ARG BUILD_COMMIT=""
+ENV POE_BUILD_COMMIT=$BUILD_COMMIT
+
+# Only what's needed at runtime. The engine bundle is self-contained, so the
+# server itself needs only `ws`; the three packages below it belong to the
+# LANGUAGE GENERATOR (lang-data-gen.mjs resolves `pathofexile-dat/dat.js` at
+# call time and spawns its CLI to export GGG's game data). They are dead weight
+# on an English-only install and ~600 KB in total, which is cheaper than a
+# German install failing every generation run.
+# The backend/v2 <-> renderer/public/data path relation is preserved.
 COPY --from=build --chown=node:node /app/node_modules/ws                ./node_modules/ws
+COPY --from=build --chown=node:node /app/node_modules/pathofexile-dat        ./node_modules/pathofexile-dat
+COPY --from=build --chown=node:node /app/node_modules/pathofexile-dat-schema ./node_modules/pathofexile-dat-schema
+COPY --from=build --chown=node:node /app/node_modules/ooz-wasm              ./node_modules/ooz-wasm
 COPY --from=build --chown=node:node /app/backend/v2/server.mjs          ./backend/v2/server.mjs
+# The installed version shown in the browser comes from package.json (read by
+# version.mjs); without it the server says "unknown".
+COPY --from=build --chown=node:node /app/package.json                     ./package.json
+COPY --from=build --chown=node:node /app/backend/v2/version.mjs           ./backend/v2/version.mjs
+# Once-a-day release check against GitHub (the module server.mjs imports).
+COPY --from=build --chown=node:node /app/backend/v2/release-check.mjs     ./backend/v2/release-check.mjs
+# Runtime configuration overrides from the /config volume. config-boot.mjs is
+# server.mjs's FIRST import and must be in the image, or the container dies on
+# boot before it has read a single setting.
+COPY --from=build --chown=node:node /app/backend/v2/config-boot.mjs      ./backend/v2/config-boot.mjs
+COPY --from=build --chown=node:node /app/backend/v2/config-overrides.mjs ./backend/v2/config-overrides.mjs
+# The "could this name be a credential" expression. Its own module so that
+# config-overrides.mjs -> numeric-settings.mjs -> host-update.mjs is not a cycle.
+COPY --from=build --chown=node:node /app/backend/v2/secret-keys.mjs      ./backend/v2/secret-keys.mjs
+# What counts as a patch version. Its own module for the same reason: the
+# settings page validates POE_PATCH_VERSION with the expression the generator
+# uses, without dragging the whole derivation into the boot path.
+COPY --from=build --chown=node:node /app/backend/v2/patch-version.mjs    ./backend/v2/patch-version.mjs
+# Why a background check failed, in a form the status line can act on (the class
+# of the failure plus the filter its reason passes through).
+COPY --from=build --chown=node:node /app/backend/v2/check-failure.mjs    ./backend/v2/check-failure.mjs
+# The numeric half of the configuration: the one reader for "a number out of the
+# environment" plus the table of defaults, ranges and which settings accept a
+# literal 0. server.mjs reads every number in its config block through them.
+COPY --from=build --chown=node:node /app/backend/v2/env-number.mjs       ./backend/v2/env-number.mjs
+COPY --from=build --chown=node:node /app/backend/v2/numeric-settings.mjs ./backend/v2/numeric-settings.mjs
+# Summarises a JSON.parse failure WITHOUT quoting the file it failed on. Used by
+# both stores that read hand-editable JSON out of /config.
+COPY --from=build --chown=node:node /app/backend/v2/json-error.mjs       ./backend/v2/json-error.mjs
 COPY --from=build --chown=node:node /app/backend/v2/rate-limit-signal.mjs ./backend/v2/rate-limit-signal.mjs
+# GGG's X-Rate-Limit headers, parsed. Its own module so the trade audit can read
+# them without importing the net-worth stack — see the note in the file.
+COPY --from=build --chown=node:node /app/backend/v2/rate-limit-headers.mjs ./backend/v2/rate-limit-headers.mjs
 COPY --from=build --chown=node:node /app/backend/v2/trade-stats.mjs      ./backend/v2/trade-stats.mjs
 # Sell-side comparison for the reference rail (server.mjs imports ./sell-side.mjs).
 COPY --from=build --chown=node:node /app/backend/v2/sell-side.mjs        ./backend/v2/sell-side.mjs
@@ -71,6 +125,28 @@ COPY --from=build --chown=node:node /app/backend/v2/data-refresher.mjs      ./ba
 COPY --from=build --chown=node:node /app/backend/v2/apt-data-update.mjs     ./backend/v2/apt-data-update.mjs
 COPY --from=build --chown=node:node /app/backend/v2/apt-index.mjs           ./backend/v2/apt-index.mjs
 COPY --from=build --chown=node:node /app/backend/v2/base-names-gen.mjs   ./backend/v2/base-names-gen.mjs
+# Second language: the parse-only engine instance, the user->language map, the
+# de->en bridge for the repair path, the gap log, the skew view and the admin
+# gate (all imported by server.mjs), plus the generator the data-refresher runs
+# as a post step of its APT check and its hand-maintained pseudo-matcher table.
+# `dockerfile-closure.test.mjs` pins this list against what server.mjs actually
+# imports, so the next module cannot go missing here unnoticed.
+COPY --from=build --chown=node:node /app/backend/v2/engine-instances.mjs     ./backend/v2/engine-instances.mjs
+COPY --from=build --chown=node:node /app/backend/v2/user-langs.mjs           ./backend/v2/user-langs.mjs
+COPY --from=build --chown=node:node /app/backend/v2/user-lang-store.mjs      ./backend/v2/user-lang-store.mjs
+COPY --from=build --chown=node:node /app/backend/v2/mod-text-pairs.mjs       ./backend/v2/mod-text-pairs.mjs
+COPY --from=build --chown=node:node /app/backend/v2/gap-log.mjs              ./backend/v2/gap-log.mjs
+COPY --from=build --chown=node:node /app/backend/v2/lang-skew.mjs            ./backend/v2/lang-skew.mjs
+COPY --from=build --chown=node:node /app/backend/v2/admin-auth.mjs           ./backend/v2/admin-auth.mjs
+# The update button's container half: it writes a request into the /config
+# volume and reads back what the host script left there. The SCRIPT itself
+# (deploy/host-update.sh) deliberately does NOT travel into the image — it runs
+# on the host, where the checkout and the docker daemon are.
+COPY --from=build --chown=node:node /app/backend/v2/host-update.mjs          ./backend/v2/host-update.mjs
+COPY --from=build --chown=node:node /app/backend/v2/lang-data-gen.mjs        ./backend/v2/lang-data-gen.mjs
+COPY --from=build --chown=node:node /app/backend/v2/lang-derive.mjs          ./backend/v2/lang-derive.mjs
+COPY --from=build --chown=node:node /app/backend/v2/lang-statdesc.mjs        ./backend/v2/lang-statdesc.mjs
+COPY --from=build --chown=node:node /app/backend/v2/lang-pseudo-matchers.json ./backend/v2/lang-pseudo-matchers.json
 # Net-worth tracker: extracted ninja fetchers + networth modules (server.mjs
 # imports ./ninja.mjs and ./networth/*). Without this, startup crashes.
 COPY --from=build --chown=node:node /app/backend/v2/ninja.mjs            ./backend/v2/ninja.mjs
@@ -97,7 +173,7 @@ RUN find ./backend -name '*.test.mjs' -delete
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 EXPOSE 8788
 
-# Healthcheck via the /health endpoint (node:20-slim has no curl -> global fetch).
+# Healthcheck via the /health endpoint (node:24-slim has no curl -> global fetch).
 # Generous start-period: the server warms the data DB + poe.ninja caches on boot.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=45s --retries=3 \
   CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||8788)+'/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"

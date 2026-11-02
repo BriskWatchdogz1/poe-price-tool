@@ -1,0 +1,40 @@
+Gegenstandsklasse: Körperrüstungen
+Seltenheit: Selten
+Vergessens-Überwurf
+Paladin-Kettenrüstung
+--------
+Qualität: +20% (augmented)
+Rüstung: 2503 (augmented)
+Energieschild: 573 (augmented)
+--------
+Anforderungen:
+Stufe: 78
+Str: 151 (unmet)
+Int: 151
+--------
+Fassungen: G-R-B-B-W W
+--------
+Gegenstandsstufe: 86
+--------
+{ Impliziter Modifikator des Brennenden Exarchen (Größere(r)) — Widerstand }
++1% zu allen maximalen Widerständen
+(Die maximalen Widerstände können 90% nicht überschreiten)
+{ Impliziter Modifikator des Weltenfressers (Größere(r)) — Physisch, Elementar, Kälte }
+Erleidet 10% des physischen Schadens von Treffern als Kälteschaden
+--------
+{ Präfix-Modifikator "Gottesfürchtiger" (Level: 1) — Defensiven, Rüstung, Energieschild }
++363(301-375) zu Rüstung
++73(73-80) zu maximalem Energieschild
+{ Präfix-Modifikator "Des Exarchen" (Level: 1) — Leben, Defensiven, Energieschild }
++30(26-30) zu maximalem Energieschild
++36(34-38) zu maximalem Leben
+{ Präfix-Modifikator "Inspirierter" (Level: 2) — Defensiven, Rüstung, Energieschild }
+94(92-100)% erhöhte Rüstung und Energieschild
+{ Suffix-Modifikator "des Vulkans" (Level: 3) — Elementar, Feuer, Widerstand }
++38(36-41)% zu Feuerwiderstand
+{ Suffix-Modifikator "des Hüters" (Level: 3) — Physisch }
+6% zusätzliche physische Schadensminderung
+{ Meisteranfertigung Suffix-Modifikator "des Handwerks" — Defensiven, Energieschild }
+Regeneriert 150 Energieschild pro Sekunde, während sich ein seltener oder einzigartiger Gegner im Umkreis befindet
+Brennender Exarch-Gegenstand
+Weltenfresser-Gegenstand

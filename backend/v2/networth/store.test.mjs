@@ -74,14 +74,112 @@ test('tabList: all tabs, sorted by index', async () => {
   await cleanup()
 })
 
-test('pruneTabs: removes tabs the account no longer has', async () => {
+test('pruneTabs: removes tabs the account no longer has, once a second list agrees', async () => {
   const { s, cleanup } = await fresh()
   await s.setTab('player1', 0, tab(0, 'A'))
   await s.setTab('player1', 1, tab(1, 'B'))
   await s.setTab('player1', 2, tab(2, 'C'))
-  s.pruneTabs('player1', [0, 2]) // tab 1 no longer exists
+  s.pruneTabs('player1', [0, 2]) // tab 1 no longer exists — proposed, not done
+  assert.deepEqual(s.tabList('player1').map(t => t.index), [0, 1, 2])
+  s.pruneTabs('player1', [0, 2]) // the same answer twice -> carried out
   assert.deepEqual(s.tabList('player1').map(t => t.index), [0, 2])
   await cleanup()
+})
+
+// pruneTabs used to believe the live tab list absolutely, so ONE short or empty
+// response took stored tabs with it — a wipe of a whole user's stash on a single
+// bad answer, and the last known way to reach the partial-store window of B2.
+// A drop now needs two consecutive lists that agree about the same tab. There is
+// deliberately no threshold on "how much shorter": that would be a guessed
+// number, and requiring agreement needs none.
+function pruneStore () {
+  const warns = []
+  return { warns, make: async dir => {
+    const s = createNetworthStore(join(dir, 'nw.json'), { log: { warn: m => warns.push(m) } })
+    await s.load()
+    for (const [i, n] of [[0, 'A'], [1, 'B'], [2, 'C']]) await s.setTab('player1', i, tab(i, n))
+    return s
+  } }
+}
+
+test('pruneTabs: one empty tab list does NOT wipe the store, and says it is holding back', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'ppt-nw-prune-'))
+  const { warns, make } = pruneStore()
+  const s = await make(dir)
+
+  s.pruneTabs('player1', [0, 1, 2])          // the normal case: nothing goes
+  assert.deepEqual(warns, [], 'a matching tab list must stay quiet — this runs every ~15 min per user')
+
+  s.pruneTabs('player1', [])                 // one empty response
+  assert.equal(warns.length, 1)
+  assert.match(warns[0], /would drop 3 of 3 stored tabs for player1 — held back until a second list agrees/)
+  assert.match(warns[0], /EMPTY/, 'the empty list is called out as the case it is')
+  assert.deepEqual(s.tabList('player1').map(t => t.index), [0, 1, 2], 'nothing was thrown away')
+
+  s.pruneTabs('player1', [])                 // …and it stays empty: now it goes
+  assert.equal(warns.length, 2)
+  assert.match(warns[1], /pruning 3 of 3 stored tabs for player1 \(live tab list: 0\) — two consecutive lists agree/)
+  assert.deepEqual(s.tabList('player1'), [])
+  await rm(dir, { recursive: true, force: true })
+})
+
+test('pruneTabs: a single short list between two good ones costs nothing at all', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'ppt-nw-prune-blip-'))
+  const { warns, make } = pruneStore()
+  const s = await make(dir)
+
+  s.pruneTabs('player1', [0])                // the blip
+  s.pruneTabs('player1', [0, 1, 2])          // …and the next list is whole again
+  s.pruneTabs('player1', [0])                // a later, unrelated blip
+  assert.deepEqual(s.tabList('player1').map(t => t.index), [0, 1, 2],
+    'the good list in between clears the proposal — "consecutive" has to mean consecutive')
+  assert.equal(warns.length, 2, 'two hold lines, no prune line')
+  for (const w of warns) assert.doesNotMatch(w, /pruning/)
+  await rm(dir, { recursive: true, force: true })
+})
+
+test('pruneTabs: two short lists that disagree about WHICH tab is gone confirm neither', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'ppt-nw-prune-disagree-'))
+  const { make } = pruneStore()
+  const s = await make(dir)
+
+  s.pruneTabs('player1', [0, 2])             // says tab 1 is gone
+  s.pruneTabs('player1', [0, 1])             // says tab 2 is gone
+  assert.deepEqual(s.tabList('player1').map(t => t.index), [0, 1, 2],
+    'only the intersection of two lists is confirmed, and it is empty here')
+  s.pruneTabs('player1', [0, 1])             // now two lists agree on tab 2
+  assert.deepEqual(s.tabList('player1').map(t => t.index), [0, 1])
+  await rm(dir, { recursive: true, force: true })
+})
+
+test('pruneTabs: what two lists agree on goes, what only one says is held', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'ppt-nw-prune-partial-'))
+  const { warns, make } = pruneStore()
+  const s = await make(dir)
+
+  s.pruneTabs('player1', [0, 2])             // proposes 1
+  s.pruneTabs('player1', [0])                // confirms 1, proposes 2
+  assert.deepEqual(s.tabList('player1').map(t => t.index), [0, 2])
+  assert.match(warns[1], /pruning 1 of 3 stored tabs for player1 \(live tab list: 1\)/)
+  assert.match(warns[1], /1 further one\(s\) held back/)
+  await rm(dir, { recursive: true, force: true })
+})
+
+test('pruneTabs: the proposal is per user — one account answering short cannot drop another', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'ppt-nw-prune-users-'))
+  const s = createNetworthStore(join(dir, 'nw.json'), { log: { warn () {} } })
+  await s.load()
+  await s.setTab('player1', 0, tab(0, 'A'))
+  await s.setTab('player1', 1, tab(1, 'B'))
+  await s.setTab('player2', 0, tab(0, 'X'))
+  await s.setTab('player2', 1, tab(1, 'Y'))
+
+  s.pruneTabs('player1', [0])
+  s.pruneTabs('player2', [0, 1])
+  s.pruneTabs('player1', [0])
+  assert.deepEqual(s.tabList('player1').map(t => t.index), [0])
+  assert.deepEqual(s.tabList('player2').map(t => t.index), [0, 1], 'the other user was never in question')
+  await rm(dir, { recursive: true, force: true })
 })
 
 test('setMeta / getMeta', async () => {

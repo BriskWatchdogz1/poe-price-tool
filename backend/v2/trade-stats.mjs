@@ -40,52 +40,75 @@ function typeOfId (id) {
   return i === -1 ? '' : String(id).slice(0, i)
 }
 
+// Same text, minus a literal sign in front of a placeholder: "+# to maximum
+// Life" -> "# to maximum Life".
+//
+// Only resolveMatcherForm uses this, and only because of where its input comes
+// from: the de->en pair table (mod-text-pairs.mjs) is built from GGG's own
+// description lines, where the sign belongs to the placeholder (`{0:+d}`) and
+// is swallowed with it. The catalogue writes it out. So the two agree on every
+// word and disagree on exactly one character, systematically, for the whole
+// class of flat additive mods.
+export const signlessStatText = key => String(key).replace(/(^|[\s([])[+-]#/g, '$1#')
+
 export function createTradeStatIndex ({
   fetchImpl = fetch,
   ttlMs = DEFAULT_TTL_MS,
   now = () => Date.now(),
   url = TRADE_STATS_URL,
 } = {}) {
-  let byTypeAndText = null // Map<"type|normalized text", tradeId>
+  let index = null // { byText: Map<"type|text", id>, bySignless: Map<..., id|null> }
   let loadedAt = 0
   let nextAttemptAt = 0
   let inflight = null
 
-  function index (payload) {
-    const map = new Map()
+  function build (payload) {
+    const byText = new Map()
+    const bySignless = new Map()
     for (const group of payload?.result || []) {
       for (const entry of group?.entries || []) {
         if (!entry?.id || !entry?.text) continue
         // Options-based stats (id + a separate option list) can't be matched from
         // the item's flat text alone -> skip rather than mis-resolve.
         if (entry.option) continue
-        const key = `${typeOfId(entry.id)}|${normalizeStatText(entry.text)}`
-        if (!map.has(key)) map.set(key, entry.id) // first wins (catalogue order)
+        const type = typeOfId(entry.id)
+        const norm = normalizeStatText(entry.text)
+        const key = `${type}|${norm}`
+        if (!byText.has(key)) byText.set(key, entry.id) // first wins (catalogue order)
+        // Two catalogue entries that differ ONLY in the sign are two different
+        // stats; nothing may be resolved from a text that cannot tell them
+        // apart. `null` is the poison value, same rule as everywhere else here.
+        const loose = `${type}|${signlessStatText(norm)}`
+        if (bySignless.has(loose)) {
+          if (bySignless.get(loose) !== entry.id) bySignless.set(loose, null)
+        } else {
+          bySignless.set(loose, entry.id)
+        }
       }
     }
-    return map
+    return { byText, bySignless }
   }
 
   async function load () {
-    if (byTypeAndText && now() - loadedAt < ttlMs) return byTypeAndText
-    if (now() < nextAttemptAt) return byTypeAndText // in failure cooldown
+    if (index && now() - loadedAt < ttlMs) return index
+    if (now() < nextAttemptAt) return index // in failure cooldown
     if (inflight) return inflight
     inflight = (async () => {
       try {
         const r = await fetchImpl(url, { headers: { 'User-Agent': UA, Accept: 'application/json' } })
         if (!r.ok) throw new Error(`HTTP ${r.status}`)
         const payload = await r.json()
-        byTypeAndText = index(payload)
+        index = build(payload)
         loadedAt = now()
         nextAttemptAt = 0
-        console.log('[trade-stats] catalogue loaded (%d stats)', byTypeAndText.size)
+        console.log('[trade-stats] catalogue loaded (%d stats)', index.byText.size)
       } catch (e) {
         nextAttemptAt = now() + FAIL_COOLDOWN_MS
         console.warn('[trade-stats] catalogue unavailable (%s) — unknown mods stay unsearchable', e?.message || e)
       } finally {
         inflight = null
       }
-      return byTypeAndText
+      return index
     })()
     return inflight
   }
@@ -94,12 +117,30 @@ export function createTradeStatIndex ({
   // unavailable or has no match. `type` is the unknownModifier type
   // ('implicit' | 'explicit' | 'fractured' | 'crafted' | 'enchant' | ...).
   async function resolve (text, type) {
-    const map = await load()
-    if (!map) return null
+    const idx = await load()
+    if (!idx) return null
     const norm = normalizeStatText(text)
     const t = String(type || 'explicit').toLowerCase()
-    return map.get(`${t}|${norm}`) ?? null
+    return idx.byText.get(`${t}|${norm}`) ?? null
   }
 
-  return { load, resolve, get size () { return byTypeAndText ? byTypeAndText.size : 0 } }
+  // Same lookup for a text that is already English but arrives in APT's MATCHER
+  // form — the output of the de->en pair table, which has no literal signs (see
+  // signlessStatText). Exact first, so a text that does carry its sign is never
+  // decided by the looser key; signless second; a signless key two catalogue
+  // entries share resolves to nothing.
+  //
+  // Deliberately a second entry point rather than a flag on resolve(): the
+  // English path must stay bit-for-bit what it was.
+  async function resolveMatcherForm (text, type) {
+    const idx = await load()
+    if (!idx) return null
+    const norm = normalizeStatText(text)
+    const t = String(type || 'explicit').toLowerCase()
+    return idx.byText.get(`${t}|${norm}`) ??
+      idx.bySignless.get(`${t}|${signlessStatText(norm)}`) ??
+      null
+  }
+
+  return { load, resolve, resolveMatcherForm, get size () { return index ? index.byText.size : 0 } }
 }

@@ -1,4 +1,4 @@
-// Shell consistency test (gitignored, local): all three pages fill the same
+// Shell consistency test (gitignored, local): all four pages fill the same
 // slots in the same order — rail (brand, user, nav, league, C:D) and main head
 // (mhead, conn, appStatus). That was exactly the brief of the UI overhaul; this
 // test nails the order down so it cannot drift apart per page again.
@@ -12,7 +12,8 @@ const here = p => fileURLToPath(new URL(p, import.meta.url))
 const PAGES = [
   { file: 'index.html', name: 'Price Check' },
   { file: 'networth.html', name: 'Net Worth' },
-  { file: 'history.html', name: 'History' }
+  { file: 'history.html', name: 'History' },
+  { file: 'settings.html', name: 'Settings' }
 ]
 
 // Fixed slot order: every marker must be present and must appear AFTER the
@@ -45,7 +46,7 @@ for (const page of PAGES) {
   test(`${page.file}: nav lists every target, active page marked`, async () => {
     const html = await readFile(here(page.file), 'utf8')
     const nav = html.slice(html.indexOf('class="navlinks"'), html.indexOf('leaguebar'))
-    const order = ['Price Check', 'Net Worth', 'History']
+    const order = ['Price Check', 'Net Worth', 'History', 'Settings']
     let pos = -1
     for (const label of order) {
       const i = nav.indexOf(`>${label}<`)
@@ -63,7 +64,7 @@ for (const page of PAGES) {
     const html = await readFile(here(page.file), 'utf8')
     const shellAt = html.indexOf('src="shell.js"')
     assert.ok(shellAt >= 0, 'shell.js missing')
-    const pageScript = html.search(/src="(app|networth|history)\.js"/)
+    const pageScript = html.search(/src="(app|networth|history|settings)\.js"/)
     assert.ok(pageScript > shellAt, 'page script must come after shell.js')
   })
 }

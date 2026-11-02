@@ -9,9 +9,15 @@ import assert from 'node:assert/strict'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { quietEnv } from './test-quiet-env.mjs'
 
 const dir = await mkdtemp(join(tmpdir(), 'refrailsell-'))
 
+// The full set that keeps a booted server off the network. One list, imported:
+// every file that wrote it out by hand left something out, and what kept being
+// left out was the switch a WebSocket needs (test-quiet-env.mjs, docs/bugs.md
+// B25). Applied FIRST — anything this file sets below overrides it on purpose.
+quietEnv()
 process.env.PORT = '0'
 process.env.POE_CORPSE_DISABLED = '1'
 process.env.POE_NETWORTH_AUTOSYNC = '0'

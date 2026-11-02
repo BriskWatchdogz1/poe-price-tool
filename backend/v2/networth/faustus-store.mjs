@@ -11,22 +11,30 @@
 //     prices: { "<name>": <chaos:number> },
 //     ranges?: { "<name>": [min, max] },    // chaos per piece, OPTIONAL
 //     sell?:   { "<name>": { c?: [perItem, volX, volQuote],
-//                            d?: [perItem, volX, volQuote] } } } // OPTIONAL
+//                            d?: [perItem, volX, volQuote] } }, // OPTIONAL
+//     hours?:  { "<name>": <unix hour the price was OBSERVED in> } } // OPTIONAL
 //
-// `ranges` and `sell` are deliberately NOT schema bumps: they are purely
-// additive and a file written before they existed must keep loading (it then
-// simply has no ranges/sell until the next refresh tick), and a downgrade must
-// not wipe the prices. `sell` mirrors the pricer's per-market sell rates
+// `ranges`, `sell` and `hours` are deliberately NOT schema bumps: they are
+// purely additive and a file written before they existed must keep loading (it
+// then simply has no ranges/sell/hours until the next refresh tick), and a
+// downgrade must not wipe the prices. `sell` mirrors the pricer's per-market
+// sell rates
 // (faustus.mjs detail.sell): chaos (`c`) and divine (`d`) side kept separate,
 // each rate in quote units per item plus the matched volumes on both sides —
 // consumed by sell-side.mjs for the reference rail's "sell vs c or vs div"
 // comparison.
+//
+// `hours` is the one field that is about TIME rather than price, and it is the
+// only per-item one: `updatedAt` says when the refresher ran, which is not when
+// a price was observed. The union walk takes the newest hour in which a market
+// was informative, so two prices written by the same tick can be eight hours
+// apart — see networth/faustus-age.mjs for what reads this and why.
 import { readFile, writeFile, rename, unlink } from 'node:fs/promises'
 
 const SCHEMA_VERSION = 1
 
 function emptyStore () {
-  return { schema_version: SCHEMA_VERSION, updatedAt: null, league: null, prices: {}, ranges: {}, sell: {} }
+  return { schema_version: SCHEMA_VERSION, updatedAt: null, league: null, prices: {}, ranges: {}, sell: {}, hours: {} }
 }
 
 // One persisted sell side ([perItem, volX, volQuote]) from a pricer-side
@@ -104,7 +112,13 @@ export function createFaustusStore (filePath) {
     // produced by faustus.mjs detail.sell) carries the separated per-market
     // sell rates + volumes. Same discipline: defensively validated, omitting
     // the argument simply stores no sell data.
-    async setPrices (league, prices, now = Date.now(), ranges = null, sell = null) {
+    //
+    // `hours` (optional, Map or object of name -> unix hour) carries the hour
+    // each price was OBSERVED in (faustus.mjs detail.at). Only finite positive
+    // seconds survive: a bad stamp must not be able to make a price look older
+    // or younger than it is, and no stamp at all is read downstream as "age
+    // unknown", never as "fresh" (networth/faustus-age.mjs).
+    async setPrices (league, prices, now = Date.now(), ranges = null, sell = null, hours = null) {
       const obj = {}
       const entries = prices instanceof Map ? prices.entries() : Object.entries(prices || {})
       for (const [name, chaos] of entries) {
@@ -129,7 +143,12 @@ export function createFaustusStore (filePath) {
         if (d) rec.d = d
         sl[name] = rec
       }
-      store.data = { schema_version: SCHEMA_VERSION, updatedAt: now, league, prices: obj, ranges: rng, sell: sl }
+      const hrs = {}
+      const hEntries = hours instanceof Map ? hours.entries() : Object.entries(hours || {})
+      for (const [name, at] of hEntries) {
+        if (typeof at === 'number' && isFinite(at) && at > 0) hrs[name] = at
+      }
+      store.data = { schema_version: SCHEMA_VERSION, updatedAt: now, league, prices: obj, ranges: rng, sell: sl, hours: hrs }
       if (store.writable) await store.save()
     },
 
@@ -147,6 +166,14 @@ export function createFaustusStore (filePath) {
       if (typeof min !== 'number' || !isFinite(min)) return null
       if (typeof max !== 'number' || !isFinite(max)) return null
       return { min, max }
+    },
+
+    // The unix HOUR a name's price was observed in, or null — including for
+    // every file written before `hours` existed. Null means "age unknown", and
+    // every caller has to treat that as unknown rather than as fresh.
+    getHour (name) {
+      const v = store.data.hours?.[name]
+      return (typeof v === 'number' && isFinite(v) && v > 0) ? v : null
     },
 
     // Separated sell rates for a name: { chaos: {perItem,volX,volQuote}|null,

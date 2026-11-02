@@ -2,6 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createValuator } from './valuator.mjs'
 import { VALUATION_ROUTES } from './kinds.mjs'
+import { loadItemsIndex, normalizeItem } from './normalize.mjs'
 
 // Minimal faustus store stub (Task 3 shape): getPrice + league + isFresh (F1).
 // fresh defaults to true so existing tests pass the freshness gate; one dedicated
@@ -65,12 +66,19 @@ function fakeDeps () {
           { name: 'Abyssus', baseType: 'Ezomyte Burgonet', chaosValue: 9999999, listingCount: 40, count: 2 }
         ]
       }
-      // Shape as verified live: the baseType is "Map (Tier N)", NEVER the map
-      // base name of the stash item -- so the tiebreak never applies here.
+      // Shape as verified live: the baseType is "Map (Tier N)" — which is ALSO
+      // how GGG spells a unique map's base line on the item (production: the
+      // unpriced list read "Unidentified Map (Tier 16)"). So for a unique map
+      // the tiebreak is not a no-op: it is the map tier.
       if (type === 'UniqueMap') {
         return [
           { name: 'Maelström of Chaos', baseType: 'Map (Tier 8)', chaosValue: 1, listingCount: 30, count: 20 },
-          { name: "Doryani's Machinarium", baseType: 'Map (Tier 14)', chaosValue: 252.8, listingCount: 40, count: 25 }
+          { name: "Doryani's Machinarium", baseType: 'Map (Tier 14)', chaosValue: 252.8, listingCount: 40, count: 25 },
+          // The same unique map at two tiers. The CHEAPER line is deliberately
+          // the LESS liquid one: without the tier the liquidest-line tiebreak
+          // would answer "Tier 16" for a Tier 15 item, i.e. 10x too much.
+          { name: 'Cortex', baseType: 'Map (Tier 15)', chaosValue: 30, listingCount: 25, count: 10 },
+          { name: 'Cortex', baseType: 'Map (Tier 16)', chaosValue: 300, listingCount: 60, count: 40 }
         ]
       }
       if (type === 'Beast') return [{ name: 'Black Mórrigan', chaosValue: 77, listingCount: 12, count: 8 }]
@@ -252,6 +260,50 @@ test('unique map: category Map -> UniqueMap overview, the baseType tiebreak does
   const v = createValuator({ league: L, deps: fakeDeps() })
   const r = await v.value({ kind: 'unique', name: 'Maelström of Chaos', baseType: 'Torture Chamber Map', category: 'Map', links: 0, stack: 1 })
   assert.deepEqual(r, { chaosEach: 1, chaosTotal: 1, source: 'item:UniqueMap' })
+})
+
+test('unique map: the map tier in the base line picks the tier\'s line, not the liquidest', async () => {
+  // docs/pricing-logic.md claims unique maps are priced "with the map tier
+  // taken into account". This is that claim, as a test.
+  const v = createValuator({ league: L, deps: fakeDeps() })
+  const t15 = await v.value({ kind: 'unique', name: 'Cortex', baseType: 'Map (Tier 15)', category: 'Map', links: 0, mods: [], stack: 1 })
+  assert.deepEqual(t15, { chaosEach: 30, chaosTotal: 30, source: 'item:UniqueMap' })
+  const t16 = await v.value({ kind: 'unique', name: 'Cortex', baseType: 'Map (Tier 16)', category: 'Map', links: 0, mods: [], stack: 1 })
+  assert.deepEqual(t16, { chaosEach: 300, chaosTotal: 300, source: 'item:UniqueMap' })
+})
+
+test('map stash end to end: raw GGG item -> normalize -> priced (not unpriced)', async () => {
+  // The gap the green unit tests above could NOT see: they hand the valuator a
+  // descriptor that already says `category: 'Map'`. This one starts where
+  // production starts — at the stash JSON — and uses the REAL items.ndjson
+  // index, so it fails if classification never reaches the UniqueMap route.
+  const index = await loadItemsIndex()
+  const ggg = {
+    frameType: 3,
+    name: '<<set:MS>><<set:M>><<set:S>>Cortex',
+    typeLine: 'Map (Tier 15)',
+    ilvl: 83,
+    explicitMods: ['Area is inhabited by the Synthesis Boss']
+  }
+  const desc = normalizeItem(ggg, index)
+  assert.equal(desc.kind, 'unique')
+  assert.equal(desc.category, 'Map')
+  const v = createValuator({ league: L, deps: fakeDeps() })
+  const r = await v.value(desc)
+  assert.deepEqual(r, { chaosEach: 30, chaosTotal: 30, source: 'item:UniqueMap' })
+})
+
+test('map stash end to end: an UNIDENTIFIED unique map stays unpriced (never guessed)', async () => {
+  // 41 of the 48 items in the report were unidentified. Which unique a map is
+  // cannot be known before identification, so it must stay honestly unpriced —
+  // the category fix must not turn these into a price.
+  const index = await loadItemsIndex()
+  const deps = fakeDeps()
+  const desc = normalizeItem({ frameType: 3, name: '', typeLine: 'Map (Tier 16)', ilvl: 84 }, index)
+  assert.equal(desc.unidentified, true)
+  assert.equal(desc.category, 'Map')
+  assert.equal(await createValuator({ league: L, deps }).value(desc), null)
+  assert.deepEqual(deps.calls.filter(c => c[0] === 'item'), []) // and no lookup fired
 })
 
 test('unidentified unique: no poe.ninja call, result null (never 0)', async () => {
@@ -902,4 +954,127 @@ test('unique variant: missing variant/mod fields do not throw', async () => {
   const v = overviewValuator(BROKEN)
   const r = await v.value({ kind: 'unique', name: 'Y', baseType: 'B', category: 'Bow', links: 0, stack: 1, mods: ['Adds 2 to 6 Physical Damage'] })
   assert.equal(r.chaosEach, 7, 'broken mod entries must neither throw nor win')
+})
+
+// ---------------------------------------------------------------------------
+// The PER-ITEM age gate — a different question from the map-wide TTL above.
+//
+// The TTL asks "is the refresher still running". This asks "is THIS number
+// still describing the market". A tick five minutes old can hand out an
+// eight-hour-old observation for a quiet market, and that is what put 206.6c on
+// a card the in-game exchange was selling at 147c (networth/faustus-age.mjs).
+// ---------------------------------------------------------------------------
+
+const HOUR_MS = 60 * 60 * 1000
+/** A store whose one price was observed in the hour that CLOSED `h` hours ago. */
+function agedFaustusStore (name, chaos, hoursOld, now) {
+  const at = Math.floor((now - (hoursOld + 1) * HOUR_MS) / 1000)
+  return { ...fakeFaustusStore({ [name]: chaos }), getHour: n => (n === name ? at : null) }
+}
+
+test('an observation older than the gate is not served -> the chain falls through to poe.ninja', async () => {
+  const now = 1_760_000_000_000
+  const deps = fakeDeps()
+  deps.now = () => now
+  deps.faustusMaxAgeMs = 6 * HOUR_MS
+  deps.faustusStore = agedFaustusStore('The Doctor', 1234, 7, now)
+  const r = await createValuator({ league: L, deps }).value({ kind: 'divcard', name: 'The Doctor', stack: 2 })
+  assert.equal(r.source, 'exchange:DivinationCard', 'the aged Faustus price must not win')
+  assert.equal(r.chaosEach, 900, 'the poe.ninja card line takes over — the fallback the chain already had')
+})
+
+test('an observation inside the gate wins exactly as before', async () => {
+  const now = 1_760_000_000_000
+  const deps = fakeDeps()
+  deps.now = () => now
+  deps.faustusMaxAgeMs = 6 * HOUR_MS
+  deps.faustusStore = agedFaustusStore('The Doctor', 1234, 5, now)
+  const r = await createValuator({ league: L, deps }).value({ kind: 'divcard', name: 'The Doctor', stack: 2 })
+  assert.deepEqual(r, { chaosEach: 1234, chaosTotal: 2468, source: 'faustus' })
+})
+
+test('an UNKNOWN observation hour is not "old" — an older store keeps working after a deploy', async () => {
+  // Stores written before `hours` existed hold none. Reading that as stale
+  // would blank every Faustus price on the deploy that shipped the gate, which
+  // is a far bigger change than the gate itself; they age in on the next tick.
+  const now = 1_760_000_000_000
+  const deps = fakeDeps()
+  deps.now = () => now
+  deps.faustusMaxAgeMs = 6 * HOUR_MS
+  deps.faustusStore = fakeFaustusStore({ 'The Doctor': 1234 }) // no getHour at all
+  const r = await createValuator({ league: L, deps }).value({ kind: 'divcard', name: 'The Doctor', stack: 2 })
+  assert.deepEqual(r, { chaosEach: 1234, chaosTotal: 2468, source: 'faustus' })
+
+  const withHours = { ...fakeFaustusStore({ 'The Doctor': 1234 }), getHour: () => null }
+  deps.faustusStore = withHours
+  const r2 = await createValuator({ league: L, deps }).value({ kind: 'divcard', name: 'The Doctor', stack: 2 })
+  assert.deepEqual(r2, { chaosEach: 1234, chaosTotal: 2468, source: 'faustus' })
+})
+
+test('the gate applies to stackables too — it is not a divination-card rule', async () => {
+  // Same source, same semantics, same estimator: currency, fragments, essences,
+  // scarabs and the rest all come out of the identical Faustus map, so an aged
+  // observation is aged for every one of them.
+  const now = 1_760_000_000_000
+  const deps = fakeDeps()
+  deps.now = () => now
+  deps.faustusMaxAgeMs = 6 * HOUR_MS
+  deps.faustusStore = agedFaustusStore('Deafening Essence of Fear', 999, 9, now)
+  const r = await createValuator({ league: L, deps })
+    .value({ kind: 'stackable', name: 'Deafening Essence of Fear', tradeTag: 'deafening-essence-of-fear', stack: 1 })
+  assert.equal(r.source, 'exchange')
+  assert.equal(r.chaosEach, 44.3, 'the poe.ninja exchange line, not the aged 999')
+})
+
+test('an aged observation with NO fallback is honestly unpriced, never the aged number', async () => {
+  const now = 1_760_000_000_000
+  const deps = fakeDeps()
+  deps.now = () => now
+  deps.faustusMaxAgeMs = 6 * HOUR_MS
+  const inner = deps.fetchExchangeOverview
+  deps.fetchExchangeOverview = async (league, type) =>
+    type === 'DivinationCard' ? { nameToId: new Map(), lineById: new Map() } : inner(league, type)
+  deps.faustusStore = agedFaustusStore('The Doctor', 1234, 9, now)
+  const r = await createValuator({ league: L, deps }).value({ kind: 'divcard', name: 'The Doctor', stack: 2 })
+  assert.equal(r, null)
+})
+
+// ---------------------------------------------------------------------------
+// B20 — the SECOND path the four measurements of 2026-08-13 could have come
+// out of. Imperial Legacy (tool ~4.6c, in-game 14 cards per chaos) and The
+// Fathomless Depths (tool 15c, in-game 2 cards per chaos) are divination
+// cards, so their price is either Faustus (see faustus.test.mjs, same marker)
+// or this fallback — and the measurement does not say which, because the
+// Net-Worth page did not name the source at the time it was taken.
+//
+// What these two pin is that the fallback's floors do not separate the cases
+// either: a piece count is trivially cleared by a CHEAP item, which is the
+// same blind spot the unit count has in faustus.mjs, seen from the other side
+// of the chain. Both are RECONSTRUCTIONS at the floor, not observed lines.
+// ---------------------------------------------------------------------------
+test('B20: a cheap card clears the poe.ninja unit floor on 55 chaos of turnover', async () => {
+  // 4.6c at volumePrimaryValue 55 -> 11.96 units, over MIN_EXCHANGE_UNITS.
+  // 55 chaos is a quarter of a divine, and it prices a card whose in-game sell
+  // side is 1 chaos for fourteen.
+  const v = exchangeOnlyValuator({
+    DivinationCard: {
+      nameToId: new Map([['Imperial Legacy', 'imperial-legacy']]),
+      lineById: new Map([['imperial-legacy', { id: 'imperial-legacy', primaryValue: 4.6, volumePrimaryValue: 55 }]])
+    }
+  })
+  const r = await v.value({ kind: 'divcard', name: 'Imperial Legacy', stack: 14 })
+  assert.equal(r?.chaosEach, 4.6, 'the piece floor cannot see how little a cheap item is worth')
+  assert.equal(r?.chaosTotal, 64.4, 'the 14 pieces the report showed as 64c')
+})
+
+test('B20: 150 chaos of turnover is enough for a 15c line, and says nothing about a bid', async () => {
+  const v = exchangeOnlyValuator({
+    DivinationCard: {
+      nameToId: new Map([['The Fathomless Depths', 'the-fathomless-depths']]),
+      lineById: new Map([['the-fathomless-depths', { id: 'the-fathomless-depths', primaryValue: 15, volumePrimaryValue: 150 }]])
+    }
+  })
+  const r = await v.value({ kind: 'divcard', name: 'The Fathomless Depths', stack: 2 })
+  assert.equal(r?.chaosEach, 15)
+  assert.equal(r?.chaosTotal, 30, 'the 2 pieces the report showed as 30c')
 })

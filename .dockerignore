@@ -5,6 +5,37 @@ node_modules
 renderer/node_modules
 renderer/dist
 
+# RUNTIME STATE WITH CREDENTIALS IN IT — never in a build context.
+#
+# `config` is the host side of the /config volume, and in a standard checkout it
+# is a subdirectory of this one: the shipped compose file mounts `./config`. It
+# holds every configured user's POESESSID and account name
+# (networth-users.json) and the admin password (admin-password). The Dockerfile
+# copies none of it — but the build context is everything that is SENT to the
+# docker daemon, so without this line every `docker compose up -d --build` hands
+# those secrets over, and a later COPY that reaches wider than it meant to would
+# put them in the image. Measured against docker, not assumed: with no line
+# matching it, a file under config/ arrives in the context.
+#
+# `config.host-update` is deploy/host-update.sh's own directory (WORK_DIR), a
+# sibling of the config directory and therefore in the checkout as well. Its
+# staging files hold the RAW build output — the redaction that takes credentials
+# out of a failing `git`'s remote URL happens later, in the server.
+#
+# The script refuses to run when the build context does not exclude these two.
+config
+config.host-update
+
+# The other secret shapes .gitignore keeps out of the repository. None of them
+# is copied into the image either, and none of them has business being sent to
+# the daemon. docker-compose.override.yml is per-machine and is where an
+# operator's environment (and its secrets) ends up.
+.env
+.env.*
+config.toml
+*.secret
+docker-compose.override.yml
+
 # VCS / Editor / OS
 .git
 .gitignore
@@ -14,9 +45,12 @@ renderer/dist
 
 # Not needed in the image
 docs
-test-items
 daemon
 systemd
+# The update button's host half: it runs on the docker host, where the checkout
+# and the docker daemon are. Shipping it inside the container would only make
+# it look like it belonged there.
+deploy
 
 # Build artefacts — regenerated in the image
 backend/v2/*.bundle.mjs

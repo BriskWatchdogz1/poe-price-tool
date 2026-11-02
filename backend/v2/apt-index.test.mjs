@@ -30,3 +30,51 @@ test('generated index bins are byte-identical to the shipped ones', async () => 
     assert.ok(shipped.equals(mine), `${name} differs from the upstream-generated file`)
   }
 })
+
+// The same guard for a language that is NOT English. Two things are pinned
+// here: that the upstream script builds a localized set at all (its LANGUAGES
+// list used to be ['en'] and everything else was dead), and that both
+// generators agree once umlauts are in play — the index hashes FNV-1a over
+// UTF-8 bytes while the line offsets it stores are UTF-16 code units, and a
+// translated snapshot is the first thing that puts both under load at once.
+test('the upstream script builds a localized set, byte-identical to apt-index.mjs', async (t) => {
+  const { mkdtemp, mkdir, writeFile } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const { spawnSync } = await import('node:child_process')
+  const path = (await import('node:path')).default
+  const { fileURLToPath } = await import('node:url')
+
+  const RENDERER = fileURLToPath(new URL('../../renderer/', import.meta.url))
+  const SCRIPT = path.join('src/assets/make-index-files.mjs')
+
+  // A small synthetic locale: English refs, translated display text.
+  const items = [
+    { name: 'Ürne der Ewigkeit', refName: 'Eternal Orb', namespace: 'ITEM' },
+    { name: 'Chaossphäre', refName: 'Chaos Orb', namespace: 'ITEM' }
+  ].map(o => JSON.stringify(o)).join('\n') + '\n'
+  const stats = [
+    { ref: '+# to maximum Life', matchers: [{ string: '+# zu maximalem Leben' }] },
+    { ref: '#% increased Spell Damage', matchers: [{ string: '#% erhöhter Zauberschaden', advanced: '#% erhöhter Zauberschaden (Stufe: 1)' }] }
+  ].map(o => JSON.stringify(o)).join('\n') + '\n'
+
+  const root = await mkdtemp(path.join(tmpdir(), 'ppt-index-de-'))
+  await mkdir(path.join(root, 'public/data/de'), { recursive: true })
+  await writeFile(path.join(root, 'public/data/de/items.ndjson'), items)
+  await writeFile(path.join(root, 'public/data/de/stats.ndjson'), stats)
+
+  // The script needs renderer's devDependency @sindresorhus/fnv1a. Without a
+  // renderer/node_modules there is nothing to compare against — the same
+  // situation apt-data-update.mjs treats as a warning, not an error.
+  const r = spawnSync(process.execPath, [path.join(RENDERER, SCRIPT)], { cwd: root, encoding: 'utf8' })
+  if (r.status !== 0) {
+    t.skip(`upstream script not runnable here (${(r.stderr || '').split('\n')[0] || r.error?.message})`)
+    return
+  }
+
+  const mine = buildIndexBins({ itemsNdjson: items, statsNdjson: stats })
+  for (const name of ['stats-ref.index.bin', 'stats-matcher.index.bin', 'items-name.index.bin', 'items-ref.index.bin']) {
+    const theirs = await readFile(path.join(root, 'public/data/de', name))
+    const buf = Buffer.from(mine[name].buffer, mine[name].byteOffset, mine[name].byteLength)
+    assert.ok(theirs.equals(buf), `${name} differs between the two generators`)
+  }
+})

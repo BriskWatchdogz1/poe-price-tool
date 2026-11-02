@@ -128,6 +128,60 @@ test('unique map: category Map comes from the Map Tier property, not from items.
   assert.equal(normalizeItem(weird, index).category, null)
 })
 
+test('unique map from the MAP STASH: the tier-decorated base line still resolves to Map', async () => {
+  // What the map stash actually delivers (B7 opened that tap on 2026-08-11):
+  // the base line is DECORATED with the tier. Production evidence for the exact
+  // string: the unpriced list read "Unidentified Map (Tier 16) x40", and that
+  // label is literally `Unidentified ${typeLine}`.
+  //
+  // No `properties` on purpose. The Map-Tier property fallback must NOT be what
+  // saves this — before the undecorated retry these items resolved to category
+  // null, ninjaTypeFor returned null and every identified unique map (Cortex,
+  // Hallowed Ground, Mao Kun, Poorjoy's Asylum, The Vinktar Square, Whakawairua
+  // Tuahu) sat in `unpriced` while poe.ninja's UniqueMap overview priced them.
+  const cortex = { frameType: 3, name: 'Cortex', typeLine: 'Map (Tier 15)', ilvl: 83 }
+  const d = normalizeItem(cortex, index)
+  assert.equal(d.kind, 'unique')
+  assert.equal(d.name, 'Cortex')
+  assert.equal(d.category, 'Map', 'the base join must see through the tier decoration')
+  // The decoration is KEPT on baseType: poe.ninja's UniqueMap overview carries
+  // the very same spelling in its own baseType, which is how the map tier
+  // reaches the price lookup (see valuator.test.mjs).
+  assert.equal(d.baseType, 'Map (Tier 15)')
+
+  // Unidentified from the same tab: same category, name is the honest label.
+  const unid = { frameType: 3, name: '', typeLine: 'Map (Tier 16)', ilvl: 84 }
+  const u = normalizeItem(unid, index)
+  assert.equal(u.name, 'Unidentified Map (Tier 16)')
+  assert.equal(u.unidentified, true)
+  assert.equal(u.category, 'Map')
+
+  // The bridge data backs the join: EVERY unique map in it has the base "Map",
+  // and that base has the category "Map". So there is no unique map the
+  // undecorated join could fail on for lack of data.
+  const raw = await readFile(new URL('../../../renderer/public/data/en/items.ndjson', import.meta.url), 'utf8')
+  const uniqueMaps = raw.split('\n').filter(Boolean).map(l => JSON.parse(l))
+    .filter(e => e.namespace === 'UNIQUE' && e.map)
+  assert.ok(uniqueMaps.length > 0, 'the bridge data lists unique maps at all')
+  assert.deepEqual([...new Set(uniqueMaps.map(e => e.unique?.base))], ['Map'])
+  for (const n of ['Cortex', 'Hallowed Ground', 'Mao Kun', "Poorjoy's Asylum", 'The Vinktar Square', 'Whakawairua Tuahu']) {
+    assert.ok(uniqueMaps.some(e => e.refName === n), `${n} is a unique map in the bridge data`)
+  }
+  assert.equal(index.categoryOfBase('Map'), 'Map')
+})
+
+test('undecorating a base line can never shadow a real base: no base name has a parenthesis', async () => {
+  // The retry in uniqueCategory strips a trailing "(…)" and looks the rest up.
+  // That is only safe as long as no base name in the bridge data contains a
+  // parenthesis itself — otherwise the retry could resolve to a DIFFERENT item
+  // class and misprice instead of leaving the item unpriced.
+  const raw = await readFile(new URL('../../../renderer/public/data/en/items.ndjson', import.meta.url), 'utf8')
+  const withParen = raw.split('\n').filter(Boolean).map(l => JSON.parse(l))
+    .filter(e => e.namespace !== 'UNIQUE' && /[()]/.test(e.refName || ''))
+    .map(e => e.refName)
+  assert.deepEqual(withParen, [])
+})
+
 test('unique with a known category is left alone: the Map Tier fallback does not kick in', () => {
   // Even with a Map Tier property the base category from items.ndjson wins.
   const helm = { ...UNIQUE_MARKUP, properties: [{ name: 'Map Tier', values: [['16', 0]] }] }

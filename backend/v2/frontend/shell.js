@@ -14,11 +14,19 @@ window.Shell = (() => {
   // HTML fallback ("Trade Console") stays if this never runs. `pageTitle` is
   // the page name shown in the tab; without it (Price Check = the app's home)
   // the title is just the app name.
-  function applyBrand (name, pageTitle) {
-    if (!name) return
+  // `pageTitleKey` is an i18n key ('nav.networth'/'nav.history'), not a literal:
+  // the tab title has to follow the language like everything else.
+  let brandName = null
+  let brandPageKey = null
+  function applyBrand (name, pageTitleKey) {
+    if (name) brandName = name
+    if (pageTitleKey) brandPageKey = pageTitleKey
+    if (!brandName) return
     const b = document.querySelector('.rail .logo b')
-    if (b) b.textContent = name
-    document.title = pageTitle ? `${pageTitle} — ${name}` : `${name} — Path of Exile`
+    if (b) b.textContent = brandName
+    document.title = brandPageKey
+      ? `${window.I18n.t(brandPageKey)} — ${brandName}`
+      : `${brandName} — ${window.I18n.t('app.subtitle')}`
   }
 
   // ---- R4 league selector --------------------------------------------------
@@ -49,7 +57,15 @@ window.Shell = (() => {
   }
 
   // Server broadcast of the active league (also on changes by other clients).
+  //
+  // `lang` rides on this message on connect AND after a language switch through
+  // POST /user-lang (PROTOCOL.md). Applying it here rather than in each page is
+  // what makes the switch reach every tab this user has open — including the
+  // ones that were never told about the settings page. A `set-league` broadcast
+  // carries no `lang`, so the guard below is what keeps the league from
+  // resetting the language.
   function applyLeagueState (msg) {
+    if (msg && msg.lang) window.I18n.setLang(msg.lang)
     if (!leagueSel) return
     const active = msg.active
     if (!active) return
@@ -90,20 +106,21 @@ window.Shell = (() => {
     if (!cdValue) return
     cdValue.textContent = msg.chaosPerDivine
     cdConv.textContent = msg.chaosPerDivine
-    cdTrend.textContent = msg.trendHint || 'live'
+    cdTrend.textContent = window.I18n.srv(msg.trendHint) || window.I18n.t('rail.cdTrendFallback')
     if (Array.isArray(msg.sparkline) && msg.sparkline.length) drawCdSpark(msg.sparkline)
   }
 
   // ---- M2 status line ------------------------------------------------------
   // Reserved slot for operational states. SEVERAL sources write here (the
-  // net-worth sync status and the data auto-update freshness note), so the
-  // slot holds a KEYED set of messages instead of one string: each key owns
-  // one line inside the slot, keys never overwrite each other, and the render
-  // order is fixed (STATUS_ORDER) so a message never jumps around. The slot
-  // collapses only when the last message is gone.
+  // net-worth sync status, the data auto-update freshness note and the notice
+  // that a newer release exists), so the slot holds a KEYED set of messages
+  // instead of one string: each key owns one line inside the slot, keys never
+  // overwrite each other, and the render order is fixed (STATUS_ORDER) so a
+  // message never jumps around. The slot collapses only when the last message
+  // is gone.
   const statusEl = document.getElementById('appStatus')
   const statusMsgs = new Map()
-  const STATUS_ORDER = ['sync', 'data'] // actionable first, informational after
+  const STATUS_ORDER = ['sync', 'data', 'release'] // actionable first, informational after
 
   function renderStatus () {
     if (!statusEl) return
@@ -145,27 +162,84 @@ window.Shell = (() => {
 
   function ageText (ms) {
     const h = Math.floor(ms / 3600000)
-    if (h < 48) return `${h} hours`
-    return `${Math.floor(h / 24)} days`
+    if (h < 48) return window.I18n.t('shell.ageHours', { n: h })
+    return window.I18n.t('shell.ageDays', { n: Math.floor(h / 24) })
   }
 
-  function staleSources (st, nowMs) {
+  // A class whose diagnosis is CERTAIN the moment it is made, so waiting for the
+  // staleness threshold buys nothing. `incompatible` means the export read the
+  // data and the schema does not match this build — a fact, not a symptom of a
+  // duration. Three silent days on a known cause is precisely the defect this
+  // whole line exists to remove, so this one skips the wait.
+  //
+  // `unreachable` and `rejected` deliberately do not: an upstream that is away
+  // for an hour is not news, and a run that failed once may well succeed on the
+  // next tick. There the age IS the information.
+  const REPORT_AT_ONCE = new Set(['incompatible'])
+
+  function relevantSources (st, nowMs) {
     if (!st || !st.enabled) return []
     // Age against the SERVER clock (all timestamps are the server's): take its
     // `now` from the message and add the time elapsed since it arrived — a
     // client clock that is off by hours must not fake or hide staleness.
     const serverNow = st.now + (nowMs - st.receivedAt)
     return (st.sources || [])
-      .map(s => ({ source: s.source, ageMs: serverNow - (s.lastSuccessAt || st.since || st.now) }))
-      .filter(s => s.ageMs >= st.staleAfterMs)
+      .map(s => ({
+        source: s.source,
+        ageMs: serverNow - (s.lastSuccessAt || st.since || st.now),
+        reason: s.reason || '',
+        warning: s.warning || '',
+        failKind: s.failKind || ''
+      }))
+      .map(s => ({ ...s, stale: s.ageMs >= st.staleAfterMs }))
+      // Three ways onto the line, and only the first of them is about time:
+      // it has been quiet too long; its cause is already certain; or a check
+      // that SUCCEEDED has something to report (a data set frozen on a pinned
+      // patch never goes stale, and that is exactly what is wrong with it).
+      .filter(s => s.stale || (s.reason && REPORT_AT_ONCE.has(s.failKind)) || s.warning)
       .sort((a, b) => b.ageMs - a.ageMs)
   }
 
+  // What each class of failure means for the reader — and the reason there is no
+  // `unknown` entry: a failure nobody classified gets its reason printed and NO
+  // advice. Mapped by key rather than concatenated into one, so a class from a
+  // newer server shows nothing instead of a missing-key placeholder.
+  const DATA_ADVICE_KEYS = {
+    unreachable: 'shell.dataAdvice.unreachable',
+    rejected: 'shell.dataAdvice.rejected',
+    incompatible: 'shell.dataAdvice.incompatible'
+  }
+
   function dataStatusText (st, nowMs) {
-    const stale = staleSources(st, nowMs)
-    if (!stale.length) return ''
-    const list = stale.map(s => `${s.source} for ${ageText(s.ageMs)}`).join(', ')
-    return `Data auto-update: no successful check of ${list} — the tool keeps running with the data it has.`
+    const shown = relevantSources(st, nowMs)
+    if (!shown.length) return ''
+    const parts = []
+    // The duration and what it costs — only for the sources that really have
+    // been quiet. A source reported for a certain cause or for a warning is not
+    // stale, and saying it is would be the wrong finding.
+    const stale = shown.filter(s => s.stale)
+    if (stale.length) {
+      const list = stale.map(s =>
+        window.I18n.t('shell.dataStaleSource', { source: s.source, age: ageText(s.ageMs) })).join(', ')
+      parts.push(window.I18n.t('shell.dataStale', { list }))
+    }
+    // The cause, per source that has one. Without it the line says how long and
+    // what it costs, and leaves the one question it exists for — is this waiting
+    // out an outage or is it broken — to the container log (docs/bugs.md B24).
+    for (const s of shown) {
+      if (s.reason) {
+        parts.push(window.I18n.t('shell.dataStaleReason', { source: s.source, reason: s.reason }))
+        const key = DATA_ADVICE_KEYS[s.failKind]
+        if (key) parts.push(window.I18n.t(key))
+      }
+      // A warning carries no class and gets no advice: it is a finding the
+      // check made about itself, and inventing a remedy for it here would be
+      // the same mistake in a new place.
+      if (s.warning) {
+        parts.push(window.I18n.t('shell.dataWarning', { source: s.source, warning: s.warning }))
+      }
+    }
+    return parts.join(' ')
   }
 
   function refreshDataStatus () {
@@ -178,12 +252,62 @@ window.Shell = (() => {
     if (!dataTimer) dataTimer = setInterval(refreshDataStatus, 60 * 1000)
   }
 
+  // ---- Newer release of the tool --------------------------------------------
+  // `release-status` reaches every page. The server derives `comparison`
+  // (newer / current / unknown) from the installed and the latest version, so
+  // the page only decides whether to speak: only `newer` does, and only when the
+  // message names both versions. A text-only line (the slot is textContent): the
+  // link and the update steps live on the settings page.
+  let releaseStatus = null
+
+  function releaseStatusText (st) {
+    if (!st || st.comparison !== 'newer' || !st.latest || !st.latest.version || !st.installed) return ''
+    return window.I18n.t('shell.releaseNewer', { latest: st.latest.version, installed: st.installed })
+  }
+
+  function refreshReleaseStatus () {
+    setStatus(releaseStatusText(releaseStatus), 'release')
+  }
+
+  function applyReleaseStatus (msg) {
+    releaseStatus = msg || null
+    refreshReleaseStatus()
+  }
+
+  // ---- Background-sync pause on pages without their own sync display --------
+  // `networth-sync-status` reaches every page. Net Worth and settings draw a
+  // richer line of their own (cooldown times, who was rate-limited) and do NOT
+  // call this. History and Price Check call it so a stored POESESSID that has
+  // expired -- the one state that silently stops all stash syncing until a
+  // person acts -- shows up there too. Every other state clears the key: the
+  // cooldowns lift by themselves and `missing` is not a pause.
+  let syncStatus = null
+
+  function syncStatusText (st) {
+    return st && st.state === 'expired' ? window.I18n.t('shell.syncExpired') : ''
+  }
+
+  function refreshSyncStatus () {
+    setStatus(syncStatusText(syncStatus), 'sync')
+  }
+
+  function applySyncStatus (msg) {
+    syncStatus = msg ? { state: msg.state } : null
+    refreshSyncStatus()
+  }
+
+  // A language switch after /users answered has to redraw what this module
+  // owns: the tab title and the M2 lines.
+  window.I18n.onChange(() => { applyBrand(); refreshDataStatus(); refreshSyncStatus(); refreshReleaseStatus() })
+
   return {
     applyBrand,
     initLeague,
     applyLeagueState,
     applyCdRatio,
     applyDataStatus,
+    applySyncStatus,
+    applyReleaseStatus,
     setStatus,
     clearStatus,
     // exposed for the local tests

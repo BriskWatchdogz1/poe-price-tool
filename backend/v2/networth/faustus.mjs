@@ -255,6 +255,13 @@ export function createFaustusPricer ({ league, deps = {} } = {}) {
     const byPair = new Map()
     const chaosEnvById = new Map() // xId -> { min, max } in chaos per X
     const chaosDeepById = new Map() // xId -> market with the most X-side volume seen
+    // market object -> the unix HOUR its digest belongs to. The walk is
+    // newest-first and a pair can win from ANY hour in the window, so without
+    // this the age of a price is unknowable afterwards: an item that last
+    // traded eight hours ago and one that traded in the last completed hour
+    // are the same number in the same map. Keyed by object identity because a
+    // market is exactly one hour's entry for exactly one pair.
+    const hourOf = new Map()
     const usable = new Set() // pairKeys whose stored entry is informative
     let collected = 0
     let guard = 0
@@ -280,6 +287,7 @@ export function createFaustusPricer ({ league, deps = {} } = {}) {
           if (volX > 0 && (!curDeep || volX > (curDeep.volume_traded?.[x] ?? 0))) chaosDeepById.set(x, m)
         }
         const key = pairKeyOf(m)
+        hourOf.set(m, id)
         if (usable.has(key)) continue // newest-first walk -> newest usable wins
         const ok = isInformativeMarket(m)
         if (!byPair.has(key) || ok) byPair.set(key, m)
@@ -288,15 +296,23 @@ export function createFaustusPricer ({ league, deps = {} } = {}) {
       collected++
       id -= 3600
     }
-    return { byPair, chaosEnvById, chaosDeepById }
+    return { byPair, chaosEnvById, chaosDeepById, hourOf }
   }
 
-  // From the unioned markets, build metadata-id -> { chaos, min?, max?, sell? }.
-  // `min`/`max` are the chaos-per-X range the hour actually spanned (raw, i.e.
-  // WITHOUT the volume/spread guards — the guards decide whether we price at
-  // all, not how wide the market was). Omitted when there is no usable range,
-  // never guessed.
-  async function buildDetailById (byPair, chaosEnvById = new Map(), chaosDeepById = new Map()) {
+  // From the unioned markets, build metadata-id -> { chaos, min?, max?, sell?,
+  // at? }.
+  // `min`/`max` are the chaos-per-X range THAT ONE HOUR actually spanned (raw,
+  // i.e. WITHOUT the volume/spread guards — the guards decide whether we price
+  // at all, not how wide the market was). It is NOT the span of the union
+  // window: the window is walked to FIND an hour, the range describes the hour
+  // that was found. Omitted when there is no usable range, never guessed.
+  //
+  // `at` is the unix HOUR that hour started, i.e. the age of the observation
+  // the price is derived from — the market the price actually came from (the
+  // chaos market on the direct path, the divine market when the price was
+  // bridged), never "when we fetched it". Absent when the hour is unknown
+  // (a caller that passes no `hourOf`, e.g. an older test double).
+  async function buildDetailById (byPair, chaosEnvById = new Map(), chaosDeepById = new Map(), hourOf = new Map()) {
     // id -> Map(counterpartId -> market)
     const marketOf = new Map()
     const allIds = new Set()
@@ -607,6 +623,13 @@ export function createFaustusPricer ({ league, deps = {} } = {}) {
         detail.max = range.max
       }
       if (sell.chaos || sell.divine) detail.sell = sell
+      // Which HOUR the number in `chaos` was observed in. The bridge decides
+      // the market, so it decides the hour too: a bridged price is the divine
+      // market's observation and inherits the divine market's age, not the
+      // chaos market's.
+      const priceMarket = bridged ? dm : cm
+      const at = priceMarket ? hourOf.get(priceMarket) : undefined
+      if (typeof at === 'number' && isFinite(at)) detail.at = at
       detailById.set(x, detail)
     }
     return detailById
@@ -621,8 +644,8 @@ export function createFaustusPricer ({ league, deps = {} } = {}) {
   async function buildDetailByName () {
     if (!baseNames) baseNames = await loadBaseNames()
     const byId = baseNames.byId
-    const { byPair, chaosEnvById, chaosDeepById } = await fetchUnion()
-    const detailById = await buildDetailById(byPair, chaosEnvById, chaosDeepById)
+    const { byPair, chaosEnvById, chaosDeepById, hourOf } = await fetchUnion()
+    const detailById = await buildDetailById(byPair, chaosEnvById, chaosDeepById, hourOf)
 
     const byName = new Map()
     const unmappedPrefixes = new Set()
@@ -646,10 +669,11 @@ export function createFaustusPricer ({ league, deps = {} } = {}) {
     // base-names.json was adopted). Takes effect on the next pricer call —
     // i.e. at the latest on the next hourly faustus-refresher tick.
     setBaseNames (bn) { if (bn && bn.byId) baseNames = bn },
-    // name -> { chaos, min?, max?, sell? }. The full result; chaosByName() is
-    // the thin backwards-compatible projection of it. `sell` carries the
+    // name -> { chaos, min?, max?, sell?, at? }. The full result; chaosByName()
+    // is the thin backwards-compatible projection of it. `sell` carries the
     // per-market chaos/divine rates + volumes for the rail's sell-side
-    // comparison (see buildDetailById).
+    // comparison, `at` the unix hour the price was OBSERVED in (see
+    // buildDetailById).
     async detailByName () { return buildDetailByName() },
     async chaosByName () {
       const detail = await buildDetailByName()

@@ -43,7 +43,7 @@ await esbuild.build({
   bundle: true,
   platform: 'node',
   format: 'esm',
-  target: 'node20',
+  target: 'node24',
   resolveExtensions: ['.ts', '.tsx', '.mts', '.mjs', '.js', '.json'],
   define: { 'import.meta.env': 'globalThis.__aptEnv' },
   // object-hash (CJS, via Cache.ts) calls require('crypto'); provide require in the ESM bundle

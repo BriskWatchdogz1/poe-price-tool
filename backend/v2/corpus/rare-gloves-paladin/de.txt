@@ -1,0 +1,37 @@
+Gegenstandsklasse: Handschuhe
+Seltenheit: Selten
+Ungeheuerlicher Zugriff
+Paladin-Handschuhe
+--------
+Qualität: +20% (augmented)
+Rüstung: 479 (augmented)
+Energieschild: 96 (augmented)
+--------
+Anforderungen:
+Stufe: 84
+Str: 80
+Int: 80
+--------
+Fassungen: B-B-R-W
+--------
+Gegenstandsstufe: 86
+--------
+{ Impliziter Modifikator des Brennenden Exarchen (Größere(r)) — Schaden, Kreatur }
+Kreaturen verursachen 17(17-19)% erhöhten Schaden
+{ Impliziter Modifikator des Weltenfressers (Größere(r)) — Physisch }
+Treffer haben 35(35-38)% Chance, die physische Schadensminderung gegnerischer Monster zu ignorieren
+--------
+{ Präfix-Modifikator "Essenzberührter" — Schaden, Kreatur }
+Kreaturen verursachen 27(25-27)% erhöhten Schaden
+{ Präfix-Modifikator "Viriler" (Level: 2) — Leben }
++111(100-114) zu maximalem Leben
+{ Meisteranfertigung Präfix-Modifikator "Aufgewerteter" (Rang: 3) — Defensiven, Rüstung, Energieschild }
+70(56-74)% erhöhte Rüstung und Energieschild
+{ Suffix-Modifikator "des Sturms" (Level: 6) — Elementar, Blitz, Widerstand }
++23(18-23)% zu Blitzwiderstand
+{ Suffix-Modifikator "des Eises" (Level: 2) — Elementar, Kälte, Widerstand }
++45(42-45)% zu Kältewiderstand
+{ Suffix-Modifikator "des Jaguars" (Level: 4) — Attribut }
++42(38-42) zu Geschick
+Brennender Exarch-Gegenstand
+Weltenfresser-Gegenstand
