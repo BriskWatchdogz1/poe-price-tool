@@ -515,8 +515,11 @@ test('the reference rail translates its rows, including the ones with a shortene
     assert.ok(Array.from(heads).length >= 2)
   })
 
+// The two tests below need the server to OFFER German: the language selector
+// lists only languages a parser was loaded for, and that needs the generated
+// data/de set — so a fresh clone skips them, like the two item-name tests above.
 test('Settings: the sync section, the admin gate and the whole admin view are German',
-  { timeout: 240_000 }, async () => {
+  { timeout: 240_000, skip: skipDe }, async () => {
     await asUser('de1')
     await S('Page.navigate', { url: base + '/settings.html' })
     // Wait for the SCRIPTS, not for an element: every id on this page is in the
@@ -726,7 +729,7 @@ test('History: empty window and the rail summary are German', { timeout: 240_000
 // The control: the same build, the same browser, a user the configuration puts
 // on an English client. Without this the German could just as well be hardcoded.
 test('the English user still gets English — the language comes from the mapping',
-  { timeout: 240_000 }, async () => {
+  { timeout: 240_000, skip: skipDe }, async () => {
     await asUser('en1')
     await S('Page.navigate', { url: base + '/' })
     await waitFor('window.I18n && window.I18n.lang() === "en"', 'the English user did not resolve to English')
