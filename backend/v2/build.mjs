@@ -10,10 +10,9 @@ import * as esbuild from 'esbuild'
 const here = path.dirname(fileURLToPath(import.meta.url))          // backend/v2
 const repoRoot = path.resolve(here, '../..')
 
-// esbuild is a declared devDependency of this package. It used to be loaded by
-// absolute path out of renderer/node_modules, where it only ever appeared as a
-// transitive dependency of vite — so the build silently depended on a package
-// nobody had asked for, and removing vite would have broken it.
+// esbuild is a declared devDependency of this package, not loaded by absolute
+// path out of renderer/node_modules, where it only appears as a transitive
+// dependency of vite (removing vite would break the build).
 const srcDir = path.join(repoRoot, 'renderer', 'src')
 const ipcDir = path.join(repoRoot, 'ipc')
 const shimDir = path.join(here, 'shims')

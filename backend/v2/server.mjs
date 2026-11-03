@@ -15,7 +15,14 @@
  * RateLimiter is the whole point), but each has their own "room" with their
  * own item cards and their own league. Identity is only used for routing (LAN, trusted):
  *  - browser: cookie `ppt_user=<user>` (read from req.headers.cookie at the WS handshake).
- *  - daemon: header `X-User: <user>` on POST /item (missing/unknown -> USERS[0]).
+ *  - daemon: header `X-User: <user>` on POST /item (missing -> USERS[0]; unknown -> 400).
+ *  - daemon channel: GET /daemon/events (long-poll feed of the daemon's own
+ *    cards, its buyer-whisper verdicts and the user's session changes), POST
+ *    /daemon/heartbeat (version, features, game), POST /daemon/whisper (a
+ *    buyer's trade whisper, checked against the market without the trade API)
+ *    and POST /daemon/session (the session key: start, end or toggle a farm
+ *    session); X-User and X-PPT-Daemon required, no USERS[0] fallback
+ *    (frontend/PROTOCOL.md).
  * The same identity also carries the CLIENT LANGUAGE (POE_USER_LANGS, see
  * user-langs.mjs): a user on a German client is parsed by a second, parse-only
  * engine instance (engine-instances.mjs). Trade calls stay on the one primary
@@ -46,21 +53,27 @@ import { installTradeAudit, createTradeAudit, withConsumer, CONSUMER } from './t
 // used here for the price path, reference rail, and C:D. Signatures unchanged.
 import {
   NINJA_UA, NINJA_BASE, NINJA_MIN_MS,
-  round1, normSpark,
-  fetchCurrencyExchange, fetchExchangeOverview, fetchItemOverview, ninjaTypeFor
+  round1, roundExchange, normSpark, configureNinja,
+  fetchCurrencyExchange, fetchExchangeOverview, fetchItemOverview, itemOverviewFetchedAt, ninjaTypeFor
 } from './ninja.mjs'
+// The age and state of each price source, for the status line and the
+// settings page (docs/bugs.md B29).
+import { createSourceHealth } from './source-health.mjs'
 // Net-Worth tracker: stash scan -> valuation -> snapshot (Task 7 wiring).
 import { loadNetworthUsers, NETWORTH_CONFIG_DEFAULT } from './networth/config.mjs'
 import { validateCredentialInput, saveNetworthUser, CredentialsError } from './networth/credentials.mjs'
 import { createStashClient } from './networth/stash-client.mjs'
-import { loadItemsIndex, normalizeItem } from './networth/normalize.mjs'
+import { loadItemsIndex, normalizeItem, descriptorForName } from './networth/normalize.mjs'
 import { createValuator } from './networth/valuator.mjs'
 import { aggregate, unpricedStock } from './networth/aggregate.mjs'
 import { createNetworthStore } from './networth/store.mjs'
 import { valueTab } from './networth/scan.mjs'
+import { auditListings, createStackLookup, createQuadLookup } from './networth/listing-audit.mjs'
 import { createNetworthRefresher, slowStepMsFromEnv } from './networth/refresher.mjs'
 import { createNetworthHistory, createTabSetWatch, RANGES as NETWORTH_RANGES } from './networth/history.mjs'
 import { createPriceGuard, guardOptionsFromEnv } from './networth/price-guard.mjs'
+import { createSessions } from './networth/sessions.mjs'
+import { createSessionControl } from './networth/session-control.mjs'
 import { createReferenceHistory } from './reference-history.mjs'
 // Faustus (GGG Currency Exchange, public CDN) — Task 3: store + hourly
 // refresher for the derived name->chaos map (Task 2's faustus.mjs is the
@@ -108,9 +121,9 @@ import { createUserLangStore } from './user-lang-store.mjs'
 import { SETTABLE_BY_NAME, configView, readOverrideFile, setOverride, clearApplyingMarker } from './config-overrides.mjs'
 // ...and the numbers among them. One table (default, range, and whether an
 // explicit 0 is a setting), one reader, one rule for a value that cannot be
-// honoured: say so and use the default. Replaces the `Number(env) || DEFAULT`
-// idiom that used to stand eighteen times in the config block below and could
-// not express zero — see numeric-settings.mjs for what that cost.
+// honoured: say so and use the default. Not the `Number(env) || DEFAULT`
+// idiom, which cannot express zero — see numeric-settings.mjs for what that
+// costs.
 import { envNum } from './numeric-settings.mjs'
 // The de->en bridge that lets the unknown-mod repair path fire for a localized
 // item at all (design doc, section 5) — without it the English-only stat
@@ -130,6 +143,20 @@ import { createAdminAuth, ADMIN_PASSWORD_FILE_DEFAULT, ADMIN_MISSING } from './a
 // (HEARTBEAT_MAX_AGE_MS_DEFAULT is the default for
 // POE_UPDATE_HEARTBEAT_MAX_AGE_MS and lives in numeric-settings.mjs's table.)
 import { createHostUpdate, UPDATE_DIR_DEFAULT } from './host-update.mjs'
+// The hotkey daemon's own channel (frontend/PROTOCOL.md, `GET /daemon/events`):
+// the feed of the cards a daemon posted itself, what the daemons report about
+// themselves, the caller rule of every /daemon/* route and its bounded bodies.
+// None of it sends a request anywhere.
+import { createDaemonFeed, FEED_VERSION, guarded } from './daemon-feed.mjs'
+import { createDaemonPresence, makeHoldAfterGame } from './daemon-presence.mjs'
+import { daemonCaller, daemonInstanceOf } from './daemon-user.mjs'
+import { readBodyLimited, BodyTooLarge, parseJsonBody } from './http-body.mjs'
+// Buyer whispers (POST /daemon/whisper): the trade site's templates as data,
+// and the verdict on the player's own listed price through the net-worth
+// valuator. Memory only; never a trade-API request, never a whisper's text in
+// the log.
+import { WHISPER_TEMPLATES } from './whisper.mjs'
+import { createWhisperPricer, createWhisperBook, createRateGate, createWhisperHandler, createWhisperErrorLog, loadUniqueIndex } from './whisper-price.mjs'
 
 // ---- Observability (install FIRST, before anything can log) ----------------
 // Timestamps on every console line: without them a log gives the order of
@@ -156,8 +183,8 @@ const LEAGUE = process.env.POE_LEAGUE || 'Standard'
 const USERS = (process.env.POE_USERS || 'player1,player2').split(',').map(s => s.trim()).filter(Boolean)
 // ...and which client language each of them plays in — same identity, both
 // transports (X-User on POST /item, cookie ppt_user on the WS). Unset means
-// English for everyone, exactly as before. A malformed mapping throws right
-// here, at startup, instead of feeding items to the wrong parser
+// English for everyone. A malformed mapping throws right here, at startup,
+// instead of feeding items to the wrong parser
 // (user-langs.mjs explains why that is a hard error).
 const ENV_LANG_BY_USER = parseUserLangs({
   spec: process.env.POE_USER_LANGS,
@@ -167,7 +194,7 @@ const ENV_LANG_BY_USER = parseUserLangs({
 // The mapping actually in force. Starts as the env seed and is overlaid with
 // whatever each user has chosen for himself — the store WINS over the env, so
 // a deploy never silently reverts somebody's own choice (user-lang-store.mjs).
-// Not a const's worth of immutability any more: POST /user-lang writes into it.
+// Mutable on purpose: POST /user-lang writes into it.
 const LANG_BY_USER = new Map(ENV_LANG_BY_USER)
 const userLangStore = createUserLangStore()
 for (const [u, lang] of await userLangStore.load({ users: USERS, supported: SUPPORTED_LANGS })) {
@@ -182,17 +209,18 @@ const appName = () => process.env.POE_APP_NAME || 'Trade Console'
 // PoE trade fetch (/api/trade/fetch/{ids}) allows MAX. 10 ids per request —
 // more -> the API responds "Invalid query". searchPreset fetches in ONE call,
 // so the ceiling of 10 is GGG's, not ours; the table carries it as `max` and
-// refuses anything above it instead of quietly clamping (which is what
-// `Math.min(10, …)` used to do — and it clamped a NEGATIVE value through
-// untouched, so POE_MAX_LISTINGS=-5 really did ask for -5 listings).
+// refuses anything above it instead of quietly clamping (a `Math.min(10, …)`
+// also passes a NEGATIVE value through untouched, so POE_MAX_LISTINGS=-5 would
+// ask for -5 listings).
 // Read per search for the same reason as appName().
 const maxListings = () => envNum('POE_MAX_LISTINGS')
 const CD_FALLBACK = envNum('POE_CD_RATIO') // used when poe.ninja is unreachable
+// The band of the buyer-whisper verdict (whisper-price.mjs verdictFor). Read
+// once and shared: the "Listed below market" block on the Net Worth page uses
+// the same two numbers, so a whisper and the page cannot disagree.
+const WHISPER_LOW_RATIO = envNum('POE_WHISPER_LOW_RATIO')
+const WHISPER_HIGH_RATIO = envNum('POE_WHISPER_HIGH_RATIO')
 const CD_REFRESH_MS = envNum('POE_CD_REFRESH_MS')
-const BROWSER_UA =
-  'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) ' +
-  'Chrome/126.0.0.0 Safari/537.36'
-
 // NINJA_UA/NINJA_BASE/NINJA_MIN_MS -> ninja.mjs (see the import above).
 const FALLBACK_LEAGUES = ['Standard', 'Hardcore']
 
@@ -277,6 +305,85 @@ await releaseCheck.init()
 
 function releaseStatusMsg () {
   return { type: 'release-status', ...releaseCheck.status() }
+}
+
+// From which age of its last success a source counts as stale. One bar for all
+// (POE_SOURCE_STALE_MS, read here per message so a change from the settings
+// page applies live), raised per source to twice its own refresh interval so a
+// slow schedule is not reported between two of its own ticks. Trade has no
+// age: it is a search, not a feed, and its outage is the ban (pausedUntil).
+function sourceStaleAfterMs (source) {
+  const bar = envNum('POE_SOURCE_STALE_MS')
+  if (source === 'faustus') return Math.max(bar, 2 * FAUSTUS_REFRESH_MS)
+  if (source === 'ninja-cd') return Math.max(bar, 2 * Math.max(CD_REFRESH_MS, NINJA_MIN_MS))
+  if (source === 'ninja-overview') return bar
+  return null
+}
+
+// The `source-status` message (frontend/PROTOCOL.md). Facts only — enabled
+// and scheduled say how to read an age: a `scheduled` source runs on a timer
+// and may go stale by age alone; an on-demand one (scheduled: false) is only
+// stale when its last attempt failed. The client does the ageing.
+function sourceStatusMsg () {
+  const plan = {
+    faustus: { enabled: !FAUSTUS_DISABLED && faustusStoreWritable, scheduled: true },
+    'ninja-cd': { enabled: true, scheduled: true },
+    'ninja-overview': { enabled: true, scheduled: false },
+    trade: { enabled: !PRICE_CHECK_DISABLED || !CORPSE_DISABLED, scheduled: false }
+  }
+  const ban = tradeBanPause()
+  return {
+    type: 'source-status',
+    now: Date.now(),
+    since: SERVER_STARTED_AT,
+    sources: sourceHealth.snapshot().map(s => ({
+      source: s.source,
+      enabled: plan[s.source].enabled,
+      scheduled: plan[s.source].scheduled,
+      staleAfterMs: sourceStaleAfterMs(s.source),
+      lastSuccessAt: s.lastSuccessAt,
+      lastFailureAt: s.lastFailureAt,
+      reason: s.reason,
+      failKind: s.failKind,
+      ...(s.source === 'trade' ? { pausedUntil: ban ? ban.until : null } : {})
+    }))
+  }
+}
+
+// A display-only message that costs no request. A state change (a source
+// starting or stopping to fail, a ban set or lifted) goes out at once; plain
+// successes are bundled, so a busy trade queue cannot flood every socket —
+// at most one message per SOURCE_STATUS_COALESCE_MS.
+let sourceBroadcastTimer = null
+const SOURCE_STATUS_COALESCE_MS = 10_000
+function scheduleSourceBroadcast (now = false) {
+  if (!sourceStatusReady) return
+  if (now) {
+    clearTimeout(sourceBroadcastTimer)
+    sourceBroadcastTimer = null
+    broadcastAll(sourceStatusMsg())
+    return
+  }
+  if (sourceBroadcastTimer) return
+  sourceBroadcastTimer = setTimeout(() => {
+    sourceBroadcastTimer = null
+    broadcastAll(sourceStatusMsg())
+  }, SOURCE_STATUS_COALESCE_MS)
+  sourceBroadcastTimer.unref?.()
+}
+
+// POE_SOURCE_STALE_MS is read per message, but a changed setting is no event
+// of its own: without this an open page kept the old bar until the next
+// success or failure of a source, and the C:D tile its staleAfterMs until the
+// next cd-ratio (15 minutes at least). Called after the setting is changed.
+function broadcastStaleBars () {
+  scheduleSourceBroadcast(true)
+  const leagues = new Set()
+  for (const room of users.values()) if (room.clients.size) leagues.add(room.league)
+  for (const lg of leagues) {
+    const m = cdMsgFor(lg)
+    if (typeof m.asOf === 'number') broadcastLeague(lg, m)
+  }
 }
 
 // ---- Gap reporting + admin partition (design doc, section 6) ---------------
@@ -374,14 +481,17 @@ const BOOT_LANGS = [...new Set([
 // are built from, before it is ever started. What /user-lang offers is exactly
 // the subset of it that came up, so nothing selectable is left unrefreshed;
 // covering the few that did not come up as well is the cheaper mistake, and it
-// is what lets them come up after the next restart.
+// is what lets them come up later: the refresher generates their data set, and
+// the engine reload after that update retries every instance that is down
+// (applyAptData), so no restart is needed for them.
 //
 // Once, here, and never again at runtime — because the set cannot change at
 // runtime either: /user-lang only hands out languages that have a LIVE PARSER,
-// the parsers must be loaded serially at boot (`__aptEnv.BASE_URL` is
-// process-wide), and the one setting that could widen the set, POE_LANG_DEFAULT,
-// is a `restart` key. Every way to make a new language selectable goes through
-// a boot, and every boot passes this line.
+// every parser is an instance created here for a language of this set (the
+// instances are loaded serially, `__aptEnv.BASE_URL` is process-wide), and the
+// one setting that could widen the set, POE_LANG_DEFAULT, is a `restart` key.
+// Every way to put a language outside this set into it goes through a boot,
+// and every boot passes this line.
 dataRefresher.setLanguages(BOOT_LANGS)
 const engines = await createEngineInstances({
   bundleUrl: BUNDLE,
@@ -400,11 +510,14 @@ await engines.ready({ publicDataDir: dataRefresher.publicDataUrl() })
 
 // Second pass over the stored per-user languages, now that it is known which
 // parsers are actually LIVE. A stored entry whose language did not come up
-// (its data set vanished from the snapshot, or its instance failed to load)
-// would otherwise mean 503 on every item that user pastes. Dropped instead —
-// per entry, with a warning — and the user falls back to the env/default
-// value, exactly as if he had never chosen anything.
-for (const u of userLangStore.prune({ isLive: l => engines.liveLanguages().includes(l) })) {
+// (its data set is missing from the snapshot, or its instance failed to load)
+// would otherwise mean 503 on every item that user pastes. PARKED instead —
+// per entry, with a warning — and the user is on the env/default value for
+// now. Parked, not dropped: the entry stays in /config/user-langs.json (the
+// store writes it back with every save) and is in force again as soon as its
+// parser is live — at the next start, or earlier, when a data update brings
+// the missing data set (reviveParkedLangs, called from applyAptData).
+for (const u of userLangStore.park({ isLive: l => engines.liveLanguages().includes(l) })) {
   LANG_BY_USER.set(u, ENV_LANG_BY_USER.get(u) || DEFAULT_LANG)
 }
 
@@ -455,6 +568,14 @@ const NETWORTH_CONFIG_PATH = process.env.POE_NETWORTH_CONFIG || NETWORTH_CONFIG_
 const NETWORTH_SYNC_INTERVAL_MS = envNum('POE_NETWORTH_SYNC_INTERVAL_MS')
 const NETWORTH_LIST_TTL_MS = envNum('POE_NETWORTH_LIST_TTL_MS')
 const NETWORTH_COOLDOWN_MS = envNum('POE_NETWORTH_COOLDOWN_MS')
+// Sync follows the game (networth/refresher.mjs, WHO GETS THE TICK): which
+// tick a user whose daemon reports the game not running gets. Both can only
+// move or drop a stash read, never add one. POE_NETWORTH_IDLE_REST is a switch
+// like POE_*_DISABLED, so it is not in the numeric table.
+const NETWORTH_IDLE_EVERY = envNum('POE_NETWORTH_IDLE_EVERY')
+const NETWORTH_IDLE_REST = process.env.POE_NETWORTH_IDLE_REST === '1'
+// How long a stopped game keeps the playing pace at most (makeHoldAfterGame).
+const SYNC_AFTER_GAME_MAX_MS = envNum('POE_SYNC_AFTER_GAME_MAX_MS')
 // This one DOES accept 0 (report every step that outlives a tick), and its
 // default lives next to the module that uses it — see slowStepMsFromEnv in
 // refresher.mjs, which reads it through the same env-number.mjs reader.
@@ -468,7 +589,7 @@ try {
   networthStore.writable = false
   console.warn(`[networth] Store folder ${dirname(NETWORTH_STORE)} could not be created (${e?.code || e}) — snapshots will not be persisted.`)
 }
-await networthStore.load()
+await networthStore.load() // missing -> empty; unusable -> moved aside, empty; from a newer release -> left alone, in memory only (store-file.mjs)
 
 // ---- Net-worth history (header trend chart) --------------------------------
 // Append-only NDJSON next to the store, at most ONE point per user per minute,
@@ -483,16 +604,50 @@ const NETWORTH_HISTORY = process.env.POE_NETWORTH_HISTORY ||
 // Scavenger incident, the hold window is how long a suspicion may stand, and
 // the arrival floor is what keeps a fresh account out of the brake's reach.
 // The module constants are the documented defaults; see docs/pricing-logic.md.
-// Parsed by the module itself (guardOptionsFromEnv) and NOT with the
-// `Number(env) || DEFAULT` idiom used elsewhere in this block, because that
-// idiom cannot express zero — and zero is how POE_NETWORTH_GUARD_ARRIVAL_MIN_DIVINE
-// switches the arrival bar off. Setting it to 0 used to hand back 20, silently.
+// Parsed by the module itself (guardOptionsFromEnv) and NOT with a
+// `Number(env) || DEFAULT` idiom, which cannot express zero — and zero is how
+// POE_NETWORTH_GUARD_ARRIVAL_MIN_DIVINE switches the arrival bar off; the idiom
+// would hand back 20 for 0, silently.
+// Its memory (running holds, remembered prices, the last C:D) is kept next to
+// the series in `…-guard.json`, derived from this path like the items sidecar
+// (networth/guard-state.mjs); POE_NETWORTH_GUARD_STATE_MAX_NAMES bounds it.
 const NETWORTH_GUARD = guardOptionsFromEnv(process.env)
+// Kept in a name so a farm session can ask which arrivals it is holding at no
+// value (withheldArrivals below).
+const networthPriceGuard = createPriceGuard(NETWORTH_GUARD)
 const networthHistory = createNetworthHistory(NETWORTH_HISTORY, {
-  priceGuard: createPriceGuard(NETWORTH_GUARD)
+  priceGuard: networthPriceGuard,
+  // A memory file of another league is not restored (guard-state.mjs).
+  league: LEAGUE
 })
 networthHistory.writable = networthStoreWritable
 await networthHistory.load() // tolerates missing/empty/corrupt -> empty series
+
+// ---- Farm and game sessions (networth/sessions.mjs) -------------------------
+// Farm sessions start and end from the History page and the daemon's session
+// key, game sessions from the daemon's game detection (session-control.mjs,
+// below); the balance is struck against the history's own points, so a session
+// costs no request of its own.
+const NETWORTH_SESSIONS = process.env.POE_NETWORTH_SESSIONS ||
+  join(dirname(NETWORTH_STORE), 'networth-sessions.json')
+const SESSION_BASELINE_MAX_AGE_MS = envNum('POE_SESSION_BASELINE_MAX_AGE_MS')
+const SESSION_RATE_MIN_MS = envNum('POE_SESSION_RATE_MIN_MS')
+const SESSION_LIST_MAX = envNum('POE_SESSION_LIST_MAX')
+const SESSIONS_KEEP = envNum('POE_SESSIONS_KEEP')
+const SESSION_FINALIZE_MAX_MS = envNum('POE_SESSION_FINALIZE_MAX_MS')
+// Game sessions: how long the game must be reported not running before one
+// ends, and the switch that starts none (POE_SESSION_AUTO_GAME=0).
+const SESSION_GAME_GAP_MS = envNum('POE_SESSION_GAME_GAP_MS')
+const SESSION_AUTO_GAME = process.env.POE_SESSION_AUTO_GAME !== '0'
+const networthSessions = createSessions(NETWORTH_SESSIONS, {
+  baselineMaxAgeMs: SESSION_BASELINE_MAX_AGE_MS,
+  rateMinMs: SESSION_RATE_MIN_MS,
+  topN: envNum('POE_SESSION_TOP_N'),
+  keep: SESSIONS_KEEP,
+  finalizeMaxMs: SESSION_FINALIZE_MAX_MS
+})
+networthSessions.writable = networthStoreWritable
+await networthSessions.load() // missing -> none; unusable -> moved aside; from a newer release -> left alone, in memory only (store-file.mjs)
 
 // ---- Reference rail history (the rail's own sparklines) ---------------------
 // poe.ninja's `sparkline` is not consistently oriented across rows (see
@@ -517,6 +672,32 @@ await referenceHistory.load() // tolerates missing/empty/corrupt -> empty series
 // wait for the first completed hourly refresh. Single-league store (like the
 // the configured LEAGUE) -- multi-league networth users are a
 // Task 4 concern. mkdir guard identical to the networth store above.
+// ---- Price-source status (source-health.mjs, docs/bugs.md B29) -------------
+// Every price source reports its outcomes here; the `source-status` message
+// carries the facts, and each page ages them against the server clock. Set up
+// BEFORE the Faustus refresher, whose boot tick already reports.
+const SERVER_STARTED_AT = Date.now()
+// How long an old poe.ninja answer is still served once refreshing it failed,
+// and how long the net-worth exchange map lives (ninja.mjs, valuator.mjs).
+const NINJA_MAX_AGE_MS = envNum('POE_NINJA_MAX_AGE_MS')
+const NINJA_MAP_TTL_MS = envNum('POE_NINJA_MAP_TTL_MS')
+const NINJA_FAIL_LOG_MS = envNum('POE_NINJA_FAIL_LOG_MS')
+// No broadcast before the server listens: no page is connected yet, and a
+// callback from the Faustus boot tick must not reach `users` while it is still
+// in its temporal dead zone. Set to true right after clearApplyingMarker().
+let sourceStatusReady = false
+const sourceHealth = createSourceHealth({
+  reasonMaxChars: DATA_STATUS_REASON_MAX,
+  onChange: (src, ev) => scheduleSourceBroadcast(!!(ev.started || ev.recovered))
+})
+configureNinja({
+  maxAgeMs: NINJA_MAX_AGE_MS,
+  failLogEveryMs: NINJA_FAIL_LOG_MS,
+  onOutcome: (src, o) => (o.ok
+    ? sourceHealth.ok(src, { at: o.at })
+    : sourceHealth.fail(src, o.reason, o.kind, { at: o.at }))
+})
+
 const FAUSTUS_STORE = process.env.POE_FAUSTUS_STORE || '/config/faustus-store.json'
 const FAUSTUS_DISABLED = process.env.POE_FAUSTUS_DISABLED === '1'
 const FAUSTUS_UNION_HOURS = envNum('POE_FAUSTUS_UNION_HOURS') // undefined -> faustus.mjs default (8)
@@ -532,6 +713,10 @@ const FAUSTUS_TTL_MS = envNum('POE_FAUSTUS_TTL_MS')
 // guardOptionsFromEnv and slowStepMsFromEnv do (same reader, same refusal
 // logging, default next to the prose that argues it): networth/faustus-age.mjs.
 const FAUSTUS_MAX_AGE_MS = faustusMaxAgeMsOf(faustusMaxAgeHoursFromEnv(process.env), FAUSTUS_REFRESH_MS)
+// The two bars of the Net-Worth uncertainty marker (networth/valuator.mjs
+// UNCERTAIN). Display only: they mark rows and change no number.
+const NETWORTH_THIN_TURNOVER_C = envNum('POE_NETWORTH_THIN_TURNOVER_C')
+const NETWORTH_CORPSE_MIN_LISTINGS = envNum('POE_NETWORTH_CORPSE_MIN_LISTINGS')
 const faustusStore = createFaustusStore(FAUSTUS_STORE)
 let faustusStoreWritable = true
 try {
@@ -541,7 +726,10 @@ try {
   faustusStore.writable = false
   console.warn(`[faustus] Store folder ${dirname(FAUSTUS_STORE)} could not be created (${e?.code || e}) — Faustus persistence off.`)
 }
-await faustusStore.load() // tolerates a missing/corrupt file (-> empty store, valuation falls through to ninja until the first refresh)
+await faustusStore.load() // missing -> empty; unusable -> moved aside, empty; from a newer release -> left alone, in memory only (store-file.mjs). An empty store means valuation falls through to ninja until the first refresh
+// The Faustus store persists when it was last written, so its age survives a
+// restart (the poe.ninja ones do not: they are measured from server start).
+if (faustusStore.league() === LEAGUE) sourceHealth.seed('faustus', { lastSuccessAt: faustusStore.updatedAt() })
 
 let faustusRefresher = null
 let faustusPricer = null // hoisted: the data refresher swaps its base-names map at runtime
@@ -564,7 +752,9 @@ if (!FAUSTUS_DISABLED && faustusStoreWritable) {
     league: LEAGUE,
     store: faustusStore,
     pricer: faustusPricer,
-    intervalMs: FAUSTUS_REFRESH_MS
+    intervalMs: FAUSTUS_REFRESH_MS,
+    onRefreshed: () => sourceHealth.ok('faustus', { at: faustusStore.updatedAt() ?? Date.now() }),
+    onFailed: (reason, kind) => sourceHealth.fail('faustus', reason, kind)
   })
   faustusRefresher.tickOnce().catch(e => console.warn('[faustus] initial refresh failed (will retry hourly):', e?.message || e)) // best-effort, non-blocking — don't delay server start on a CDN fetch
   faustusRefresher.start()
@@ -584,7 +774,7 @@ const CORPSE_STORE = process.env.POE_CORPSE_STORE || '/config/corpse-store.json'
 const CORPSE_DISABLED = process.env.POE_CORPSE_DISABLED === '1'
 const CORPSE_TTL_MS = envNum('POE_CORPSE_TTL_MS')
 // 0 is a setting and it means what it says: the pricer runs and asks the Trade
-// API for NOTHING. `Number(env) || 25` used to answer that with 25 queries an
+// API for NOTHING. `Number(env) || 25` would answer that with 25 queries an
 // hour, silently — the defect numeric-settings.mjs exists for.
 const CORPSE_BUDGET_PER_HOUR = envNum('POE_CORPSE_BUDGET_PER_HOUR')
 const CORPSE_INTERVAL_MS = envNum('POE_CORPSE_INTERVAL_MS')
@@ -597,7 +787,7 @@ try {
   corpseStore.writable = false
   console.warn(`[corpse] Store folder ${dirname(CORPSE_STORE)} could not be created (${e?.code || e}) — corpse persistence off.`)
 }
-await corpseStore.load() // tolerates missing/corrupt -> empty store (corpses honestly unpriced until first fill)
+await corpseStore.load() // missing -> empty; unusable -> moved aside, empty; from a newer release -> left alone, in memory only (store-file.mjs). An empty store leaves corpses honestly unpriced until the first fill
 
 // Corpse base names actually held across ALL users' latest snapshots (union of
 // stored tabs). Priced corpses live in tab.items (kind 'corpse'), unpriced ones
@@ -709,6 +899,30 @@ async function reloadRefNamesByLang () {
   }
 }
 await reloadRefNamesByLang()
+
+// A whisper's language is the BUYER's trade-site language, not this user's
+// client language, so the name data is loaded for every language a whisper
+// template exists for, whoever plays here. English needs no bridge (its names
+// are the reference names); a language whose items.ndjson is missing gets no
+// entry (French, Russian, Spanish and Portuguese have none here): its whispers
+// are still read, an item name one of the loaded languages knows exactly is
+// compared, and any other ends as 'not-compared' with reason 'no-language-data'.
+const WHISPER_LANGS = [...new Set(WHISPER_TEMPLATES.map(t => t.lang))]
+const whisperNames = new Map() // lang -> { localToRef: Map | null, uniques: Map(name -> Set(base)) }
+async function reloadWhisperNames () {
+  for (const lang of WHISPER_LANGS) {
+    let uniques
+    try {
+      uniques = await loadUniqueIndex(dataRefresher.itemsNdjsonPath(lang))
+    } catch {
+      whisperNames.delete(lang)
+      continue
+    }
+    const localToRef = lang === PRIMARY_LANG ? null : await loadRefNamesByLocalName(lang)
+    whisperNames.set(lang, { uniques, localToRef })
+  }
+}
+await reloadWhisperNames()
 
 // ---------------------------------------------------------------------------
 // English reference names -> localized names, FOR DISPLAY ONLY
@@ -829,12 +1043,27 @@ function englishCorpseName (name, lang) {
 // `tabs` is a parameter only so a caller that also needs the stored tabs
 // themselves (recordNetworthHistory does, for the uncapped unpriced names) can
 // read the list ONCE and be certain both halves describe the same moment.
+//
+// `belowMarket` rides along: the stored price notes under the market value
+// (networth/listing-audit.mjs). A note in divine is converted at the CURRENT
+// Chaos:Divine rate and, like a buyer's whisper, not at all while that rate is
+// the fallback or stale (divineRate). The threshold is the whisper verdict's
+// own POE_WHISPER_LOW_RATIO. At most BELOW_MAX rows travel, the biggest
+// losses, with the number left out (`more`).
 function networthSnapshot (user, tabs = networthStore.tabList(user)) {
   if (!tabs.length) return null
   const meta = networthStore.getMeta(user) || {}
   const league = meta.league || users.get(user)?.league || LEAGUE
   const cdRatio = meta.cdRatio ?? cdMsgFor(league).chaosPerDivine
-  return aggregate({ tabs, cdRatio, league, accountName: meta.accountName ?? null })
+  const snap = aggregate({ tabs, cdRatio, league, accountName: meta.accountName ?? null })
+  const rate = divineRate(league)
+  snap.belowMarket = auditListings(tabs, {
+    chaosPerDivine: rate.chaos,
+    divineRateKnown: rate.chaos != null && !rate.fallback,
+    lowRatio: WHISPER_LOW_RATIO,
+    highRatio: WHISPER_HIGH_RATIO
+  })
+  return snap
 }
 
 // One history point from the CURRENT snapshot (the refresher calls this after
@@ -855,6 +1084,46 @@ const historyUnreadWarned = new Set()
 // rule lives in networth/history.mjs next to the `tabsChanged` it feeds, so the
 // recorder and its tests cannot drift apart on it.
 const networthTabWatch = createTabSetWatch()
+
+// ---- Farm-session helpers ----------------------------------------------------
+// Arrivals the price brake currently records at no value for this user — a
+// session names them instead of silently missing them.
+function withheldArrivals (user) {
+  const out = []
+  for (const h of networthPriceGuard.held.values()) if (h.user === user && h.price === 0) out.push(h.name)
+  return out
+}
+function sessionMsg (user) {
+  return { type: 'networth-session', now: Date.now(), ...networthSessions.live(user, networthHistory.latest(user)) }
+}
+// Every start, end and change of state of a session goes through here: the
+// round the refresher is asked to read first, the daemon's feed (`session`
+// events) and the `networth-session` message (networth/session-control.mjs).
+// networthRefresher, daemonFeed and daemonPresence are declared further down;
+// these closures run only after the boot, when they are set (the refresher
+// stays null with POE_NETWORTH_AUTOSYNC=0, and then no session starts).
+const sessionControl = createSessionControl({
+  sessions: networthSessions,
+  latestOf: user => networthHistory.latest(user),
+  withheldOf: user => withheldArrivals(user),
+  refresher: () => networthRefresher,
+  pushFeed: (user, session, opts) => feedSession(user, session, opts),
+  onChange: user => broadcast(user, sessionMsg(user)),
+  presenceOf: user => daemonPresence.presenceOf(user),
+  autoGame: SESSION_AUTO_GAME,
+  gapMs: SESSION_GAME_GAP_MS,
+  finalizeMaxMs: SESSION_FINALIZE_MAX_MS
+})
+async function onSessionPoint (user) {
+  await sessionControl.onPoint(user)
+}
+// A tab that appeared or vanished, or another league: the whole content counts
+// as a change, so an open session is marked as no farming result.
+function noteSessionStashChanged (user) {
+  networthSessions.noteStashChanged(user)
+    .then(marked => { if (marked) broadcast(user, sessionMsg(user)) })
+    .catch(() => {})
+}
 
 // `coverage` is what the refresher knows and this level does not: whether the
 // store can answer for EVERY live stash tab yet. While it cannot, the snapshot
@@ -898,6 +1167,7 @@ function recordNetworthHistory (user, coverage = null) {
       'one point is skipped and the item diff starts over, because a tab appearing or disappearing ' +
       'is not stock moving (docs/bugs.md B2)',
       user, tabSet.tabs, tabSet.before)
+    noteSessionStashChanged(user)
   }
   // items travel along so the history can diff them against the previous point
   // (quantity vs price movers behind a jump) and so the price guard can name
@@ -914,8 +1184,8 @@ function recordNetworthHistory (user, coverage = null) {
   // AND IT IS NOT `snap.unpriced`. That list is capped at 100 names for the
   // page's sake, and the names it drops are the rarest ones — the same thinly
   // traded items that drift in and out of being priced, i.e. precisely the
-  // population this proof exists for. A name ranked out of the display list used
-  // to be invisible here and fell straight back into the old reading. So the
+  // population this proof exists for. A name ranked out of the display list
+  // would be invisible here and read as gone. So the
   // uncapped account-wide fold of the stored tabs is what travels; it stays
   // inside the server, so the snapshot the browser gets keeps its cap and its
   // size. Older stored tabs still carry a capped list of their own and cannot be
@@ -929,6 +1199,11 @@ function recordNetworthHistory (user, coverage = null) {
     tabsChanged: tabSet.changed,
     syncComplete: coverage ? coverage.complete : undefined
   })
+    .then(recorded => {
+      // A recorded point also advances any open farm session; a refused one
+      // does not.
+      if (recorded) onSessionPoint(user).catch(e => console.warn(`[networth-sessions] update failed: ${e?.message || e}`))
+    })
     .catch(e => console.warn(`[networth-history] append failed: ${e?.message || e}`))
 }
 
@@ -973,6 +1248,12 @@ function syncStatusMsg (status) {
   if (status.tradeBan) msg.tradeBan = true
   if (status.lastTab) msg.lastTab = status.lastTab
   if (status.current) msg.current = status.current
+  // Sync follows the game: only for a user whose daemon reports the game not
+  // running, and only while the background sync runs (refresher statusFor).
+  if (status.pace) msg.pace = status.pace
+  // A session round: every tab of this user read once since a session's start
+  // or end, within the user's own ticks (refresher.mjs, A SESSION ROUND).
+  if (status.sessionRound) msg.sessionRound = status.sessionRound
   return msg
 }
 
@@ -987,10 +1268,10 @@ function broadcastSyncStatus (user) {
 // successfully, plus the threshold. The client ages them itself, so a schedule
 // that stopped pushing anything still turns stale in the UI on its own.
 //
-// `reason`/`failKind` ride along since 2026-08-18 (docs/bugs.md B24): the note
-// used to carry the DURATION and the CONSEQUENCE and nothing about the cause,
-// so "the endpoint is briefly away" and "this build cannot read the format any
-// more" produced the same sentence for days. The reason is foreign text —
+// `reason`/`failKind` ride along (docs/bugs.md B24): the
+// DURATION and the CONSEQUENCE alone say nothing about the cause, so "the
+// endpoint is briefly away" and "this build cannot read the format any more"
+// would produce the same sentence for days. The reason is foreign text —
 // filtered and capped by the refresher before it is persisted (check-failure.mjs)
 // — and `failKind` is the class the failing code named, never one derived from
 // the wording here; the page maps a class it does not know to no advice at all.
@@ -1197,16 +1478,127 @@ const REPOST_DEDUP_MS = 2000
 // refuses it with a floor of 1 — and says so, which `Math.max(1, …)` never did.
 const MAX_ITEMS_PER_ROOM = envNum('POE_MAX_ITEMS_PER_ROOM')
 // Cap on how many priceless cards a single WS reconnect re-enqueues. After a
-// poe.ninja/Trade outage a room can hold many cards without a valid price; a
-// reconnect used to re-queue ALL of them at once -> a queue flood the moment
-// the service came back. Re-queue only the NEWEST N; the rest still replay as
+// poe.ninja/Trade outage a room can hold many cards without a valid price;
+// re-queueing ALL of them on a reconnect would flood the queue the moment the
+// service comes back. Re-queue only the NEWEST N; the rest still replay as
 // `queued` and the user can trigger a search on demand.
 // 0 is honoured here and means "re-queue nothing": a re-queued card is an
-// `auto` Trade-API search, so this is the one of the seven late converts that
-// used to cost requests (docs/bugs.md B13).
+// `auto` Trade-API search, so this is the one of the seven settings of
+// docs/bugs.md B13 where a refused zero costs requests.
 const MAX_REQUEUE_ON_RECONNECT = envNum('POE_MAX_REQUEUE_ON_RECONNECT')
-const users = new Map() // user -> { clients:Set<ws>, items:Map, league:string, lang:string, recentPosts:Map }
-for (const u of USERS) users.set(u, { clients: new Set(), items: new Map(), league: LEAGUE, lang: LANG_BY_USER.get(u), recentPosts: new Map() })
+// lastItemAt/lastItemOutcome: when the last POST /item of this user arrived and
+// what became of it (daemon-status, memory only; null until the first one).
+const users = new Map() // user -> { clients:Set<ws>, items:Map, league:string, lang:string, recentPosts:Map, lastItemAt:number|null, lastItemOutcome:string|null }
+for (const u of USERS) users.set(u, { clients: new Set(), items: new Map(), league: LEAGUE, lang: LANG_BY_USER.get(u), recentPosts: new Map(), lastItemAt: null, lastItemOutcome: null })
+
+// The hotkey daemon's own channel (PROTOCOL.md, `GET /daemon/events`): a feed
+// per room, filled from broadcast() below, and what the daemons report about
+// themselves. Memory only; reading either never queues, fetches or prices.
+const DAEMON_POLL_MAX_HOLD_MS = envNum('POE_DAEMON_POLL_MAX_HOLD_MS')
+const DAEMON_WAITERS_MAX = envNum('POE_DAEMON_WAITERS_MAX')
+// The largest body POST /daemon/heartbeat reads; its JSON is a few hundred bytes.
+const DAEMON_BEAT_BODY_MAX = 4096
+const daemonFeed = createDaemonFeed({
+  users: USERS,
+  keep: envNum('POE_DAEMON_EVENTS_KEEP'),
+  waitersMax: DAEMON_WAITERS_MAX,
+  maxAgeMs: envNum('POE_DAEMON_FEED_MAX_AGE_MS'),
+  // Jobs ahead of this card in the shared queue, the running one included.
+  // Read at call time (jobs/working are declared below), never at boot.
+  positionOf: (user, id) => {
+    const i = jobs.findIndex(j => j.user === user && j.id === id)
+    return i < 0 ? null : i + (working ? 1 : 0)
+  },
+  // A rate poe.ninja actually gave for this league, or null: the built-in
+  // fallback (cdMsgFor, trendHint 'fallback') is no market rate.
+  cdFor: league => {
+    if (!league) return null
+    const m = cdMsgFor(league)
+    return m.trendHint === 'fallback' ? null : (Number(m.chaosPerDivine) || null)
+  }
+})
+// A throw inside the feed is logged once per text and never stops a browser
+// message, pump() or POST /item (daemon-feed.mjs, guarded): the card is still
+// queued and answered 200.
+const noteFeed = guarded(daemonFeed.noteBroadcast, console.warn)
+const refreshFeedQueue = guarded(daemonFeed.refreshQueued, console.warn)
+const trackFeed = guarded(daemonFeed.track, console.warn)
+const refreshFeed = guarded(daemonFeed.refresh, console.warn)
+const earlyFeed = guarded(feedEarlyAnswer, console.warn)
+const feedSession = guarded((user, session, opts) => daemonFeed.pushSession(user, session, opts), console.warn)
+
+// Early answer for the game (daemon feed): an exchange rate is known at the
+// POST, from memory, with the same guards the queued job uses (pump() reads
+// the same function first), so the in-game card need not wait for the queue.
+// The job's own result replaces it. Never a request.
+function feedEarlyAnswer (user, id, item, league) {
+  const early = faustusChaosFor(item, league)
+  if (early == null) return
+  const r = faustusRangeFor(item, league)
+  daemonFeed.hint(user, id, {
+    source: 'exchange',
+    currency: 'chaos',
+    median: roundExchange(early),
+    low: roundExchange(r ? r.min : early),
+    high: roundExchange(r ? r.max : early),
+    count: null,
+    ageHours: faustusStaleHoursFor(item, league),
+    conflict: false
+  })
+}
+const daemonPresence = createDaemonPresence({ staleMs: envNum('POE_DAEMON_BEAT_STALE_MS'), onChange: onPresenceChange })
+// Buyer whispers of this session (POST /daemon/whisper), per user, memory
+// only, with the daemon's pseudonym and never a buyer's name; a restart
+// forgets them. Declared here because daemonStatusMsg reads the count of
+// unrecognised ones. The largest body the route reads.
+const whisperBook = createWhisperBook({ users: USERS, keep: envNum('POE_WHISPER_KEEP') })
+const whisperRate = createRateGate({ perMin: envNum('POE_WHISPER_MAX_PER_MIN') })
+const DAEMON_WHISPER_BODY_MAX = 4096
+// The largest body POST /daemon/session reads; `{"action":"toggle"}` is 19 bytes.
+const DAEMON_SESSION_BODY_MAX = 1024
+// Session-key requests per user and minute (each accepted start or end writes
+// the sessions file); the same sliding-minute gate as the whispers'.
+const daemonSessionRate = createRateGate({ perMin: envNum('POE_DAEMON_SESSION_MAX_PER_MIN') })
+// One line per presence edge (never one per beat), and the page hears of it.
+// presenceEdges counts them, so the heartbeat route can tell whether its beat
+// already sent the page an update.
+let presenceEdges = 0
+function onPresenceChange (user, before, after) {
+  presenceEdges++
+  const st = daemonPresence.statusOf(user)
+  console.log(`[daemon] ${user}: ${before} -> ${after} (daemon ${st?.version || 'unknown'})`)
+  const room = users.get(user)
+  if (room) broadcast(user, daemonStatusMsg(room, user))
+  // A change of who plays can move every user's net-worth pace (the refresher
+  // decides whose tab a tick reads). The refresher says so again with its next
+  // tick through onStatus; twice is harmless, missing would be silent.
+  for (const u of USERS) broadcastSyncStatus(u)
+  // The game starts or ends a game session (networth/session-control.mjs).
+  sessionControl.onPresence(user, before, after)
+}
+// The hold after a game stops (daemon-presence.mjs makeHoldAfterGame): the
+// player keeps the playing pace until each of their tabs was read once since
+// the stop, at most POE_SYNC_AFTER_GAME_MAX_MS. networthRefresher is assigned
+// further down; until then (and with the background sync off) there is no
+// round to ask, and there is no pace to hold either.
+const holdAfterGame = makeHoldAfterGame({
+  maxMs: SYNC_AFTER_GAME_MAX_MS,
+  roundSince: (u, t) => networthRefresher?.roundSince(u, t) ?? null
+})
+// A daemon that goes silent is an edge too, and no request would notice it.
+// The sweep also names the users who lost a daemon without a presence edge
+// (one that could not tell the game state went quiet): their page still shows
+// it as reporting, so it gets a daemon-status as well.
+// The same tick ends a game session whose gap has run out and moves sessions
+// past their windows (networth/session-control.mjs sweep); memory and the
+// sessions file only.
+setInterval(() => {
+  for (const user of daemonPresence.sweep(USERS)) {
+    const room = users.get(user)
+    if (room) broadcast(user, daemonStatusMsg(room, user))
+  }
+  sessionControl.sweep(USERS).catch(e => console.warn(`[networth-sessions] sweep failed: ${e?.message || e}`))
+}, 30_000).unref()
 
 const jobs = []            // waiting jobs (FIFO; priority ones get pulled forward); each carries `user`
 const bgJobs = []           // three-tier queue, lowest tier: background jobs
@@ -1222,6 +1614,9 @@ const send = (ws, obj) => { if (ws.readyState === ws.OPEN) ws.send(JSON.stringif
 function broadcast (user, obj) {
   const room = users.get(user)
   if (!room) return
+  // The one funnel for room messages, so the daemon feed cannot miss a card
+  // whatever sends it. Guarded: the browser gets the message regardless.
+  noteFeed(user, obj)
   const s = JSON.stringify(obj)
   for (const ws of room.clients) if (ws.readyState === ws.OPEN) ws.send(s)
 }
@@ -1235,6 +1630,31 @@ function broadcastAll (obj) {
 // Broadcast to all users currently on THIS league (poll/warm).
 function broadcastLeague (league, obj) {
   for (const [user, room] of users) if (room.league === league) broadcast(user, obj)
+}
+
+// WS message for the Price Check page's empty state (PROTOCOL.md
+// `daemon-status`): when the last POST /item of THIS user arrived and what
+// became of it. The daemon's journal says why a POST failed on the player's
+// machine; this is the other end, and the only sign in the browser that the
+// daemon reaches the server at all — a prefix that drops every item and a
+// daemon that is not running both look like an empty page. Memory only: a
+// restart starts at null, and the page words null as "since the server started".
+// `daemon` is what the user's hotkey daemon last reported about itself
+// (POST /daemon/heartbeat: version, game, features), null until one did.
+function daemonStatusMsg (room, user) {
+  return {
+    type: 'daemon-status', lastItemAt: room.lastItemAt, outcome: room.lastItemOutcome, now: Date.now(),
+    daemon: daemonPresence.statusOf(user),
+    // Whispers from this user's daemon that matched no known template since
+    // the server started (their text is not kept).
+    unparsed: whisperBook.unparsed(user)
+  }
+}
+
+function noteDaemonItem (user, room, outcome) {
+  room.lastItemAt = Date.now()
+  room.lastItemOutcome = outcome
+  broadcast(user, daemonStatusMsg(room, user))
 }
 
 // Enforce MAX_ITEMS_PER_ROOM: evict the OLDEST alive card(s) once a room is over
@@ -1400,7 +1820,7 @@ async function spliceResolvedUnknownMods (item, preset, lang = PRIMARY_LANG) {
     if (!tradeId) { keep.push(um); continue }
     // The value the trade search filters on. With the ranges present the rolled
     // numbers are exactly the ones that carried a bracket, so a static number in
-    // the wording ("… alle 3 Sekunden 1(0-3) Füllung") can no longer be mistaken
+    // the wording ("… alle 3 Sekunden 1(0-3) Füllung") cannot be mistaken
     // for the roll; without them, the first number is still all there is.
     const num = /[+-]?\d+(?:\.\d+)?/.exec(text)
     const value = rolls.length ? avgOrFirst(rolls.map(r => r.value)) : (num ? Number(num[0]) : undefined)
@@ -1773,7 +2193,7 @@ function toPriceResult (id, price, kind, league, cdRatio) {
   let rows = []
   if (priced.length) {
     // Listings come in MIXED currencies. Keying off the cheapest listing's
-    // currency and dropping every other one — what this used to do — collapses
+    // currency and dropping every other one collapses
     // a page of "1c, 1div, 1div, 2div" into a headline of "1 c": the three
     // divine offers, i.e. the actual market, silently discarded and the item
     // understated ~88x. Put chaos and divine on one scale instead and derive the
@@ -1901,11 +2321,10 @@ function withExchangeMain (result, chaos, cdRatio, range, itemName, ageHours = n
         chaosMedian: toChaos(result.priceMedian)
       }
     : null
-  // round1 would flatten a genuinely sub-chaos fungible (lifeforce & co, whose
-  // exchange rate is ~0.018c a piece) to a flat "0" — keep three decimals below
-  // 1c so the headline stays an honest number.
-  const c = chaos < 1 ? Math.round(chaos * 1000) / 1000 : round1(chaos)
-  const rc = v => (v < 1 ? Math.round(v * 1000) / 1000 : round1(v)) // same rounding as the headline
+  // roundExchange (ninja.mjs): three significant digits below 1 c, so a
+  // genuinely sub-chaos fungible stays an honest number instead of a flat "0".
+  const c = roundExchange(chaos)
+  const rc = roundExchange // same rounding as the headline
   const lo = Number(range?.min); const hi = Number(range?.max)
   const out = {
     ...result,
@@ -1992,7 +2411,9 @@ function queueStatusMsg () {
   return { type: 'queue-status', depth: jobs.length, bgDepth: bgJobs.length, priorityActive, rateLimits: rateLimitSnapshot() }
 }
 // Shared queue -> queue-status goes to ALL rooms (both see the same depth).
-const broadcastQueue = () => broadcastAll(queueStatusMsg())
+// The daemon feed follows the queue position of the cards it tracks from here
+// (an event only when a position changed).
+const broadcastQueue = () => { refreshFeedQueue(); broadcastAll(queueStatusMsg()) }
 
 // ---- Rate-limit banner (shared trade-queue ban signal) ---------------------
 // GGG can hand the app a LONG Retry-After (league-launch soft-ban: observed
@@ -2084,6 +2505,8 @@ function noteRateLimit (seconds) {
   }
   broadcastAll(rateLimitMsg())
   persistRateLimit() // survive a restart instead of probing GGG blind
+  sourceHealth.fail('trade', `GGG rate limit, retry after ${secs} s`, 'unknown')
+  scheduleSourceBroadcast(true) // the trade row carries pausedUntil
   return true
 }
 
@@ -2121,6 +2544,7 @@ function clearRateLimit () {
   if (!rateLimit) { if (hadTimer) pump(); return }
   rateLimit = null
   broadcastAll(rateLimitMsg())
+  scheduleSourceBroadcast(true) // pausedUntil is gone from the trade row
   persistRateLimit() // clear the on-disk gate too
   pump() // ban lifted -> drain any jobs the gate was holding
 }
@@ -2263,8 +2687,8 @@ async function pump () {
       // The condition is deliberately "Faustus knows it", not "we classified it
       // as bulk": in practice that's currency/fragments/scarabs, but an item
       // that routes through the stat search and still has an exchange rate gets
-      // priced by the exchange too. Unknown to Faustus (null) -> everything
-      // below behaves exactly as before.
+      // priced by the exchange too. Unknown to Faustus (null) -> this block
+      // does nothing and the path below runs as it would without it.
       // Read ONCE per pass. POE_MAX_LISTINGS is live (config-overrides.mjs), so
       // a save between the bulk call and the fallback search below would put
       // two different limits into one result — a price built from ten listings
@@ -2313,7 +2737,7 @@ async function pump () {
           if (faustusChaos != null) {
             price = null
             tradeKind = null
-            exchangePrice = { chaos: round1(faustusChaos), count: null, url: null }
+            exchangePrice = { chaos: roundExchange(faustusChaos), count: null, url: null }
           } else {
             price = await searchPresetAs(rec.preset, { league: room.league, maxListings: listings })
             tradeKind = 'search'
@@ -2344,6 +2768,7 @@ async function pump () {
         rec.status = 'done'
         rec.lastPrice = result
         broadcast(job.user, result)
+        sourceHealth.ok('trade') // the last search that went through (source-status)
         clearRateLimit() // a search got through -> the shared queue is moving again
       }
     }
@@ -2445,12 +2870,30 @@ async function fetchLeagues () {
 // (+exchangeOverviewCache) -> ninja.mjs (see the import above).
 
 // C:D cache per league (>=15min). cdMsgByLeague carries live/fallback to the frontend.
-const cdCache = new Map()      // league -> { at, ratio, spark }
+const cdCache = new Map()      // league -> { at, ratio, spark, asOf }
 const cdMsgByLeague = new Map() // league -> cdMsg
 
 // Current C:D message for a league (cached -> live, otherwise env fallback).
+// A value that came from poe.ninja carries `asOf` (when poe.ninja gave it),
+// the server's `now` and `staleAfterMs`: when poe.ninja stops answering, the
+// last value stays and the page shows its age instead of "live" (B29). The
+// fallback carries none of the three — it never came from poe.ninja.
 function cdMsgFor (league) {
-  return cdMsgByLeague.get(league) || { type: 'cd-ratio', chaosPerDivine: CD_FALLBACK, trendHint: 'fallback' }
+  const m = cdMsgByLeague.get(league)
+  if (!m) return { type: 'cd-ratio', chaosPerDivine: CD_FALLBACK, trendHint: 'fallback' }
+  return typeof m.asOf === 'number' ? { ...m, now: Date.now(), staleAfterMs: sourceStaleAfterMs('ninja-cd') } : m
+}
+
+// Chaos per divine for converting a price in divine: { chaos, fallback }.
+// chaos null: no usable rate at all. fallback: the rate is POE_CD_RATIO or
+// older than its freshness limit, so a verdict that hangs on it is not given
+// (buyer whispers, "Listed below market").
+function divineRate (league) {
+  const m = cdMsgFor(league)
+  const chaos = Number(m.chaosPerDivine)
+  if (!(chaos > 0)) return { chaos: null, fallback: true }
+  const fallback = typeof m.asOf !== 'number' || (typeof m.staleAfterMs === 'number' && m.now - m.asOf > m.staleAfterMs)
+  return { chaos, fallback }
 }
 
 // Real C:D via the currency EXCHANGE (Faustus NPC) — NOT the stash overview.
@@ -2460,19 +2903,23 @@ function cdMsgFor (league) {
 async function refreshCdRatio (league) {
   const c = cdCache.get(league)
   if (c && Date.now() - c.at < NINJA_MIN_MS) {
-    const msg = { type: 'cd-ratio', chaosPerDivine: c.ratio, trendHint: 'live · poe.ninja', sparkline: c.spark }
+    const msg = { type: 'cd-ratio', chaosPerDivine: c.ratio, trendHint: 'live · poe.ninja', sparkline: c.spark, asOf: c.asOf }
     cdMsgByLeague.set(league, msg)
-    return msg
+    return cdMsgFor(league)
   }
   const ex = await fetchCurrencyExchange(league)
   const div = (ex?.lines || []).find(l => l.id === 'divine')
   const v = div?.primaryValue
   if (typeof v === 'number' && v > 0) {
     const spark = normSpark(div.sparkline?.data)
-    cdCache.set(league, { at: Date.now(), ratio: Math.round(v), spark })
-    const msg = { type: 'cd-ratio', chaosPerDivine: Math.round(v), trendHint: 'live · poe.ninja', sparkline: spark }
+    // asOf is the time of the poe.ninja ANSWER. During an outage ninja.mjs
+    // serves its last good answer, and stamping that with `now` kept the tile
+    // on "live" for as long as the outage lasted.
+    const asOf = typeof ex.fetchedAt === 'number' ? ex.fetchedAt : Date.now()
+    cdCache.set(league, { at: Date.now(), ratio: Math.round(v), spark, asOf })
+    const msg = { type: 'cd-ratio', chaosPerDivine: Math.round(v), trendHint: 'live · poe.ninja', sparkline: spark, asOf }
     cdMsgByLeague.set(league, msg)
-    return msg
+    return cdMsgFor(league)
   }
   // Fallback: keep the last known value (start = env default)
   return cdMsgFor(league)
@@ -2485,8 +2932,8 @@ async function refreshCdRatio (league) {
 // overview. Cached server-side (>=15min, keyed by league). Best-effort: never
 // throws (like ninjaRefFor).
 //
-// The sparklines do NOT come from poe.ninja's `sparkline`/`sparkLine` field
-// anymore: that series is not consistently oriented across rows (the divine row
+// The sparklines do NOT come from poe.ninja's `sparkline`/`sparkLine` field:
+// that series is not consistently oriented across rows (the divine row
 // tracks its chaos value, the lifeforce rows their divine value), so it can't be
 // coloured honestly. The rail keeps its own series instead — see
 // reference-history.mjs. poe.ninja's own sparkline stays in use for the C:D
@@ -2526,7 +2973,7 @@ const NO_SELL_DATA = '—'
 //     the Faustus bridge use). No second truth.
 // The attestation policy (thin side -> show the reliable side, claim NO
 // comparison) lives in sell-side.mjs. Returns the protocol `sell` object or
-// null (row then renders exactly as before).
+// null (the row then carries no `sell`).
 //
 // `railBetterByRow` remembers the last CLAIMED verdict ('chaos' | 'divine')
 // per row, keyed by league + faustus name, so compareSellSides' hysteresis
@@ -2566,12 +3013,12 @@ function railSellFor (faustusName, league, ratio) {
 // Group thousands with commas — bridged divine-side numbers are routinely
 // five digits (31208 pieces per divine) and unreadable without it.
 //
-// Rounding to a whole piece used to be safe for a second reason that is now
-// gone: the old scarcity threshold guaranteed at least 5 pieces per chaos
-// before a row was ever quoted in chaos. The unit follows the recommendation
-// now, so a row whose recommended side yields well under one piece per unit
-// reaches this — where Math.round prints "0", or "1" for anything from 0.5 to
-// 1.5, i.e. it destroys the very number the row exists to show. Only that
+// Rounding to a whole piece is not safe: the unit follows the recommendation,
+// with no scarcity threshold guaranteeing at least 5 pieces per chaos before a
+// row is quoted in chaos, so a row whose recommended side yields well under one
+// piece per unit reaches this — where Math.round prints "0", or "1" for
+// anything from 0.5 to 1.5, i.e. it destroys the very number the row exists to
+// show. Only that
 // range needs decimals; from 10 up a whole piece is what a seller counts and
 // the extra digits would just be noise.
 function grouped (n) {
@@ -2601,9 +3048,9 @@ function perPieceDisplay (priceC, ratio, side) {
 // nothing trustworthy (railSellFor already returns null then).
 //
 // THE POINT OF THIS FUNCTION: number AND sparkline of these rows both read
-// the same value here. They used to disagree (number = poe.ninja's market
-// middle, the sell-side hint = Faustus sell side), which is exactly the
-// mix-up the "Selling" heading must not reintroduce.
+// the same value here. Mixing them (number = poe.ninja's market middle, the
+// sell-side hint = Faustus sell side) is exactly the mix-up the "Selling"
+// heading must not reintroduce.
 function sellRevenuePerItem (sell) {
   if (!sell) return null
   const pick = side => {
@@ -2736,7 +3183,18 @@ async function refreshReference (league) {
     try {
       const values = {}
       for (const r of rows) values[r.key] = r.chaos
-      await referenceHistory.append(league, { cdRatio: ratio, values })
+      // The same answer served again is not a new point for ITS rows
+      // (reference-history.mjs, B29). Per feed: the poe.ninja exchange answer
+      // carries Mirror, the item overview the beasts, the Faustus store
+      // (stamped on its own hourly tick, not on this 15 min rebuild) Sulphur
+      // and lifeforce. One feed standing still never takes the others' points.
+      const faustusRows = [...currency, ...lifeforce].filter(r => r.src === 'faustus')
+      const feeds = {
+        exchange: { at: ex?.fetchedAt ?? null, keys: currency.filter(r => r.src === 'ninja').map(r => r.key) },
+        beasts: { at: itemOverviewFetchedAt(league, 'Beast'), keys: beasts.map(r => r.key) },
+        faustus: { at: faustusRows.find(r => typeof r.sell?.updatedAt === 'number')?.sell.updatedAt ?? null, keys: faustusRows.map(r => r.key) }
+      }
+      await referenceHistory.append(league, { cdRatio: ratio, values, feeds })
     } catch (e) {
       console.warn(`[reference] history append failed: ${e?.message || e}`)
     }
@@ -2750,10 +3208,11 @@ async function refreshReference (league) {
       if (r.sell == null) delete r.sell // no hint -> field absent, not null
     }
 
-    // refreshedAt = when this poe.ninja data was actually fetched. Baked into the
-    // message so it survives caching (a cache hit returns the original stamp, not
-    // "now") -> the frontend can show "poe.ninja updated at HH:MM".
-    const msg = { type: 'reference', league, currency, lifeforce, beasts, refreshedAt: Date.now() }
+    // refreshedAt = when this poe.ninja data was actually fetched — the time of
+    // the ANSWER (ninja.mjs fetchedAt), not of this rebuild, which during an
+    // outage serves an old answer. Baked into the message so it survives
+    // caching -> the frontend can show "poe.ninja updated at HH:MM".
+    const msg = { type: 'reference', league, currency, lifeforce, beasts, refreshedAt: ex?.fetchedAt ?? Date.now() }
     refCache.set(league, { at: Date.now(), msg })
     refMsgByLeague.set(league, msg)
     return msg
@@ -2891,7 +3350,7 @@ function ninjaBulkClassFor (item) {
 //   - a captured beast does the same when the clipboard carries a base line.
 //
 // Where the two disagree, the display name stays the only honest key and the
-// caller falls back to it — which is bit-for-bit the old behaviour.
+// caller falls back to it: the plain display-name lookup, bit for bit.
 //
 // For English the whole thing is a no-op by construction: in
 // data/en/items.ndjson `name === refName` holds for every single entry
@@ -3154,7 +3613,13 @@ async function setUserLang (user, lang) {
       available
     }
   }
-  if (lang === room.lang) return { ok: true, persisted: userLangStore.writable, unchanged: true }
+  // "Unchanged" only when there is nothing to write. A user with a parked
+  // choice (user-lang-store.mjs) who picks the language he is on right now is
+  // replacing that parked choice, and it must not come back over his newest
+  // one at the next start or data update.
+  if (lang === room.lang && !userLangStore.parked().has(user)) {
+    return { ok: true, persisted: userLangStore.writable, unchanged: true }
+  }
 
   let persisted
   try {
@@ -3170,6 +3635,29 @@ async function setUserLang (user, lang) {
   // the other side and every open tab of this user follows immediately.
   broadcast(user, { type: 'league-state', active: room.league, lang: room.lang })
   return { ok: true, persisted }
+}
+
+/**
+ * reviveParkedLangs() -> nothing
+ *
+ * Puts every parked choice (user-lang-store.mjs) whose parser is live now back
+ * in force and tells that user's open tabs, with the same `league-state` a
+ * switch on the settings page sends. Called from applyAptData (the data
+ * refresher's onAptData handler) after a successful engine reload: reload()
+ * retries every instance that is down, so a data update that brings a missing
+ * data set makes its parser live without a restart. Writes nothing — the file
+ * held the choice all along. user-lang-park.test.mjs drives it through
+ * applyAptData.
+ */
+function reviveParkedLangs () {
+  for (const [user, lang] of userLangStore.unpark({ isLive: l => engines.liveLanguages().includes(l) })) {
+    LANG_BY_USER.set(user, lang)
+    const room = users.get(user)
+    if (room && room.lang !== lang) {
+      room.lang = lang
+      broadcast(user, { type: 'league-state', active: room.league, lang: room.lang })
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -3206,6 +3694,11 @@ function runtimeConfigEntries () {
     { name: 'POE_RATE_LIMIT_STATE', value: RATE_LIMIT_STATE },
     { name: 'POE_NETWORTH_STORE', value: NETWORTH_STORE },
     { name: 'POE_NETWORTH_HISTORY', value: NETWORTH_HISTORY },
+    { name: 'POE_NETWORTH_SESSIONS', value: NETWORTH_SESSIONS },
+    { name: 'POE_SESSIONS_KEEP', value: String(SESSIONS_KEEP) },
+    { name: 'POE_SESSION_FINALIZE_MAX_MS', value: String(SESSION_FINALIZE_MAX_MS) },
+    { name: 'POE_SESSION_GAME_GAP_MS', value: String(SESSION_GAME_GAP_MS) },
+    { name: 'POE_SESSION_AUTO_GAME', value: bool(SESSION_AUTO_GAME) },
     { name: 'POE_NETWORTH_LIST_TTL_MS', value: String(NETWORTH_LIST_TTL_MS) },
     { name: 'POE_NETWORTH_COOLDOWN_MS', value: String(NETWORTH_COOLDOWN_MS) },
     { name: 'POE_NETWORTH_SLOW_STEP_MS', value: String(NETWORTH_SLOW_STEP_MS) },
@@ -3213,10 +3706,16 @@ function runtimeConfigEntries () {
     { name: 'POE_NETWORTH_GUARD_SHARE', value: String(NETWORTH_GUARD.share) },
     { name: 'POE_NETWORTH_GUARD_HOLD_MS', value: String(NETWORTH_GUARD.maxHoldMs) },
     { name: 'POE_NETWORTH_GUARD_ARRIVAL_MIN_DIVINE', value: String(NETWORTH_GUARD.arrivalMinDivine) },
+    { name: 'POE_NETWORTH_GUARD_STATE_MAX_NAMES', value: String(NETWORTH_GUARD.stateMaxNames) },
+    { name: 'net-worth guard memory (derived from POE_NETWORTH_HISTORY)', value: networthHistory.guardStatePath ?? '' },
     { name: 'POE_FAUSTUS_STORE', value: FAUSTUS_STORE },
     { name: 'POE_FAUSTUS_UNION_HOURS', value: String(FAUSTUS_UNION_HOURS ?? 'default') },
     { name: 'POE_FAUSTUS_REFRESH_MS', value: String(FAUSTUS_REFRESH_MS) },
     { name: 'POE_FAUSTUS_TTL_MS', value: String(FAUSTUS_TTL_MS) },
+    { name: 'POE_SOURCE_STALE_MS', value: String(envNum('POE_SOURCE_STALE_MS')) },
+    { name: 'POE_NINJA_MAX_AGE_MS', value: String(NINJA_MAX_AGE_MS) },
+    { name: 'POE_NINJA_MAP_TTL_MS', value: String(NINJA_MAP_TTL_MS) },
+    { name: 'POE_NINJA_FAIL_LOG_MS', value: String(NINJA_FAIL_LOG_MS) },
     { name: 'POE_CORPSE_STORE', value: CORPSE_STORE },
     { name: 'POE_CORPSE_TTL_MS', value: String(CORPSE_TTL_MS) },
     { name: 'POE_CORPSE_BUDGET_PER_HOUR', value: String(CORPSE_BUDGET_PER_HOUR) },
@@ -3242,7 +3741,13 @@ function runtimeConfigEntries () {
     // wants to know and would otherwise go looking for over SSH.
     { name: 'live parsers', value: engines.liveLanguages().join(', ') },
     { name: 'snapshot languages', value: dataRefresher.activeLanguages().join(', ') },
-    { name: 'net-worth store writable', value: bool(networthStoreWritable) },
+    // store.writable, not the mkdir result: a store that met a file from a
+    // newer release runs in memory and must say so here.
+    { name: 'net-worth store writable', value: bool(networthStore.writable) },
+    { name: 'farm sessions writable', value: bool(networthSessions.writable) },
+    { name: 'net-worth guard memory writable', value: bool(networthHistory.guardStateWritable) },
+    { name: 'Faustus store writable', value: bool(faustusStore.writable) },
+    { name: 'corpse store writable', value: bool(corpseStore.writable) },
     { name: 'user-language store writable', value: bool(userLangStore.writable) }
   ]
   // The editable ones are shown by the settings block above with their source;
@@ -3416,6 +3921,67 @@ const server = createServer(async (req, res) => {
     const detail = networthHistory.detail(user, Number(q.get('from')), Number(q.get('to')))
     res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' })
       .end(JSON.stringify(detail || { detail: false, items: [], points: 0, recorded: 0 }))
+    return
+  }
+
+  // Farm and game sessions (History page). GET is the page's whole view; the
+  // three POSTs are its buttons and take no body (discard takes ?kind=game for
+  // a game session). Identity from the same ppt_user cookie as everything
+  // else. None of them sends a request to GGG.
+  if (req.method === 'GET' && path === '/networth-sessions') {
+    const user = parseCookies(req.headers.cookie).ppt_user
+    if (!user || !users.has(user)) {
+      res.writeHead(400, { 'content-type': 'application/json' })
+        .end(JSON.stringify({ error: 'unknown user', users: USERS })); return
+    }
+    // An ended session past POE_SESSION_FINALIZE_MAX_MS is closed here too:
+    // observe() only runs after a new point, and none may come any more.
+    // Through sessionControl, so the daemon's feed and the other pages hear
+    // of what this changed, as they would from the sweep.
+    await sessionControl.expire(user)
+    const latest = networthHistory.latest(user)
+    const view = networthSessions.view(user, latest, { ...sessionControl.viewOptions(user), listMax: SESSION_LIST_MAX })
+    res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+      .end(JSON.stringify({
+        available: !!networthRefresher,
+        persisted: networthSessions.writable,
+        now: Date.now(),
+        rateMinMs: SESSION_RATE_MIN_MS,
+        guardHoldMs: NETWORTH_GUARD.maxHoldMs,
+        autoGame: SESSION_AUTO_GAME,
+        gameGapMs: SESSION_GAME_GAP_MS,
+        ...view
+      }))
+    return
+  }
+  if (req.method === 'POST' && (path === '/networth-session/start' || path === '/networth-session/end' || path === '/networth-session/discard')) {
+    const user = parseCookies(req.headers.cookie).ppt_user
+    if (!user || !users.has(user)) {
+      res.writeHead(400, { 'content-type': 'application/json' })
+        .end(JSON.stringify({ error: 'unknown user', users: USERS })); return
+    }
+    let r
+    if (path === '/networth-session/start') {
+      // No refresher, no points: a session started now could never be measured
+      // (session-control answers sync-off).
+      r = await sessionControl.start(user, 'farm')
+    } else if (path === '/networth-session/end') {
+      r = await sessionControl.end(user, 'farm')
+    } else {
+      const kind = new URL(req.url, 'http://localhost').searchParams.get('kind') || 'farm'
+      if (kind !== 'farm' && kind !== 'game') {
+        res.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ error: 'bad kind' })); return
+      }
+      r = await sessionControl.discard(user, kind)
+    }
+    if (!r.ok) {
+      res.writeHead(409, { 'content-type': 'application/json' })
+        .end(JSON.stringify({ error: r.error, ...(r.error === 'no-baseline' ? { maxAgeMs: SESSION_BASELINE_MAX_AGE_MS } : {}) }))
+      return
+    }
+    // sessionControl has sent `networth-session` to the room already.
+    res.writeHead(200, { 'content-type': 'application/json' })
+      .end(JSON.stringify({ ok: true, persisted: networthSessions.writable, session: r.session }))
     return
   }
 
@@ -3626,6 +4192,7 @@ const server = createServer(async (req, res) => {
     console.log(`[config-overrides] ${result.value === null ? `removed override ${name}` : `set override ${name}=${result.value}`} (${result.applied})`)
     res.writeHead(200, { 'content-type': 'application/json' })
       .end(JSON.stringify(result))
+    if (result.name === 'POE_SOURCE_STALE_MS') broadcastStaleBars()
     return
   }
 
@@ -3699,6 +4266,16 @@ const server = createServer(async (req, res) => {
   // The release check's answer, for any page. OPEN, no admin gate: it carries
   // the installed version of a public tool and the latest public release, and
   // the WebSocket message with the same content goes to every connection anyway.
+  // The price-source status, for the settings page's Sources block. OPEN like
+  // /release-status: nothing in it is secret (reasons pass cleanReason), and
+  // every connection gets the same content as a WebSocket message anyway.
+  if (req.method === 'GET' && path === '/source-status') {
+    const { type, ...rest } = sourceStatusMsg()
+    res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+      .end(JSON.stringify(rest))
+    return
+  }
+
   if (req.method === 'GET' && path === '/release-status') {
     res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' })
       .end(JSON.stringify(releaseCheck.status()))
@@ -3766,6 +4343,129 @@ const server = createServer(async (req, res) => {
     return
   }
 
+  // ---- The hotkey daemon's own channel (frontend/PROTOCOL.md) ---------------
+  // Path and method FIRST, before the caller check: a CORS preflight (OPTIONS,
+  // without X-PPT-Daemon) ends in 405 here, without any Access-Control-*
+  // header, so no web page can send the custom header these routes require.
+  if (path.startsWith('/daemon/')) {
+    const json = (code, body) => res.writeHead(code, { 'content-type': 'application/json', 'cache-control': 'no-store' }).end(JSON.stringify(body))
+    const DAEMON_ROUTES = { '/daemon/events': 'GET', '/daemon/heartbeat': 'POST', '/daemon/whisper': 'POST', '/daemon/session': 'POST' }
+    if (!Object.hasOwn(DAEMON_ROUTES, path)) { json(404, { error: 'unknown daemon route', path }); return }
+    if (req.method !== DAEMON_ROUTES[path]) { json(405, { error: 'method not allowed', allow: DAEMON_ROUTES[path] }); return }
+    // The rest in try/catch: this handler is async and nothing catches its
+    // rejection, and on Node 24 an unhandled rejection ends the process.
+    try {
+      const who = daemonCaller(req.headers, users)
+      if (who.status) { json(who.status, who.body); return }
+
+      if (path === '/daemon/events') {
+        const q = new URL(req.url, 'http://localhost').searchParams
+        const since = q.has('since') ? Number(q.get('since')) : NaN
+        const boot = q.get('boot') || ''
+        const holdMs = Math.min(Math.max(0, Math.floor(Number(q.get('wait')) || 0)), DAEMON_POLL_MAX_HOLD_MS)
+        const ready = daemonFeed.read(who.user, { since, boot })
+        if (ready.reset || ready.gap || ready.events.length || holdMs === 0) { json(200, ready); return }
+        const cancel = daemonFeed.wait(who.user, {
+          since, boot, instance: who.instance, holdMs,
+          onAnswer: out => { if (!res.writableEnded) json(200, out) }
+        })
+        if (!cancel) { json(429, { error: 'too-many-waiters', max: DAEMON_WAITERS_MAX }); return }
+        res.on('close', cancel)
+        return
+      }
+
+      if (path === '/daemon/whisper') {
+        let wbody
+        try {
+          wbody = parseJsonBody(await readBodyLimited(req, DAEMON_WHISPER_BODY_MAX))
+        } catch (e) {
+          if (e instanceof BodyTooLarge) {
+            res.setHeader('connection', 'close')
+            json(413, { error: 'body too large', max: DAEMON_WHISPER_BODY_MAX })
+            res.on('finish', () => req.destroy())
+            return
+          }
+          json(400, { error: 'bad body' }); return
+        }
+        if (!wbody.ok) { json(400, { error: wbody.error }); return }
+        const room = users.get(who.user)
+        // Never throws or rejects (whisper-price.mjs); a valuation that fails
+        // is 'not-compared' with reason 'error'.
+        const out = await whisperHandler.handle({ user: who.user, instance: who.instance, league: room.league }, wbody.value)
+        if (!res.writableEnded) json(out.status, out.body)
+        return
+      }
+
+      if (path === '/daemon/session') {
+        // The daemon's session key: start, end or toggle the user's farm
+        // session, exactly like the History page's buttons
+        // (networth/session-control.mjs). The answer carries the session as
+        // the feed's `session` event does; the feed gets that event as well.
+        let sbody
+        try {
+          sbody = parseJsonBody(await readBodyLimited(req, DAEMON_SESSION_BODY_MAX))
+        } catch (e) {
+          if (e instanceof BodyTooLarge) {
+            res.setHeader('connection', 'close')
+            json(413, { error: 'body too large', max: DAEMON_SESSION_BODY_MAX })
+            res.on('finish', () => req.destroy())
+            return
+          }
+          json(400, { error: 'bad body' }); return
+        }
+        if (!sbody.ok) { json(400, { error: sbody.error }); return }
+        const action = sbody.value.action
+        if (action !== 'toggle' && action !== 'start' && action !== 'end') { json(400, { error: 'bad action' }); return }
+        if (!daemonSessionRate.admit(who.user)) { json(429, { v: FEED_VERSION, error: 'too-many-session-requests', action }); return }
+        const r = action === 'toggle'
+          ? await sessionControl.toggle(who.user, { by: who.instance })
+          : { ...(action === 'start'
+              ? await sessionControl.start(who.user, 'farm', { by: who.instance })
+              : await sessionControl.end(who.user, 'farm', { by: who.instance })), action }
+        if (!r.ok) {
+          json(409, { v: FEED_VERSION, error: r.error, action: r.action, ...(r.error === 'no-baseline' ? { maxAgeMs: SESSION_BASELINE_MAX_AGE_MS } : {}) })
+          return
+        }
+        json(200, { ok: true, v: FEED_VERSION, action: r.action, session: sessionControl.feedSession(r.session) })
+        return
+      }
+
+      // POST /daemon/heartbeat
+      let body
+      try {
+        body = parseJsonBody(await readBodyLimited(req, DAEMON_BEAT_BODY_MAX))
+      } catch (e) {
+        if (e instanceof BodyTooLarge) {
+          res.setHeader('connection', 'close')
+          json(413, { error: 'body too large', max: DAEMON_BEAT_BODY_MAX })
+          res.on('finish', () => req.destroy())
+          return
+        }
+        json(400, { error: 'bad body' }); return
+      }
+      if (!body.ok) { json(400, { error: body.error }); return }
+      const room = users.get(who.user)
+      const before = daemonPresence.statusOf(who.user)
+      const edgesBefore = presenceEdges
+      const presence = daemonPresence.beat(who.user, who.instance, { ...body.value, version: who.version })
+      const after = daemonPresence.statusOf(who.user)
+      // A page update only when something the page shows changed. A presence
+      // change already went out through onPresenceChange (inside beat()); here
+      // only new version, features or instance count without such an edge, so
+      // one change is ONE daemon-status, and a beat a minute is not a page
+      // update a minute.
+      if (presenceEdges === edgesBefore && daemonPresence.changedForPage(before, after)) {
+        broadcast(who.user, daemonStatusMsg(room, who.user))
+      }
+      json(200, { ok: true, presence, v: FEED_VERSION })
+      return
+    } catch (e) {
+      console.warn(`[daemon] ${path} failed: ${e?.message || e}`) // never a body
+      if (!res.headersSent) json(500, { error: 'internal' })
+      return
+    }
+  }
+
   if (req.method === 'POST' && path === '/item') {
     let text
     try { text = await readBody(req) } catch { res.writeHead(400).end('bad body'); return }
@@ -3774,9 +4474,10 @@ const server = createServer(async (req, res) => {
     // but names an unknown user is a config error (typo in the daemon's
     // PPT_USER): routing it silently to USERS[0] would pollute the first user's
     // room with foreign items AND hide the typo from the player who set it (they
-    // never see a card). Reject loudly instead. The daemon POSTs fire-and-forget
-    // (curl -s, output discarded, no status check, no retry loop), so a 4xx
-    // surfaces the misconfiguration without breaking it.
+    // never see a card). Reject loudly instead. The daemon does not retry;
+    // poe-price-post.sh turns this 400 and its body into one line in the
+    // player's daemon journal. No room is stamped (daemon-status): the POST
+    // belongs to nobody.
     const hdr = req.headers['x-user']
     const hdrName = typeof hdr === 'string' ? hdr.trim() : ''
     if (hdrName && !users.has(hdrName)) {
@@ -3787,6 +4488,12 @@ const server = createServer(async (req, res) => {
     }
     const user = hdrName || USERS[0]
     const room = users.get(user)
+    // A daemon new enough to read its feed says so (X-PPT-Daemon, its version)
+    // and which of its runs it is (X-PPT-Instance); only then is the card
+    // followed in the feed (daemon-feed.mjs). Without the header — every older
+    // daemon, the self-test, a plain curl — `by` stays null and this route
+    // answers and behaves exactly as it did before the feed existed.
+    const by = req.headers['x-ppt-daemon'] ? daemonInstanceOf(req.headers['x-ppt-instance']) : null
     // The parse instance follows the user's client language. Parse-only for
     // every non-primary language: the wrapper has no trade calls on it at all
     // (engine-instances.mjs). If that language has no live parser (its data set
@@ -3801,6 +4508,7 @@ const server = createServer(async (req, res) => {
       // report. From the admin view it is indistinguishable in shape from a
       // parse failure, which is exactly right — for him it IS one.
       gapLog.recordParseFailure({ lang: room.lang, text, reason: `no parser for language "${room.lang}"` })
+      noteDaemonItem(user, room, 'no-parser')
       res.writeHead(503, { 'content-type': 'application/json' })
         .end(JSON.stringify({ error: `no parser for language "${room.lang}"`, user, lang: room.lang }))
       return
@@ -3862,11 +4570,17 @@ const server = createServer(async (req, res) => {
       const dupRec = dup && room.items.get(dup.id)
       if (dupRec && dupRec.alive) {
         dup.ts = now
+        // Followed again for the daemon that pressed now (re-opens a card past
+        // its final state), BEFORE the re-assert below so the feed sees it;
+        // `reassert`: the price-result right after the item-added is the
+        // card's last price, not a new result (daemon-feed.mjs, track).
+        if (by) trackFeed(user, dupRec.id, { by, stack: item.stackSize?.value ?? null, league: room.league, reassert: true })
         // The card already exists in the browser; re-assert its current state
         // (harmless if already shown) rather than adding a duplicate.
         broadcast(user, itemAddedFor(dupRec, PRICE_STATUS[dupRec.status] || 'queued'))
         if (dupRec.lastPrice) broadcast(user, dupRec.lastPrice)
         if (dupRec.ninja) broadcast(user, { type: 'ninja-ref', id: dupRec.id, ...dupRec.ninja })
+        noteDaemonItem(user, room, 'card')
         res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ id: dup.id, user, deduped: true }))
         return
       }
@@ -3878,15 +4592,25 @@ const server = createServer(async (req, res) => {
       room.items.set(id, { id, item, presets, preset, addedMsg, alive: true, status: 'queued', lastPrice: null, selection: null })
       room.recentPosts.set(fp, { id, ts: now })
       enforceItemCap(user, room)             // cap the room -> evict oldest over MAX_ITEMS_PER_ROOM (never the just-added one)
+      if (by) trackFeed(user, id, { by, stack: item.stackSize?.value ?? null, league: room.league }) // before the broadcast that is its first event
       broadcast(user, addedMsg)              // immediately queued to the browser (only that room)
+      // Early answer for the game (feedEarlyAnswer). Its place is fixed:
+      // enqueue() runs pump() synchronously, and on an empty queue the card is
+      // 'searching' or already final right after it. The feed calls here are
+      // guarded: a throw in them never turns this POST into a 400.
+      if (by) earlyFeed(user, id, item, room.league)
       enqueue({ user, id, kind: 'auto' })    // trade job into the global queue
+      if (by) refreshFeed(user, id)          // its queue position, now that the job is queued
       pushNinjaRef(user, id)                 // F3: send poe.ninja reference price best-effort afterwards
+      noteDaemonItem(user, room, 'card')     // daemon-status: the empty page knows an item arrived
       res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ id, user }))
     } catch (e) {
-      // The engine refused the text. The daemon POSTs fire-and-forget, so this
-      // 400 is read by nobody — the gap log is the only place this ever
-      // surfaces (design doc, section 6).
+      // The engine refused the text. The player's daemon journal gets one
+      // line for it and the empty Price Check page says the last item could
+      // not be read (`daemon-status`); the gap log is where the operator sees
+      // WHICH text it was (design doc, section 6).
       gapLog.recordParseFailure({ lang: room.lang, text, reason: String(e?.message || e) })
+      noteDaemonItem(user, room, 'parse-failed')
       res.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ error: String(e?.message || e) }))
     }
     return
@@ -3928,6 +4652,10 @@ wss.on('connection', (ws, req) => {
   send(ws, { type: 'networth-latest', snapshot: networthSnapshot(user) })
   send(ws, dataStatusMsg()) // M2 status line: freshness of the auto-updated data
   send(ws, releaseStatusMsg()) // is a newer release of this tool out (status line, settings page)
+  send(ws, sourceStatusMsg()) // age and state of the price sources (status line, settings page)
+  send(ws, daemonStatusMsg(room, user)) // Price Check empty state: last item from this user's hotkey daemon
+  send(ws, { type: 'whispers', entries: whisperBook.list(user) }) // buyer whispers of this session (memory only)
+  send(ws, sessionMsg(user)) // running farm session -> status line
   // Sync status for the M2 status line (async: reads the credential file).
   networthSyncStatus(user).then(st => send(ws, syncStatusMsg(st))).catch(() => {})
 
@@ -3979,6 +4707,9 @@ wss.on('connection', (ws, req) => {
       if (lg && lg !== room.league) {
         room.league = lg // changes ONLY this user's league
         broadcast(user, { type: 'league-state', active: room.league })
+        // Another league is another stash; a balance across it is not a
+        // farming result.
+        noteSessionStashChanged(user)
         // New league -> fetch C:D again, then (exchange cache is warm by then ->
         // no double fetch) fetch reference again + broadcast only to THIS room.
         // Same switch as warmLeague: this is the other client-triggered
@@ -4026,6 +4757,92 @@ if (REFERENCE_DISABLED) {
 // into the user's room -> an open page nudges live. The POESESSID cookie never
 // touches a log/broadcast/store.
 // ---------------------------------------------------------------------------
+// One valuator per league — its poe.ninja exchange map lives at most
+// POE_NINJA_MAP_TTL_MS and an empty one is never kept (valuator.mjs), so the
+// valuator itself needs no expiry, and re-using it across ticks keeps the
+// ninja request count tiny (the whole point of valuator.mjs). At module scope
+// because the refresher below and the buyer-whisper check share it (one set of
+// caches), and the whisper check works with POE_NETWORTH_AUTOSYNC=0 too.
+const valuatorByLeague = new Map()
+const valuatorFor = league => {
+  let v = valuatorByLeague.get(league)
+  if (!v) { v = createValuator({ league, deps: { faustusStore, corpseStore, faustusTtlMs: FAUSTUS_TTL_MS, faustusMaxAgeMs: FAUSTUS_MAX_AGE_MS, exchangeMapTtlMs: NINJA_MAP_TTL_MS, thinTurnoverC: NETWORTH_THIN_TURNOVER_C, corpseMinListings: NETWORTH_CORPSE_MIN_LISTINGS } }); valuatorByLeague.set(league, v) }
+  return v
+}
+
+// ---------------------------------------------------------------------------
+// Buyer whispers (POST /daemon/whisper, frontend/PROTOCOL.md)
+// ---------------------------------------------------------------------------
+// The verdict on the player's own listed price: fungibles through the valuator
+// above (Faustus, then poe.ninja), a unique only when exactly one poe.ninja
+// line can be meant, never the trade API. Defined before server.listen, so the
+// first request never meets these bindings uninitialised.
+// A trade tag ('alch') or a currency name ('Orb of Alchemy') -> its chaos value
+// in that league, unrounded (a 0.37 c Alchemy is not 0.4 c). null: not a
+// currency this tool knows ('unknown-currency'); { chaos: null }: a known one
+// without a price right now ('no-rate'). `fallback`: the Chaos:Divine rate
+// behind it is the configured fallback or older than its freshness limit;
+// `uncertain`: the valuator's marker on the currency's own price. Either
+// means no verdict.
+async function whisperChaosPerTag (tag, league) {
+  const ref = itemsIndex.byTag.get(tag) ?? (itemsIndex.byName.has(tag) ? tag : null)
+  if (!ref) return null
+  if (ref === 'Chaos Orb') return { chaos: 1, fallback: false, uncertain: null }
+  if (ref === 'Divine Orb') {
+    const r = divineRate(league)
+    return r.chaos == null ? { chaos: null } : { chaos: r.chaos, fallback: r.fallback, uncertain: null }
+  }
+  const desc = descriptorForName(ref, itemsIndex)
+  if (!desc) return null
+  const v = await valuatorFor(league).valueEach(desc)
+  return v && typeof v.each === 'number' && v.each > 0
+    ? { chaos: v.each, fallback: false, uncertain: v.uncertain ?? null }
+    : { chaos: null }
+}
+const whisperPricer = createWhisperPricer({
+  valuatorFor,
+  resolveContext: lang => {
+    const w = whisperNames.get(lang)
+    if (!w) return null
+    return {
+      byName: itemsIndex.byName,
+      uniques: w.uniques,
+      localToRef: w.localToRef ? (n => w.localToRef.get(n) || null) : null,
+      describe: ref => descriptorForName(ref, itemsIndex),
+      categoryOf: base => itemsIndex.categoryOfBase(base)
+    }
+  },
+  // A whisper in a language without name data (French, Russian, Spanish,
+  // Portuguese today) borrows a name one of these knows exactly.
+  fallbackLangs: () => WHISPER_LANGS.filter(l => whisperNames.has(l)),
+  chaosPerTag: whisperChaosPerTag,
+  lowRatio: WHISPER_LOW_RATIO,
+  highRatio: WHISPER_HIGH_RATIO,
+  pricingOff: PRICE_CHECK_DISABLED,
+  // The stack size the last sync saw at a whisper's tab and cell, for the
+  // second reading of a single whisper for a stackable (stack-unknown). Reads
+  // the per-tab store in memory; never a stash request.
+  stackAt: createStackLookup(networthStore)
+})
+const whisperHandler = createWhisperHandler({
+  pricer: whisperPricer,
+  book: whisperBook,
+  rate: whisperRate,
+  deadlineMs: envNum('POE_WHISPER_PRICE_DEADLINE_MS'),
+  broadcast,
+  pushWhisper: guarded((u, e, o) => daemonFeed.pushWhisper(u, e, o), console.warn),
+  onUnparsed: u => { const room = users.get(u); if (room) broadcast(u, daemonStatusMsg(room, u)) },
+  // '[whisper] valuation failed' / 'delivery failed' / 'handler failed', at
+  // most one line a minute for each, with a count of the ones left out; never
+  // a whisper's text, item or label.
+  onError: createWhisperErrorLog(),
+  log: line => console.log(line),
+  // Is a whisper's tab a quad tab, by the tab type the last sync stored (the
+  // daemon's stash cell frame, entry field `quad`). Reads the per-tab store in
+  // memory; never a stash request.
+  quadOf: createQuadLookup(networthStore)
+})
+
 let networthRefresher = null
 const networthBootCreds = await loadNetworthUsers({ defaultUser: USERS[0] }).catch(() => ({}))
 // Started even with ZERO configured users: the refresher reloads the
@@ -4034,24 +4851,15 @@ const networthBootCreds = await loadNetworthUsers({ defaultUser: USERS[0] }).cat
 // first credentials were saved would need a restart (a tick with no users is a
 // no-op, so an idle refresher costs nothing).
 if (NETWORTH_AUTOSYNC && networthStoreWritable) {
-  // One valuator per league — its poe.ninja exchange map is built once and
-  // cached (>=15min), so re-using it across ticks keeps the ninja request count
-  // tiny (the whole point of valuator.mjs). A fresh stash client per tick is
-  // still fine — createStashClient does no network at construction, and the
-  // credentials and the league may change between ticks — but the reason it
-  // used to be given for it ("the 30s interval IS the pacing") was wrong for a
-  // folder tab, which spends 1+N requests inside ONE tick and against windows
-  // 30 minutes long. The pacing state therefore no longer lives in the client:
-  // networth/stash-pacer.mjs holds it for the whole process, which is also the
-  // only scope an `Ip` budget can honestly be held at (it is shared across
-  // users). Nothing has to be passed in here for that — a shared default cannot
-  // be forgotten at a call site.
-  const valuatorByLeague = new Map()
-  const valuatorFor = league => {
-    let v = valuatorByLeague.get(league)
-    if (!v) { v = createValuator({ league, deps: { faustusStore, corpseStore, faustusTtlMs: FAUSTUS_TTL_MS, faustusMaxAgeMs: FAUSTUS_MAX_AGE_MS } }); valuatorByLeague.set(league, v) }
-    return v
-  }
+  // valuatorFor (above) is shared with the buyer-whisper check. A fresh stash client per tick is
+  // fine — createStashClient does no network at construction, and the
+  // credentials and the league may change between ticks — but "the 30s
+  // interval IS the pacing" does not hold for a folder tab, whose 1+N requests
+  // land in windows 30 minutes long. So the pacing state does not live in the
+  // client: networth/stash-pacer.mjs holds it for the whole process, which is
+  // also the only scope an `Ip` budget can honestly be held at (it is shared
+  // across users). Nothing has to be passed in here for that — a shared default
+  // cannot be forgotten at a call site.
   networthRefresher = createNetworthRefresher({
     store: networthStore,
     // Reloaded every round -> cookie rotation (and newly-added users) without a restart.
@@ -4082,12 +4890,17 @@ if (NETWORTH_AUTOSYNC && networthStoreWritable) {
     intervalMs: NETWORTH_SYNC_INTERVAL_MS,
     listTtlMs: NETWORTH_LIST_TTL_MS,
     cooldownMs: NETWORTH_COOLDOWN_MS,
-    slowStepMs: NETWORTH_SLOW_STEP_MS
+    slowStepMs: NETWORTH_SLOW_STEP_MS,
+    // Sync follows the game: whose tab a tick reads, from the daemons'
+    // heartbeats; 'unknown' (no or a silent daemon) is today's round-robin.
+    presenceOf: user => daemonPresence.syncPresenceOf(user, holdAfterGame),
+    idleEvery: NETWORTH_IDLE_EVERY,
+    idleRest: NETWORTH_IDLE_REST
   })
   networthRefresher.start()
-  console.log('[networth] background auto-sync on (interval=%dms listTtl=%dms cooldown=%dms slowStep=%dms users=%d)',
+  console.log('[networth] background auto-sync on (interval=%dms listTtl=%dms cooldown=%dms slowStep=%dms idleEvery=%d idleRest=%s users=%d)',
     NETWORTH_SYNC_INTERVAL_MS, NETWORTH_LIST_TTL_MS, NETWORTH_COOLDOWN_MS, NETWORTH_SLOW_STEP_MS,
-    Object.keys(networthBootCreds).length)
+    NETWORTH_IDLE_EVERY, NETWORTH_IDLE_REST ? 'on' : 'off', Object.keys(networthBootCreds).length)
 }
 
 // One-shot probe for folder tabs (POE_STASH_PROBE=<tabIndex>): runs exactly
@@ -4153,10 +4966,65 @@ await new Promise((resolve) => {
 // "the server came up" is the only definition of success that stops a restart
 // loop (config-overrides.mjs).
 clearApplyingMarker(configOverrideState)
+// From here a source-status change may be broadcast (see sourceStatusReady).
+sourceStatusReady = true
 
 // Restore a still-running ban gate BEFORE anything can enqueue a search, so a
 // restart mid-ban resumes paused instead of probing GGG (see RATE_LIMIT_STATE).
 await restoreRateLimit()
+
+// New APT snapshot: hot-reload the engine data (initData re-assigns the
+// lookup closures inside the bundle — no process restart), then rebuild
+// the two server-side derivatives of items.ndjson. A parse that is
+// in-flight during the few ms of the swap may see mixed old/new lookups —
+// harmless (worst case one odd result), and the alternative would be
+// stalling the whole item pipeline for every update.
+//
+// The refresher's onAptData handler (dataRefresher.start below). Named and
+// exported rather than written inline, so that user-lang-park.test.mjs can run
+// the real handler with stubbed engines and pin that a parked language choice
+// comes back here.
+async function applyAptData ({ publicDataUrl, itemsNdjsonPath, languages }) {
+  // A snapshot that does not carry every LIVE language would silently pull
+  // the data root out from under one of the instances. Say so by name
+  // instead of letting it surface as an ENOENT inside the data loader; the
+  // throw is a veto, so the refresher discards the snapshot and the
+  // previous one stays live for both languages.
+  const lost = engines.liveLanguages().filter(l => !(languages || [PRIMARY_LANG]).includes(l))
+  if (lost.length) {
+    throw new Error(`snapshot carries no data/${lost.join(', data/')} — a live parser would lose its data root`)
+  }
+  try {
+    // Serial reload of every instance; on failure engine-instances puts
+    // ALL of them back on the previous (validated, still on disk) snapshot
+    // and rethrows, so the refresher discards the new one.
+    await engines.reload({ publicDataDir: publicDataUrl })
+  } catch (e) {
+    console.warn(`[data-refresh] engine reload failed (${e?.message || e}) — rolled back to the previous data`)
+    throw e
+  }
+  // A parser that was down may be live now; a user whose stored choice
+  // waited for it is put back on it. Before the rebuilds below, which
+  // build their per-language tables from LANG_BY_USER.
+  reviveParkedLangs()
+  itemsIndex = await loadItemsIndex(itemsNdjsonPath)
+  // Same snapshot, same rebuild: the localized name bridge must never
+  // describe a data set the engine has already left behind, or a corpse
+  // name would be resolved against the wrong league's items.
+  await reloadRefNamesByLang()
+  // And the names a buyer whisper is read with (every template language).
+  await reloadWhisperNames()
+  // Same snapshot again, the other direction: the names the browser prints
+  // must come from the data set the engine now parses with, or the page
+  // shows last week's wording for this week's items.
+  await reloadLocalNamesByLang()
+  // Same reason, one level further: a pair table from the previous snapshot
+  // would translate mod lines for a data set the engine has already left.
+  modTextBridge.reload()
+  // Same reason once more, for the stash-search name universe: every
+  // language's body is lazily rebuilt from the new snapshot on next use.
+  itemNamesJsonByLang.clear()
+}
 
 // ---- Data auto-update: start the background schedule ------------------------
 // The handlers make an adopted update effective in the RUNNING process; how
@@ -4165,47 +5033,7 @@ if (DATA_REFRESH_DISABLED) {
   console.log('[data-refresh] disabled via POE_DATA_REFRESH_DISABLED=1')
 } else {
   dataRefresher.start({
-    // New APT snapshot: hot-reload the engine data (initData re-assigns the
-    // lookup closures inside the bundle — no process restart), then rebuild
-    // the two server-side derivatives of items.ndjson. A parse that is
-    // in-flight during the few ms of the swap may see mixed old/new lookups —
-    // harmless (worst case one odd result), and the alternative would be
-    // stalling the whole item pipeline for every update.
-    async onAptData ({ publicDataUrl, itemsNdjsonPath, languages }) {
-      // A snapshot that does not carry every LIVE language would silently pull
-      // the data root out from under one of the instances. Say so by name
-      // instead of letting it surface as an ENOENT inside the data loader; the
-      // throw is a veto, so the refresher discards the snapshot and the
-      // previous one stays live for both languages.
-      const lost = engines.liveLanguages().filter(l => !(languages || [PRIMARY_LANG]).includes(l))
-      if (lost.length) {
-        throw new Error(`snapshot carries no data/${lost.join(', data/')} — a live parser would lose its data root`)
-      }
-      try {
-        // Serial reload of every instance; on failure engine-instances puts
-        // ALL of them back on the previous (validated, still on disk) snapshot
-        // and rethrows, so the refresher discards the new one.
-        await engines.reload({ publicDataDir: publicDataUrl })
-      } catch (e) {
-        console.warn(`[data-refresh] engine reload failed (${e?.message || e}) — rolled back to the previous data`)
-        throw e
-      }
-      itemsIndex = await loadItemsIndex(itemsNdjsonPath)
-      // Same snapshot, same rebuild: the localized name bridge must never
-      // describe a data set the engine has already left behind, or a corpse
-      // name would be resolved against the wrong league's items.
-      await reloadRefNamesByLang()
-      // Same snapshot again, the other direction: the names the browser prints
-      // must come from the data set the engine now parses with, or the page
-      // shows last week's wording for this week's items.
-      await reloadLocalNamesByLang()
-      // Same reason, one level further: a pair table from the previous snapshot
-      // would translate mod lines for a data set the engine has already left.
-      modTextBridge.reload()
-      // Same reason once more, for the stash-search name universe: every
-      // language's body is lazily rebuilt from the new snapshot on next use.
-      itemNamesJsonByLang.clear()
-    },
+    onAptData: applyAptData,
     // New base-names map: swap it into the (single) Faustus pricer — effective
     // with the next hourly Faustus tick.
     async onBaseNames ({ path }) {
@@ -4230,5 +5058,6 @@ releaseCheck.start()
 // these exports are purely additive (no existing function changed).
 // ---------------------------------------------------------------------------
 export { gapLog, langSkew, adminAuth, ADMIN_PASSWORD_PATH, modTextBridge }
-export { userLangStore, setUserLang, availableLangs, configOverrideState, runtimeConfigEntries }
-export { server, enqueue, enqueueBackground, pump, jobs, bgJobs, users, dataRefresher, engines, LANG_BY_USER, LEAGUE, leaguesToRefresh, networthStore, networthHistory, networthRefresher, referenceHistory, refreshReference, faustusStore, faustusRefresher, corpseStore, corpsePricer, corpseTradeClient, rateLimitMsg, noteRateLimit, clearRateLimit, rateLimitSeconds, tradeBanPause, maxLinkGroup, LINKS_MOD_TEXT, splitRollRanges, spliceResolvedUnknownMods, modsOf, buildItemAdded, applySelection, selectionOf, itemAddedFor, toNinjaPriceResult, toPriceResult, withExchangeMain, faustusChaosFor, faustusRangeFor, faustusStaleHoursFor, ninjaBulkPrice, ninjaRefFor, priceKeyOf, collectCorpseNames, englishCorpseName, loadLocalNamesByRefName, localNamesByLang, itemNameMapJson }
+export { userLangStore, setUserLang, applyAptData, availableLangs, configOverrideState, runtimeConfigEntries }
+export { sourceStatusMsg, sourceHealth, refreshCdRatio, cdMsgFor, syncStatusMsg }
+export { server, enqueue, enqueueBackground, pump, jobs, bgJobs, users, dataRefresher, engines, LANG_BY_USER, LEAGUE, leaguesToRefresh, networthStore, networthHistory, networthSessions, networthRefresher, referenceHistory, refreshReference, faustusStore, faustusRefresher, corpseStore, corpsePricer, corpseTradeClient, rateLimitMsg, noteRateLimit, clearRateLimit, rateLimitSeconds, tradeBanPause, maxLinkGroup, LINKS_MOD_TEXT, splitRollRanges, spliceResolvedUnknownMods, modsOf, buildItemAdded, applySelection, selectionOf, itemAddedFor, toNinjaPriceResult, toPriceResult, withExchangeMain, faustusChaosFor, faustusRangeFor, faustusStaleHoursFor, ninjaBulkPrice, ninjaRefFor, priceKeyOf, collectCorpseNames, englishCorpseName, loadLocalNamesByRefName, localNamesByLang, itemNameMapJson }

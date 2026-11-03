@@ -1,58 +1,35 @@
 // backend/v2/networth/map-sections.mjs
 // WHICH SECTION OF THE MAP STASH A SUB-TAB BELONGS TO — read off the field GGG
-// sends, not guessed from a name.
-//
-// ---------------------------------------------------------------------------
-// THIS IS THE ANSWER TO THE QUESTION subtab-shape.mjs WAS SHIPPED TO ASK
-// ---------------------------------------------------------------------------
-// The map stash costs 1+N requests and N is ~43 on the production account, so
-// the per-tier pages — which hold normal maps, which are never priced — are the
-// bulk of the cost for none of the value. A rule that passed over them existed
-// once (`subtab-skip.mjs`, 2026-08-13) and was reverted the same day: it
-// identified a tier page by its NAME, and the names turned out to be `"1"` and
-// `"2"` — PAGE NUMBERS. The pattern matched every child, `Unique Maps` and
-// `Special Maps` went with them, and the net worth lost what sits in those.
-// docs/bugs.md B19.
-//
-// The observation line that shipped alongside the revert asked whether the
-// response says which SECTION a child belongs to. It answered itself on
-// 2026-08-19, out of the production account's own `metadata`:
+// sends, not guessed from a name. The map stash costs 1+N requests and N is ~43
+// on the production account; the per-tier pages hold normal maps, which are
+// never priced, so they are the bulk of the cost for none of the value. A tier
+// page cannot be told by its NAME: the names are `"1"` and `"2"` — PAGE NUMBERS
+// (docs/bugs.md B19; subtab-shape.mjs). On 2026-08-19 the production account's
+// own `metadata` showed the section:
 //
 //   "1" type=MapStash metadata={"items":70,"map":{"section":"tier16", …}}
 //   "1" type=MapStash metadata={"items":16,"map":{"section":"unique",  …}}
 //   "1" type=MapStash metadata={"items":28,"map":{"section":"special", …}}
 //
-// `metadata.map.section` is GGG's own label for the page, it is in the parent
-// response that the walk already has in hand, and it costs no request. Three
-// values appeared across 43 children: `unique`, `special`, and `tier<N>` for
-// every tier that had a page.
+// `metadata.map.section` is GGG's own label for the page, in the parent
+// response the walk already has in hand, at no request. Three values appeared
+// across 43 children: `unique`, `special`, and `tier<N>` for every tier that
+// had a page.
 //
-// ---------------------------------------------------------------------------
-// WHY THIS ONE MAY DECIDE SOMETHING WHERE THE NAME RULE MAY NOT
-// ---------------------------------------------------------------------------
-// Not because the evidence is better — although it is — but because THE
-// DIRECTION OF THE FAILURE IS THE OPPOSITE ONE. B19's rule was built as "does
-// this look like a tier page?", so anything the pattern did not understand was
-// skipped, and a wrong guess cost a whole tab. This one is built as "did GGG
-// say `tier<N>`?", so anything NOT understood is READ: a missing `metadata`, a
-// section spelled differently, a page type that does not exist yet, an account
-// whose stash answers in some shape nobody here has seen — all of them fall
-// through to the sub-tab being fetched exactly as it is today. The worst a
-// misreading can do is cost requests, which is the thing it was trying to save.
+// WHY THIS MAY DECIDE: THE DIRECTION OF THE FAILURE. The rule is "did GGG say
+// `tier<N>`?", so anything NOT understood is READ — a missing `metadata`, a
+// section spelled differently, a page type that does not exist yet, a shape
+// nobody here has seen all fall through to the sub-tab being fetched. The worst
+// a misreading can do is cost requests. So the test file asserts the
+// fall-through cases one by one, and `isTierMapChild` takes the CHILD rather
+// than a section string: that the field may be absent is part of the decision.
 //
-// That is also why the test file asserts the fall-through cases one by one, and
-// why `isTierMapChild` takes the CHILD rather than a section string: the fact
-// that the field may be absent is part of what it has to decide.
-//
-// ---------------------------------------------------------------------------
-// AND IT IS NOT SILENT, WHICH WAS THE OTHER HALF OF THE OBJECTION
-// ---------------------------------------------------------------------------
-// A switch whose ON quietly removes value from the net worth is a trap. So the
-// walk logs what it passed over and which sections they were, every time, on
-// the same line that says how the folder tab was read (networth/folder-walk.mjs
-// -> `finishFolderWalk`), and `POE_NETWORTH_SKIP_TIER_MAPS=0` reads the whole
-// stash again. Normal maps are unpriced stock either way — skipping them moves
-// them out of the "unpriced" list, it does not move a priced number.
+// AND IT IS NOT SILENT: the walk logs what it passed over and which sections
+// they were, every time, on the line that says how the folder tab was read
+// (networth/folder-walk.mjs -> `finishFolderWalk`), and
+// `POE_NETWORTH_SKIP_TIER_MAPS=0` reads the whole stash again. Normal maps are
+// unpriced stock either way — skipping them moves them out of the "unpriced"
+// list, it does not move a priced number.
 
 /** GGG's section label for a map-stash page, e.g. `tier16` / `unique`. */
 export const TIER_SECTION_RE = /^tier\d+$/i

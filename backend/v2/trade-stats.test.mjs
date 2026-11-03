@@ -4,6 +4,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createTradeStatIndex, normalizeStatText, signlessStatText } from './trade-stats.mjs'
+import { AGENT_BASE } from './version.mjs'
 
 // Miniature catalogue in the real shape GGG serves (result[].entries[]).
 const CATALOGUE = {
@@ -133,4 +134,14 @@ test('resolve() is unchanged by the second entry point — the English path is a
   // character, exactly as before.
   assert.equal(await idx.resolve('2 to Level of Socketed Physical Gems', 'implicit'), null)
   assert.equal(await idx.resolve('+2 to Level of Socketed Physical Gems', 'implicit'), 'implicit.stat_516565950')
+})
+
+test('the catalogue request names the tool, its version and its purpose', async () => {
+  const seen = []
+  const idx = createTradeStatIndex({
+    fetchImpl: async (url, opts) => { seen.push(opts.headers); return { ok: true, json: async () => CATALOGUE } }
+  })
+  await idx.resolve('+33 to maximum Life', 'implicit')
+  assert.equal(seen.length, 1)
+  assert.equal(seen[0]['User-Agent'], `${AGENT_BASE} (personal LAN tool)`)
 })

@@ -1,9 +1,9 @@
 /* Settings page — the two things that are configured, and the one thing the
  * tool has to say about itself.
  *
- * WHY THIS PAGE EXISTS. The net-worth credentials used to be a modal on the Net
- * Worth page, and the gap view (design doc, section 6) had nowhere to go. Two
- * settings surfaces would have been one too many, so both live here: the sync
+ * WHY THIS PAGE EXISTS. The net-worth credentials and the gap view (design doc,
+ * section 6) need a settings surface, and two would be one too many, so both
+ * live here: the sync
  * credentials at the top, the admin area below and behind a password.
  *
  * THE ADMIN STATE MODEL, in one sentence, because it is easy to reinvent as
@@ -13,8 +13,10 @@
  * the server holds nothing at all (admin-auth.mjs).
  *
  * The view is pull, not push, and that is a deliberate limit of the design: the
- * operator does not have to SEARCH for gaps any more, but he does have to LOOK.
+ * operator does not have to SEARCH for gaps, but he does have to LOOK.
  */
+
+import { syncLineText } from './networth-sync.js'
 
 const esc = s => String(s == null ? '' : s)
   .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
@@ -38,21 +40,15 @@ const setErr = $('setErr')
 const setSave = $('setSave')
 const setOk = $('setOk')
 
-let syncStatus = null       // last { state, until? } from the server
+let syncStatus = null       // last networth-sync-status message (state, until, mine, tradeBan, pace)
 let cooldownTimer = null    // clears the "rate-limited" line once `until` passes
 
+// The same line as the Net Worth page (networth-sync.js syncLineText): `mine:
+// false` means another user's 429 stopped us too, `tradeBan` that it was the
+// trade-API gate, `pace` that the sync follows the game; a session round
+// (`sessionRound`) is said after it. Empty for a plain ok.
 function statusLineText (st) {
-  if (!st) return ''
-  if (st.state === 'expired') return T('nw.syncExpired')
-  if (st.state === 'cooldown') {
-    // See networth.js: `mine: false` means another user's 429 stopped us too,
-    // `tradeBan` that it was not a stash 429 at all but the trade-API gate.
-    const key = st.tradeBan ? 'nw.syncTradeBan'
-      : st.mine === false ? 'nw.syncCooldownOther' : 'nw.syncCooldown'
-    return T(key, { at: st.until ? new Date(st.until).toLocaleTimeString(I18n.locale()) : T('nw.syncSoon') })
-  }
-  if (st.state === 'missing') return T('nw.syncMissing')
-  return '' // ok -> the slot stays empty and collapses
+  return syncLineText(st, T, I18n.locale())
 }
 
 function settingsStateText (st) {
@@ -76,6 +72,9 @@ function renderSettingsState () {
 }
 
 function applySyncStatus (st) {
+  // The shell's blind summary needs to know about an expired cookie; the sync
+  // line itself is written below, with this page's richer wording.
+  if (window.Shell) window.Shell.noteSyncState(st && st.state)
   syncStatus = st
   if (cooldownTimer) { clearTimeout(cooldownTimer); cooldownTimer = null }
   // Keyed: the M2 slot is shared with the data auto-update note, so only OUR
@@ -83,7 +82,8 @@ function applySyncStatus (st) {
   window.Shell.setStatus(statusLineText(st), 'sync')
   if (st && st.state === 'cooldown' && st.until) {
     const wait = Math.max(1000, st.until - Date.now() + 1000)
-    cooldownTimer = setTimeout(() => { if (syncStatus && syncStatus.state === 'cooldown') applySyncStatus({ state: 'ok' }) }, wait)
+    // The rest of the message (a pace) stays the server's word.
+    cooldownTimer = setTimeout(() => { if (syncStatus && syncStatus.state === 'cooldown') applySyncStatus({ ...syncStatus, state: 'ok', until: null }) }, wait)
   }
   renderSettingsState()
 }
@@ -358,7 +358,7 @@ function renderBuild (langBuild) {
       out.push(buildRow('adm.buildItems',
         T('adm.buildItemsValue', { translated: num(r.itemsTranslated), base: num(r.itemsTotal), kept: num(r.itemsKeptEnglish) })))
     }
-    // The gap that used to be invisible: a namespace with no name source at all.
+    // The gap nothing else shows: a namespace with no name source at all.
     // Its own line and a warning colour — every item of it is English, and no
     // other number on this page moves when it happens.
     for (const u of (r.unknownNamespaces || [])) {
@@ -986,7 +986,7 @@ function renderUpdate () {
   updSetup.hidden = u.installed
   updSetup.textContent = u.installed ? '' : T('upd.notInstalled')
 
-  // STUCK IS NOT HEALTHY, and it used to look like it. An updater whose lock a
+  // STUCK IS NOT HEALTHY, though it looks like it. An updater whose lock a
   // dead run left behind goes on writing its heartbeat and picks nothing up, so
   // "installed" alone would leave an enabled button that quietly does nothing
   // forever. Pressing it would only write a request nobody consumes, which is
@@ -1135,12 +1135,15 @@ updBtn.addEventListener('click', doUpdate)
 // and is fed from the same message; this file renders the block only.
 const relInstalled = $('relInstalled')
 const relLatest = $('relLatest')
+const relDaemon = $('relDaemon')
 const relLastCheck = $('relLastCheck')
 const relPointer = $('relPointer')
 const relCheckBtn = $('relCheckBtn')
 const relCheckState = $('relCheckState')
 
 let relData = null       // last release-status object, from the GET or the socket
+let relDaemonInfo = null  // the player's hotkey daemon as its last heartbeat said (`daemon-status`.daemon)
+let relDaemonKnown = false // a daemon-status has arrived (before that the line stays hidden)
 let relAdminReady = false // the admin area has loaded: the button may be pressed
 let relBusy = false       // a manual check is in flight
 
@@ -1175,7 +1178,16 @@ function relAdvice (st, relative) {
   return text
 }
 
+// The line under the installed and latest release: the version of this user's
+// hotkey daemon, and how to update it when the latest release is newer.
+function renderDaemonVersion () {
+  if (!relDaemon) return
+  relDaemon.textContent = relDaemonKnown ? window.Shell.daemonVersionText(relDaemonInfo, relData) : ''
+  relDaemon.hidden = !relDaemon.textContent
+}
+
 function renderRelease () {
+  renderDaemonVersion()
   if (!relData) return
   const r = relData
   relInstalled.textContent = r.installed ? T('rel.installed', { version: r.installed }) : T('rel.installedUnknown')
@@ -1297,6 +1309,54 @@ async function doReleaseCheck () {
 
 relCheckBtn.addEventListener('click', doReleaseCheck)
 
+// ---- Sources: where prices come from and how old each one is ------------------
+// For everybody, no password, like the Releases block above: nothing in it is a
+// secret (the reasons pass the server's filter), and the status line on every
+// page points HERE when a price source goes stale. Rendered from GET
+// /source-status on load and from every `source-status` message; the state of
+// each row comes from Shell.sourceView, the same derivation the status line
+// uses, so the block and the line cannot disagree. A minute timer ages it.
+const srcRows = $('srcRows')
+let srcData = null
+
+async function loadSources () {
+  try {
+    const r = await fetch('/source-status', { cache: 'no-store' })
+    if (!r.ok) return
+    srcData = { type: 'source-status', ...await r.json(), receivedAt: Date.now() }
+    renderSources()
+  } catch { /* the socket delivers the same facts on connect */ }
+}
+
+function renderSources () {
+  if (!srcData || !srcRows || !window.Shell) return
+  const age = ms => window.Shell.durationText(Math.max(0, ms))
+  srcRows.textContent = ''
+  for (const v of window.Shell.sourceView(srcData, Date.now())) {
+    const tr = document.createElement('tr')
+    const name = document.createElement('td')
+    name.textContent = T('src.name.' + v.source)
+    const last = document.createElement('td')
+    last.textContent = v.lastSuccessAt != null
+      ? when(v.lastSuccessAt) + ' · ' + T('src.ago', { age: age(v.ageMs) })
+      : T('src.lastNever')
+    const state = document.createElement('td')
+    const key = window.Shell.sourceState(v)
+    let text
+    if (key === 'paused') text = T('src.state.paused', { time: when(v.pausedUntil) })
+    else if (key === 'stale') text = T('src.state.stale', { age: age(v.ageMs) })
+    else text = T('src.state.' + key)
+    if (v.enabled && v.failing) {
+      text += ' ' + T('src.state.lastFailure', { time: when(v.lastFailureAt), reason: v.reason || T('shell.reasonUnknown') })
+    }
+    state.textContent = text
+    tr.append(name, last, state)
+    tr.classList.toggle('bad', v.stale || v.paused)
+    srcRows.appendChild(tr)
+  }
+}
+setInterval(renderSources, 60 * 1000)
+
 admOpen.addEventListener('click', () => loadAdmin(admPass.value))
 admPass.addEventListener('keydown', e => { if (e.key === 'Enter') loadAdmin(admPass.value) })
 admReload.addEventListener('click', () => loadAdmin(adminSecret()))
@@ -1392,6 +1452,9 @@ function connect () {
       case 'league-state': window.Shell.applyLeagueState(msg); break
       case 'data-status': window.Shell.applyDataStatus(msg); break
       case 'release-status': window.Shell.applyReleaseStatus(msg); relData = msg; renderRelease(); break
+      case 'daemon-status': relDaemonInfo = msg.daemon || null; relDaemonKnown = true; renderDaemonVersion(); break
+      case 'networth-session': window.Shell.applySessionStatus(msg); break // running farm session -> status line
+      case 'source-status': window.Shell.applySourceStatus(msg); srcData = { ...msg, receivedAt: Date.now() }; renderSources(); break
       case 'networth-sync-status': applySyncStatus(msg); break
       case 'need-identity':
         if (Array.isArray(msg.users) && msg.users.length) USERS = msg.users
@@ -1418,6 +1481,7 @@ I18n.onChange(() => {
   if (cfgData) renderConfig()
   if (updData) renderUpdate()
   renderRelease()
+  renderSources()
   if (relSaid) relSay(relSaid.build, relSaid.cls)
 })
 
@@ -1427,3 +1491,4 @@ if (adminSecret()) loadAdmin(adminSecret())
 
 initIdentity()
 loadRelease()
+loadSources()

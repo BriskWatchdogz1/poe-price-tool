@@ -421,8 +421,7 @@ test('English resolves the same hole without the pair table being involved at al
   // Runs AFTER stage 2, on purpose: the German pair table is empty by now and
   // there has never been an English one. If the English path went through the
   // bridge, this could not work — it goes through tradeStatIndex.resolve() with
-  // the item's own text, which is what it did before this change and what it
-  // still does.
+  // the item's own text.
   const { id } = await post('enuser', fixture.englishClipboard(11))
   const card = cardFor('enuser', id)
   assert.ok(card, 'the English item parsed')

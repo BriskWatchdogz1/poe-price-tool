@@ -193,7 +193,7 @@ test('settings page: the Releases block and the Check for updates button', { tim
     assert.equal(await evalJs(`document.querySelector('#relLatest a').getAttribute('href')`), 'https://example.test/r')
     assert.deepEqual(await evalJs(`[...document.querySelectorAll('#relPointer a')].map(a => a.getAttribute('href'))`), [
       'https://github.com/owner/repo/blob/main/docs/admin.md#update-procedure',
-      'https://github.com/owner/repo/blob/main/README.md#setting-up-the-hotkey'
+      'https://github.com/owner/repo/blob/main/README.md#updating'
     ])
     assert.ok(await evalJs(`document.getElementById('relCheckBtn').disabled`), 'the button stays shut until the admin area has loaded')
 
@@ -278,6 +278,23 @@ test('settings page: the Releases block and the Check for updates button', { tim
       ...BASE_STATUS, latest: { ...BASE_STATUS.latest, version: '0.3.0' }, type: 'release-status'
     }))} })`)
     await waitFor(`document.getElementById('relLatest').textContent.includes('0.3.0')`, 'the socket message did not redraw the block')
+
+    // ---- the player's hotkey daemon, from `daemon-status` ----------------------
+    // Hidden until a daemon-status arrives; without a heartbeat it says so; a
+    // daemon that reports a version older than the latest release is told how
+    // to update.
+    assert.equal(await evalJs(`document.getElementById('relDaemon').hidden`), true)
+    await evalJs(`window.__ws.message({ data: ${JSON.stringify(JSON.stringify({
+      type: 'daemon-status', lastItemAt: null, outcome: null, now: 1, daemon: null
+    }))} })`)
+    await waitFor(`document.getElementById('relDaemon').textContent === ${JSON.stringify(await t('rel.daemonNone'))}`,
+      'no daemon line for a daemon-status without a heartbeat')
+    assert.equal(await evalJs(`document.getElementById('relDaemon').hidden`), false)
+    await evalJs(`window.__ws.message({ data: ${JSON.stringify(JSON.stringify({
+      type: 'daemon-status', lastItemAt: null, outcome: null, now: 1, daemon: { version: '0.2.9', features: {} }
+    }))} })`)
+    await waitFor(`document.getElementById('relDaemon').textContent.includes('0.2.9')`, 'the daemon version was not shown')
+    assert.match(await text('relDaemon'), /the latest release is 0\.3\.0/)
 
     // ---- the button: shut, then open after unlocking, then the server's 429 --
     await open(BASE_STATUS, { status: 429, body: { retryAfterMs: 42000, cooldownMs: 60000 } })

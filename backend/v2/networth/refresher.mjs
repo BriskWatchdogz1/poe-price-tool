@@ -1,130 +1,84 @@
-// Continuous background net-worth refresher.
-// Instead of the manual "scan all ~115 tabs in one burst" (which slams GGG's
-// character-window endpoint into a 429), this ticks quietly: ONE step per
-// interval (default ~30s), syncing the single stalest stash tab of ONE user
-// into the per-tab store. That stays far under the rate limit, keeps the
-// snapshot fresh, and never bursts.
+// Continuous background net-worth refresher. Instead of scanning all ~115 tabs
+// in one burst (which slams GGG's character-window endpoint into a 429), it
+// ticks quietly: ONE step per interval (default ~30s), syncing the single
+// stalest stash tab of ONE user into the per-tab store. Strictly sequential,
+// one request per tick, overlap-guarded (`busy` flag), .unref()'d interval.
+// The POESESSID cookie NEVER touches a log, a broadcast, or the store (that
+// discipline lives in the injected makeClient/stash-client + valueTab).
 //
-// THE PACE IS A TOTAL, NOT A PER-USER RATE. There is one refresher, one `busy`
-// flag and one step per tick; the users are walked round-robin, so a second
-// configured user does not add a second request stream — it halves how often
-// each of them comes round. At the 30s default that is ~2,880 steps a DAY in
-// total, and with three users each tab is revisited roughly every three hours
-// rather than every hour. (The header of this file used to say "per user",
-// which answers the operator's question — does this scale with the number of
-// users? — the wrong way round. It does not.) A step is usually one request,
-// but a folder tab is 1+N inside the one step; see the OBSERVABILITY note.
+// THE PACE IS A TOTAL, NOT A PER-USER RATE: one refresher, one `busy` flag, one
+// step per tick, users walked round-robin. A second configured user adds no
+// second request stream, it halves how often each comes round: ~2,880 steps a
+// DAY in total at the 30s default, and with three users each tab is revisited
+// roughly every three hours rather than every hour. A step is usually one
+// request; a folder tab is 1+N of them, one per step (FOLDER TAB below).
 //
-// Strictly sequential, one request per tick, overlap-guarded (busy flag, like
-// one outstanding job at a time), .unref()'d interval. The POESESSID cookie
-// NEVER touches a log, a broadcast, or the store (that discipline lives in the
-// injected makeClient/stash-client + valueTab).
+// WHO GETS THE TICK (sync follows the game). `presenceOf(user)` answers
+// 'playing' | 'idle' | 'unknown' from the hotkey daemons' heartbeats
+// (daemon-presence.mjs). The tick still comes every intervalMs and still does
+// at most ONE step; what changes is who gets it, or whether it lapses:
+//   nobody idle — exactly the round-robin above. Every deployment without new
+//                 daemons is here, and so is every failure: a daemon that stops
+//                 reporting, a network that is down, a server that just started
+//                 all read 'unknown', which counts like 'playing'.
+//   some idle   — the others get the ticks; every idleEvery-th tick goes to the
+//                 idle ones, round-robin among them.
+//   all idle    — only every idleEvery-th tick does a step; none with idleRest.
+// idleEvery is at least 2 (with 1 every tick would go to the idle users and the
+// players would get none); idleRest (POE_NETWORTH_IDLE_REST=1) gives idle users
+// no tick at all. A player who cannot step (cookie expired, auth-paused) still
+// counts as playing: those ticks lapse and are NOT handed to the idle users, so
+// an expired cookie never makes anybody's sync faster. The total can therefore
+// only stay equal or fall: a playing account is read at most at the rate a
+// one-user deployment has, every request still waits for the shared stash pacer
+// (every published rule, Account rules included), and the trade-ban gate and
+// the 429 cooldown come first. A change of WHO rests is an edge: one log line
+// when the mode changes, and an onStatus for every user whose part changed,
+// also within one mode (the hold after a game ends, daemon-presence.mjs).
 //
-// Every I/O is injected so the whole thing is unit-testable with mocks — NO
-// live GGG requests in tests:
-//   store        — per-tab networth store (getTab/setTab/setMeta/pruneTabs/tabList)
-//   loadUsers    — async () => ({ <user>: { accountName, poesessid } })  (creds,
-//                  reloaded every round -> cookie rotation without a restart)
-//   makeClient   — (user, cred) => ({ client, league })  where client has
-//                  listTabs()/fetchTab(index); server binds the league.
-//   valueTab     — async ({ items, tab, cdRatio, league, accountName }) => tabData
-//                  (server binds valuator+normalize; see scan.mjs valueTab)
-//   cdRatioFor   — (user, league) => chaosPerDivine (number)
-//   onTabSynced  — (user, coverage) => void  (server broadcasts the refreshed
-//                  snapshot). `coverage` = { tabsCovered, tabsRead, tabsTotal,
-//                  complete } and says whether the store now holds an answer for
-//                  EVERY live tab, and how much of that answer is an actual
-//                  reading rather than a tab that was tried and yielded nothing
-//                  — see coverageOf() below.
-//   isPaused     — () => false | true | { until }  (yield hook; defaults to
-//                  () => false. The server wires the TRADE-API BAN GATE into
-//                  it — see the note below. `{ until }` (epoch ms) lets the
-//                  status line name the time the pause is expected to lift; a
-//                  bare `true` pauses without one.)
-//   onStatus     — (user) => void  (optional; fired whenever this user's sync
-//                  status changes: auth-pause set/lifted, cooldown entered or
-//                  lifted. The server uses it to broadcast the new status to
-//                  the UI. A 429 fires it for EVERY known user, because a 429
-//                  stops every one of them — see the note below.)
+// A 429 STOPS THE WHOLE REFRESHER, NOT JUST THE USER WHO GOT IT. Measured: the
+// rule names logged off the stash responses include `Ip 45/60s` and
+// `Ip 180/1800s`, so part of the budget is the ADDRESS's, shared by every
+// configured user (and by everything else leaving this machine). statusFor
+// reports `cooldown` for everyone, with `mine` saying whether this user is the
+// one GGG refused or is waiting on somebody else.
 //
-// A 429 STOPS THE WHOLE REFRESHER, NOT JUST THE USER WHO GOT IT. This used to
-// be caution — nothing in the code could say whether GGG counted a stash
-// request against the session or against the address. It is now a measurement:
-// the rule names logged off the stash responses include `Ip 45/60s` and
-// `Ip 180/1800s`, so part of the budget is the ADDRESS's and is shared by every
-// configured user (and by everything else leaving this machine). Stopping
-// everybody is therefore not the cautious reading of an unknown, it is the
-// correct one. The cost is bounded and visible: statusFor reports `cooldown`
-// for everyone, with `mine` saying whether this user is the one GGG refused or
-// is waiting on somebody else.
-//
-// AND A TRADE-API BAN STOPS IT AS WELL (docs/bugs.md B14). This used to be the
-// other way round, on the argument that the two paths spend separate budgets:
-// the trade gate guards anonymous requests to /api/trade/*, this one is
-// cookie-authenticated against two stash endpoints. What overturned it is not
-// code but a reported observation — a GGG ban on this deployment applied to the
-// whole ADDRESS, and it ended only by taking a new one; sitting it out would
-// have cost about twelve hours. A ban that is addressed at the address does not
-// care which cookie the next request carries, so during one the cheapest thing
-// this path can do is nothing at all.
-//
-// The trade is stated plainly, because it is a real one: coupling FREEZES the
-// net worth for the length of the ban (3.7h and 11h are the two waits this
-// repository has actually seen) and leaves a gap in the history series. That is
-// annoying and it heals itself. A ban costs every user of the deployment at
-// once and heals only with time or a new address — so the asymmetry decides it.
-//
-// The pause is never silent: statusFor reports it like the 429 cooldown, with
-// `tradeBan: true` as the discriminator (the same shape `mine` uses), because
-// the two have different causes and different remedies — one waits out GGG's
-// trade ban, the other is about this deployment's stash reads.
-//
-// NOTHING HERE COUPLES THE OTHER WAY. A stash 429 does not hold the trade
-// queue: a full rate-limit WINDOW on the stash rules says nothing about the
-// state of the trade rules, even when both are keyed to the same address (they
-// are separate rules with separate counters). A ban is the thing that spans
-// them, and this hook is how one arrives.
+// A TRADE-API BAN STOPS IT AS WELL (docs/bugs.md B14), although the trade gate
+// guards anonymous requests to /api/trade/* and this path is cookie-
+// authenticated against two stash endpoints: a GGG ban on this deployment (a
+// reported observation) applied to the whole ADDRESS and ended only by taking a
+// new one; sitting it out would have cost about twelve hours. The price is
+// real: the net worth FREEZES for the length of the ban (3.7h and 11h are the
+// two waits this repository has seen) and the history series gets a gap. That
+// heals itself; a ban costs every user at once. statusFor reports the pause
+// like the 429 cooldown, with `tradeBan: true` as the discriminator, because
+// the two have different causes and remedies. NOTHING COUPLES THE OTHER WAY: a
+// stash 429 does not hold the trade queue (separate rules with separate
+// counters, even on the same address); a ban is what spans them, and isPaused
+// is how one arrives.
 //
 // A FOLDER TAB IS MANY STEPS, NOT ONE (docs/bugs.md B5). Its items live in
-// sub-folders on a second endpoint, so reading one costs 1+N requests — 38 for
-// the map stash as measured — and it used to spend all of them inside a single
-// step. At the derived pace that is ~15 minutes at a 24s spacing and ~50 at the
-// 80s a stricter rule set derives, and for the whole of it the global `busy`
-// flag was held and the round-robin did not advance: no other tab, and no other
-// USER. On a deployment with several configured users one folder tab pushed a
-// full round from hours into days.
+// sub-folders on a second endpoint, so reading one costs 1+N requests (38 for
+// the map stash as measured): at the derived pace ~15 minutes at a 24s spacing
+// and ~50 at the 80s a stricter rule set derives. Inside one step that would
+// hold `busy` and stop the round-robin, every other tab and USER, for the whole
+// of it. So a folder tab is walked ONE SUB-TAB PER TICK, as plain data the
+// refresher puts down between ticks (networth/folder-walk.mjs): still one
+// request in flight, one global pace, `busy` for one step, and THE REQUEST
+// COUNT IS THE SAME 1+N, in the same order, at the same spacing, over 1+N
+// turns. Another user waits ONE step for it; a single user's full round gets
+// slightly longer in wall clock (each request waits for the next tick); a 429
+// mid-walk keeps the walk and resumes after the cooldown. The partial walk is
+// memory, NEVER the store: a half-read folder tab there would be read as read
+// by the snapshot, `tabList` and coverageOf() (docs/bugs.md B7). A restart
+// forgets a walk in progress and walks the tab again from the beginning.
+// OBSERVABILITY (B5): the opening `reading sub-tabs` line, a closing line
+// naming the sub-tab count, the steps and the seconds, and `folderTab` in
+// statusFor() ("12 of 37 sub-tabs") BETWEEN ticks. The `still busy: …` /
+// `finished after Ns` pair stays for a step that really does hang; it does not
+// report a folder tab.
 //
-// So a folder tab is walked ONE SUB-TAB PER TICK, as a piece of plain data the
-// refresher puts down between ticks (networth/folder-walk.mjs). Nothing about
-// the sequentiality changes: still one request in flight, still one global
-// pace, still `busy` for the length of a step — a step is simply one request
-// again, like every other. THE REQUEST COUNT IS UNCHANGED: the same 1+N, in the
-// same order, at the same spacing, spread over 1+N turns instead of one.
-//
-// What that buys, and what it costs. Another user now waits ONE step for a
-// folder tab rather than 1+N of them. A single user's full round gets slightly
-// longer in wall clock (each request waits for the next tick rather than only
-// for the derived spacing), which is the direction that sends less. And a 429
-// in the middle of a walk no longer throws the walk away — it resumes after the
-// cooldown, which is strictly fewer requests than starting over.
-//
-// The partial walk is memory, never the store. See the note at the top of
-// folder-walk.mjs: a half-read folder tab in the per-tab store would be read as
-// a tab that HAS been read, by the snapshot, by `tabList` and by coverageOf()
-// below — which is docs/bugs.md B7 with the tool writing it itself. A restart
-// therefore forgets a walk in progress and the tab is walked again from the
-// beginning: the same requests the old all-in-one step would also have had to
-// spend again.
-//
-// OBSERVABILITY (B5): what used to make a folder tab visible was the pair of
-// `still busy: …` / `finished after Ns` lines around the step it occupied.
-// There is no such step any more, so the pair is not what reports a folder tab
-// now (it stays, unchanged, for a step that really does hang). In its place,
-// and saying more than it did: the opening `reading sub-tabs` line as before, a
-// closing line naming the sub-tab count, the steps and the seconds when the
-// walk completes, and — the part the old pair could not do — `folderTab` in
-// statusFor(), which answers "12 of 37 sub-tabs" BETWEEN ticks and not only
-// while a request happens to be in flight.
+// Session rounds and the injected I/O: see createNetworthRefresher below.
 
 // The shared "read a number out of the environment" rule (slowStepMsFromEnv
 // below). The default stays here, next to the measurements that argue it; only
@@ -138,22 +92,19 @@ import {
 const DEFAULT_INTERVAL_MS = 30_000
 const DEFAULT_LIST_TTL_MS = 15 * 60 * 1000
 const DEFAULT_COOLDOWN_MS = 10 * 60 * 1000
+// Every how many ticks the users whose game is not running get one (WHO GETS
+// THE TICK above). 10 at the 30 s interval: a tab every 5 minutes for them.
+export const DEFAULT_IDLE_EVERY = 10
 
 // How long ONE step may run before the log says so. Not a timeout and not a
 // bound: nothing is aborted, nothing is released, the line is pure observation.
 // 120s sits above every healthy ORDINARY step — an ordinary tab is a single
 // request — and far below the ten-minute hole B5 describes.
 //
-// A FOLDER TAB NOW CROSSES IT ON PURPOSE, and the line is right to fire. Since
-// the stash pace is derived from GGG's published limits rather than from a 1.5s
-// constant (networth/stash-pacer.mjs), 1+N requests inside one step are spread
-// at the derived spacing: on the measured rule set the map stash (1+30) takes
-// around twelve minutes where it used to take forty-five seconds. The requests
-// are the same requests — what changed is that the burst is gone. So the two
-// lines this produces per folder-tab turn are not noise about a defect; they
-// are the only thing that tells an operator the refresher is parked in a folder
-// tab rather than dead, which is exactly what B5 asked for. Raise the setting if
-// the account has no folder tabs worth the brackets.
+// A folder tab does not cross it: it is walked one sub-tab per step (FOLDER
+// TAB above), and the stash pace is derived from GGG's published limits
+// (networth/stash-pacer.mjs), so a step is one request at the derived spacing.
+// The line therefore marks one genuinely stuck step.
 export const DEFAULT_SLOW_STEP_MS = 120_000
 
 /**
@@ -176,6 +127,62 @@ export function slowStepMsFromEnv (env = process.env, { log } = {}) {
   return readEnvNumber(SLOW_STEP_SPEC, { env, ...(log ? { log } : {}) })
 }
 
+// A SESSION ROUND. A farm or game session (sessions.mjs) takes its baseline
+// from the first full read of the stash after its start, and its final balance
+// from the first full read after its end. prioritize(user, since) asks for that
+// read: until every live tab of the user was read (or tried) once at or after
+// `since`, this user's steps take the tabs not yet read since then first, and
+// the tab-list refresh waits for the round (a refresh in the middle would clear
+// the attempts the round has counted, see coverageOf). It gives the user no
+// extra tick, shortens no interval and changes nothing about who gets a tick
+// (the idle rules, the trade-ban gate, the 429 cooldown): it orders the steps
+// the user gets anyway. pickStalest's stalest-first rule already reaches those
+// tabs first; the round adds the waiting tab list and the progress in the
+// status line (statusFor `sessionRound`). One round per user: a later moment
+// replaces an earlier one (reading every tab after the later moment also reads
+// every tab after the earlier one). It ends by itself once complete.
+//
+// Every I/O is injected so the whole thing is unit-testable with mocks — NO
+// live GGG requests in tests:
+//   store        — per-tab networth store
+//                  (getTab/setTab/setMeta/pruneTabs/tabList)
+//   loadUsers    — async () => ({ <user>: { accountName, poesessid } })
+//                  (creds, reloaded every round -> cookie rotation without a
+//                  restart)
+//   makeClient   — (user, cred) => ({ client, league })  where client has
+//                  listTabs()/fetchTab(index); server binds the league.
+//   valueTab     — async ({ items, tab, cdRatio, league, accountName })
+//                  => tabData
+//                  (server binds valuator+normalize; see scan.mjs valueTab)
+//   cdRatioFor   — (user, league) => chaosPerDivine (number)
+//   onTabSynced  — (user, coverage) => void  (server broadcasts the refreshed
+//                  snapshot). `coverage` = { tabsCovered, tabsRead, tabsTotal,
+//                  complete }: whether the store holds an answer for EVERY live
+//                  tab, and how much of it is an actual reading rather than a
+//                  tab that was tried and yielded nothing (coverageOf()).
+//   isPaused     — () => false | true | { until }  (default () => false; the
+//                  server wires the TRADE-API BAN GATE into it. `{ until }`
+//                  (epoch ms) lets the status line name when the pause is
+//                  expected to lift; a bare `true` pauses without one.)
+//   onStatus     — (user) => void  (optional; fired whenever this user's sync
+//                  status changes: auth-pause set/lifted, cooldown entered or
+//                  lifted; the server broadcasts it to the UI. A 429 fires it
+//                  for EVERY known user, because a 429 stops all of them.)
+//   presenceOf   — (user) => 'playing' | 'idle' | 'unknown' (optional; default
+//                  () => 'unknown', the plain round-robin, as for a user
+//                  without such a daemon). See WHO GETS THE TICK above.
+//   idleEvery    — every how many ticks the idle users get one (default
+//                  DEFAULT_IDLE_EVERY; a value that is not a whole number >= 2
+//                  is replaced by the default, with one log line).
+//   idleRest     — true: idle users get no tick at all.
+// Besides start/stop/tickOnce/statusFor it hands out
+//   roundSince(user, since) — read-only: how many live tabs were read or
+//                  attempted since a moment (farm sessions, sessions.mjs).
+//   prioritize(user, since) — a session round, above.
+//   etaFor(user, since) — read-only: about how long until every live tab of
+//                  the user was read once since a moment, from the steps
+//                  still to take (a folder tab 1+N, once walked), the
+//                  interval and the user's share of the ticks.
 export function createNetworthRefresher ({
   store,
   loadUsers,
@@ -189,9 +196,19 @@ export function createNetworthRefresher ({
   listTtlMs = DEFAULT_LIST_TTL_MS,
   cooldownMs = DEFAULT_COOLDOWN_MS,
   slowStepMs = DEFAULT_SLOW_STEP_MS,
+  presenceOf = () => 'unknown',
+  idleEvery = DEFAULT_IDLE_EVERY,
+  idleRest = false,
   now = () => Date.now(),
   log = console
 } = {}) {
+  // 1 would give every tick to the idle users and none to the players, 0 or a
+  // fraction would never or irregularly match. numeric-settings.mjs refuses
+  // them already; this protects callers without that table.
+  if (!(Number.isInteger(idleEvery) && idleEvery >= 2)) {
+    log.warn?.(`[networth-refresher] idleEvery ${String(idleEvery).slice(0, 20)} is not a whole number of at least 2 — using ${DEFAULT_IDLE_EVERY}`)
+    idleEvery = DEFAULT_IDLE_EVERY
+  }
   // Per-user in-memory state (survives across ticks, NOT across a restart):
   //   tabs           — last live tab list [{index,name,type,id}] from listTabs
   //   listFetchedAt  — when that list was fetched (drives the listTtl refetch)
@@ -201,7 +218,7 @@ export function createNetworthRefresher ({
   //   walk           — a folder tab being read one sub-tab per tick, or null:
   //                    { tab, walk, startedAt, steps }. In memory for the same
   //                    reason everything else here is, and deliberately not in
-  //                    the store (see the note above and folder-walk.mjs)
+  //                    the store (see the header note and folder-walk.mjs)
   const state = new Map()
   let cursor = 0            // round-robin pointer across the user list
   let busy = false          // overlap guard (only one tick's work in flight)
@@ -226,10 +243,19 @@ export function createNetworthRefresher ({
   // one per tick.
   //   { user, phase: 'list'|'tab', tabIndex, tabName, tabType, startedAt, warned }
   let current = null
+  // WHO GETS THE TICK: the tick counter the slow turns are taken from, and the
+  // distribution the last tick found ('normal' | 'some-idle' | 'all-idle') with
+  // the idle users it found, so a change is said once (log line, onStatus).
+  // lastNames: the users of the last tick, for statusFor's 'rests' / 'yields'.
+  let tickNo = 0
+  let idleCursor = 0        // round-robin pointer of the idle users' slow turns
+  let paceNow = 'normal'
+  let idleNow = []
+  let lastNames = []
 
   function getState (user) {
     let st = state.get(user)
-    if (!st) { st = { tabs: null, listFetchedAt: 0, cooldownUntil: 0, pausedPoesessid: null, attempts: new Map(), walk: null }; state.set(user, st) }
+    if (!st) { st = { tabs: null, listFetchedAt: 0, cooldownUntil: 0, pausedPoesessid: null, attempts: new Map(), walk: null, round: null, folderSizes: new Map() }; state.set(user, st) }
     return st
   }
 
@@ -242,27 +268,34 @@ export function createNetworthRefresher ({
   // failing "poison" tab from blocking the whole round-robin (mirrors the
   // cursor advances even on throw): after it's tried, every other tab
   // is now older, so the loop moves on and only comes back once it laps.
-  // THE LATER OF THE TWO, NOT "STORED WINS". The attempt stamp used to be read
-  // only for a tab with NO stored data, which left the poison tab this function
-  // says it handles wide open in the one case that matters: a tab that HAS been
-  // synced before and now fails keeps its old `syncedAt`, so it stayed the
-  // stalest tab and was picked again on the very next tick, and the one after
-  // that — one request per tick at the same tab, for ever, while every other
-  // tab's stamp moved forward and none of them ever came round again. Taking
+  // THE LATER OF THE TWO, NOT "STORED WINS", also for a tab with stored data:
+  // a tab that HAS been synced before and now fails keeps its old `syncedAt`,
+  // so with the stored stamp alone it would stay the stalest tab and be picked
+  // again every tick, for ever, while no other tab came round. Taking
   // the maximum keeps every documented property (a success stamps a NEWER
   // syncedAt, so it still supersedes the attempt) and makes the timeline the
   // comment above claims: the last time anything was DONE about this tab.
-  function pickStalest (user, st) {
+  // `before` (a session round's moment): only the tabs nothing was done about
+  // since then are candidates, and the stalest of them wins. Falls back to all
+  // tabs when there is none (the round is complete then and ends).
+  function pickStalest (user, st, before = null) {
     let best = null
     let bestAt = Infinity
     for (const t of st.tabs) {
-      const stored = store.getTab(user, t.index)
-      const syncedAt = (stored && typeof stored.syncedAt === 'number') ? stored.syncedAt : -Infinity
-      const attemptAt = st.attempts.has(t.index) ? st.attempts.get(t.index) : -Infinity
-      const at = Math.max(syncedAt, attemptAt)
+      const at = timelineOf(user, st, t)
+      if (before != null && at >= before) continue
       if (at < bestAt) { bestAt = at; best = t }
     }
-    return best
+    return best || (before != null ? pickStalest(user, st) : null)
+  }
+
+  // The last time anything was DONE about a tab: the later of its stored
+  // reading and the last attempt (see pickStalest).
+  function timelineOf (user, st, t) {
+    const stored = store.getTab(user, t.index)
+    const syncedAt = (stored && typeof stored.syncedAt === 'number') ? stored.syncedAt : -Infinity
+    const attemptAt = st.attempts.has(t.index) ? st.attempts.get(t.index) : -Infinity
+    return Math.max(syncedAt, attemptAt)
   }
 
   // How much of the account the per-tab store can currently answer for.
@@ -308,6 +341,86 @@ export function createNetworthRefresher ({
     }
   }
 
+  // How far the round-robin has come for this user SINCE a moment: a live tab
+  // counts once something was DONE about it at or after `sinceMs` — a stored
+  // reading or an attempt, the same timeline pickStalest walks and coverageOf
+  // counts on, so a tab that never yields a reading cannot hold a farm session
+  // open for ever. Reads state only; it never causes a request.
+  function roundSince (user, sinceMs) {
+    const st = state.get(user)
+    const tabs = st?.tabs || []
+    let done = 0
+    for (const t of tabs) if (timelineOf(user, st, t) >= sinceMs) done++
+    return { done, total: tabs.length, complete: tabs.length > 0 && done === tabs.length }
+  }
+
+  // A SESSION ROUND (note above createNetworthRefresher): read every live tab
+  // of `user` once at or after `sinceMs`, within the user's own ticks. Returns
+  // roundSince for the moment in force. Never causes a request by itself.
+  function prioritize (user, sinceMs) {
+    const since = Number(sinceMs)
+    if (!user || !Number.isFinite(since)) return null
+    const st = getState(user)
+    if (!st.round || since > st.round.since) st.round = { since }
+    onStatus(user)
+    return roundSince(user, st.round.since)
+  }
+
+  // The round in force for this user, or null; a complete one is ended here.
+  function activeRound (user, st) {
+    if (!st?.round) return null
+    if (roundSince(user, st.round.since).complete) { st.round = null; return null }
+    return st.round
+  }
+
+  // The share of the ticks this user gets, from the users and the presence the
+  // tick decides with (WHO GETS THE TICK). 0 when the user gets none. An
+  // auth-paused user hands every tick on to the next allowed user (tickOnce),
+  // so the others share it. A user in a 429 cooldown is not left out: the
+  // cooldown is global and at least as long as any user's (handleError), so
+  // it is the wait in etaFor, and after it every user takes ticks again.
+  function tickShare (user) {
+    const st = state.get(user)
+    if (st?.pausedPoesessid) return 0
+    const known = lastNames.length ? lastNames : [user]
+    if (!known.includes(user)) return 0
+    const names = known.filter(u => u === user || !state.get(u)?.pausedPoesessid)
+    const idle = names.filter(u => presenceOf(u) === 'idle')
+    if (!idle.length) return 1 / names.length
+    if (idle.length === names.length) return idleRest ? 0 : 1 / (idleEvery * names.length)
+    if (idle.includes(user)) return idleRest ? 0 : 1 / (idleEvery * idle.length)
+    return (idleRest ? 1 : 1 - 1 / idleEvery) / (names.length - idle.length)
+  }
+
+  // A folder tab's size is kept by its id, which a reordering of the tabs
+  // does not change (the index does).
+  const folderKey = tab => (tab.id != null ? `id:${tab.id}` : `index:${tab.index}`)
+
+  // About how long until every live tab of the user was read once since
+  // `sinceMs`: the steps still to take, over the user's share of the ticks,
+  // times the interval, after a cooldown that is running. A folder tab takes
+  // 1+N steps (its sub-tab list, then one sub-tab per step); N is known from
+  // its last walk since the server started, and before that the tab counts as
+  // one step, so the estimate is too low until then. `remaining` counts tabs,
+  // `steps` steps; `ms` is null when there is no answer (no tab list yet, or no
+  // tick for this user).
+  function etaFor (user, sinceMs) {
+    const r = roundSince(user, sinceMs)
+    if (r.complete) return { done: r.done, total: r.total, remaining: 0, steps: 0, ms: 0 }
+    const remaining = r.total - r.done
+    const st = state.get(user)
+    let steps = 0
+    for (const tab of st?.tabs || []) {
+      if (timelineOf(user, st, tab) >= sinceMs) continue
+      steps += 1 + (st.folderSizes.get(folderKey(tab)) || 0)
+    }
+    const share = tickShare(user)
+    if (!r.total || !(share > 0)) return { done: r.done, total: r.total, remaining: r.total ? remaining : null, steps: r.total ? steps : null, ms: null }
+    const t = now()
+    const wait = Math.max(0, globalCooldownUntil - t, (st?.cooldownUntil || 0) - t)
+    return { done: r.done, total: r.total, remaining, steps, ms: wait + Math.ceil(steps / share - 1e-9) * intervalMs }
+  }
+
   function handleError (user, cred, league, e) {
     const st = getState(user)
     const kind = e?.kind
@@ -348,9 +461,8 @@ export function createNetworthRefresher ({
     if (kind === 'unread') {
       // GGG ANSWERED, AND THE ANSWER CARRIED NO CONTENTS. A 200 without an
       // items array, or a folder walk whose sub-tabs did not all answer. This
-      // is a skip like the ones below and is separated from them only because
-      // it is the one that used to be invisible: it arrived as an empty array,
-      // was stored as an empty tab, and the recorder read a whole tab's stock
+      // is a skip like the ones below, separated from them because stored as
+      // an empty tab it would make the recorder read a whole tab's stock as
       // leaving the stash (docs/bugs.md B2). Nothing is written, the tab keeps
       // its last real contents, and because no tab was written there is no
       // onTabSynced and therefore no history point out of this step either.
@@ -383,7 +495,10 @@ export function createNetworthRefresher ({
     // stamp is refreshed on every step below.)
     const inWalk = st.walk != null
     const listAge = now() - (st.listFetchedAt || 0)
-    const needList = !inWalk && (!st.tabs || st.tabs.length === 0 || listAge >= listTtlMs)
+    // A session round lets an aged list wait as well (A SESSION ROUND, above
+    // createNetworthRefresher).
+    const round = activeRound(user, st)
+    const needList = !inWalk && (!st.tabs || st.tabs.length === 0 || (listAge >= listTtlMs && !round))
 
     // From here on the refresher can say what it is doing. The tab identity is
     // filled in below, once the stalest tab is picked; until then the phase
@@ -405,8 +520,8 @@ export function createNetworthRefresher ({
         const tabs = await client.listTabs()
         // type + id have to come along: folder tabs (Unique/Maps) are readable
         // only by their id on the newer endpoint, and the type is what decides
-        // which route to take in the first place. This used to be boiled down
-        // to {index,name} — which is why those two tabs kept arriving empty.
+        // which route to take in the first place. Trimmed to {index,name},
+        // those two tabs arrive empty.
         st.tabs = (tabs || []).map(t => ({ index: t.index, name: t.name, type: t.type ?? null, id: t.id ?? null }))
         st.listFetchedAt = now()
         // A new list starts a new round: what was attempted against the old one
@@ -422,7 +537,7 @@ export function createNetworthRefresher ({
       }
 
       // A walk in progress is the target; otherwise the round-robin picks one.
-      const target = inWalk ? st.walk.tab : pickStalest(user, st)
+      const target = inWalk ? st.walk.tab : pickStalest(user, st, round ? round.since : null)
       if (!target) return
       current.tabIndex = target.index
       current.tabName = target.name
@@ -451,13 +566,13 @@ export function createNetworthRefresher ({
       // A WALK THAT FAILED IS DROPPED, and its partial items are not written:
       // a half-read folder tab must never reach the store, as "empty" or as
       // anything else (docs/bugs.md B7). The tab is walked again from the
-      // beginning on a later turn — the same requests the old all-in-one step
-      // would have had to spend again after the same failure, not more.
+      // beginning on a later turn — the same requests an all-in-one step would
+      // spend again after the same failure, not more.
       //
-      // "FAILED" NOW INCLUDES A WALK THAT FINISHED WITHOUT ANSWERS. A sub-tab
-      // can reply 200 with a body that carries no items array; such a walk used
-      // to finish normally and write its subset as the whole tab
-      // (docs/bugs.md B2). finishFolderWalk throws `kind:'unread'` for it, so it
+      // "FAILED" INCLUDES A WALK THAT FINISHED WITHOUT ANSWERS. A sub-tab can
+      // reply 200 with a body that carries no items array; finishing such a
+      // walk normally would write its subset as the whole tab (docs/bugs.md
+      // B2). finishFolderWalk throws `kind:'unread'` for it, so it
       // lands here and is dropped exactly like a walk whose request threw.
       //
       // A 429 is the exception and keeps the walk. The cooldown is exactly the
@@ -473,6 +588,9 @@ export function createNetworthRefresher ({
         log.warn?.(`[networth-refresher] ${describeStep(current)} finished after ${Math.round((now() - current.startedAt) / 1000)}s`)
       }
       current = null
+      // A session round moves with every step of its user, and ends with one:
+      // the status line says how far it has come (statusFor `sessionRound`).
+      if (round) { activeRound(user, st); onStatus(user) }
     }
   }
 
@@ -496,6 +614,8 @@ export function createNetworthRefresher ({
     // while the step is still in flight, so a status read during it is right.
     current.child = folderWalkRead(entry.walk)
     current.childTotal = folderWalkTotal(entry.walk)
+    // Its size, for the next estimate of a session round (etaFor).
+    if (folderWalkTotal(entry.walk) != null) st.folderSizes.set(folderKey(tab), folderWalkTotal(entry.walk))
     if (!folderWalkFinished(entry.walk)) return   // one request spent; the rest on following turns
 
     // Complete. `finishFolderWalk` owns the B7 yield line, so a walk driven
@@ -503,10 +623,9 @@ export function createNetworthRefresher ({
     const items = finishFolderWalk(entry.walk, log)
     const heldSec = Math.round((now() - entry.startedAt) / 1000)
     st.walk = null
-    // The closing bracket, and the counterpart to the `still busy` pair a folder
-    // tab used to produce (docs/bugs.md B5). Unconditional and once per
-    // folder-tab TURN — two lines per full round on an account with a unique
-    // and a map stash, which is what the pair it replaces cost as well.
+    // The closing bracket of a folder tab (docs/bugs.md B5). Unconditional and
+    // once per folder-tab TURN — two lines per full round on an account with a
+    // unique and a map stash.
     log.log?.(`[networth-refresher] folder tab "${tab.name}" (index ${tab.index}) for ${user}: ` +
       `${folderWalkTotal(entry.walk)} sub-tabs over ${entry.steps} steps in ${heldSec}s` +
       (entry.walk.skipped ? ` (${entry.walk.skipped} of them not read — see the line above)` : '') + ' — ' +
@@ -571,12 +690,47 @@ export function createNetworthRefresher ({
         }
       }
 
+      // WHO GETS THE TICK (header). Decides whose step this is, or that there
+      // is none; never a second one. Without an 'idle' answer `allowed` stays
+      // null and the loop below is the round-robin it always was.
+      tickNo++
+      lastNames = names
+      const idle = names.filter(u => presenceOf(u) === 'idle') // names are sorted, so idle is too
+      const slowTurn = !idleRest && tickNo % idleEvery === 0
+      const pace = !idle.length ? 'normal' : idle.length === names.length ? 'all-idle' : 'some-idle'
+      // The edge is the SET of idle users, not only the mode: a hold after a game
+      // ends (no presence edge of its own) changes the set within one mode.
+      if (pace !== paceNow || idle.join('\n') !== idleNow.join('\n')) {
+        const modeChanged = pace !== paceNow
+        if (modeChanged) {
+          log.log?.(`[networth-refresher] pace ${paceNow} -> ${pace}` + (pace === 'some-idle'
+            ? ': users whose game is not running yield their turns (one step per tick, as before)'
+            : pace === 'all-idle'
+              ? (idleRest ? ': no game running anywhere, syncing rests' : `: no game running anywhere, one step every ${idleEvery} ticks`)
+              : ''))
+        }
+        const before = new Set(idleNow)
+        paceNow = pace
+        idleNow = idle
+        for (const u of names) if (modeChanged || before.has(u) !== idle.includes(u)) onStatus(u)
+      }
+      let allowed = null                                          // null: today's behaviour
+      if (pace === 'some-idle') allowed = new Set(slowTurn ? idle : names.filter(u => !idle.includes(u)))
+      else if (pace === 'all-idle') allowed = slowTurn ? null : new Set()
+      if (allowed && !allowed.size) return                        // a resting tick
+
+      // A slow turn of the idle users walks its own pointer, so the players'
+      // round-robin goes on where it was and is not reset by it.
+      const idleTurn = pace === 'some-idle' && slowTurn
+      const from = idleTurn ? idleCursor : cursor
       for (let i = 0; i < names.length; i++) {
-        const u = names[(cursor + i) % names.length]
+        const u = names[(from + i) % names.length]
+        if (allowed && !allowed.has(u)) continue                  // not this user's tick
         const st = getState(u)
         if (st.pausedPoesessid) continue          // auth-paused
         if (now() < (st.cooldownUntil || 0)) continue // rate-limit cooldown
-        cursor = (cursor + i + 1) % names.length
+        if (idleTurn) idleCursor = (from + i + 1) % names.length
+        else cursor = (cursor + i + 1) % names.length
         await step(u, users[u])
         return
       }
@@ -660,20 +814,27 @@ export function createNetworthRefresher ({
         }
       }
     }
-    // B5: 'ok' used to mean both "syncing along nicely" and "one step has been
-    // stuck for ten minutes". These two fields are the difference. Both are
+    // B5: these two fields tell "syncing along nicely" from "one step has been
+    // stuck for ten minutes", which `state: 'ok'` alone cannot. Both are
     // OPTIONAL — omitted when there is nothing to say — so a fresh, idle
     // refresher still answers plainly `{ state: 'ok' }`.
     const lastTab = lastTabWritten(user)
     if (lastTab) out.lastTab = lastTab
     const step = currentStepFor(user)
     if (step) out.current = step
-    // A folder tab being walked one sub-tab per tick. This is the field that
-    // replaces what the `still busy` pair used to say, and it says it better:
-    // a walk is not a step any more, so between two ticks `current` is null and
-    // nothing would otherwise report that a folder tab is half-read. Always
+    // A folder tab being walked one sub-tab per tick. A walk is not a step, so
+    // between two ticks `current` is null and nothing else reports that a
+    // folder tab is half-read. Always
     // this user's own walk — `state.get(user)` is their own state — so no tab
     // name crosses a room.
+    // A session round in progress (prioritize): how many of the user's live
+    // tabs were read since the session's start or end.
+    // Not before the tab list is known: "0 of 0" says nothing.
+    const round = activeRound(user, st)
+    if (round) {
+      const r = roundSince(user, round.since)
+      if (r.total > 0) out.sessionRound = { done: r.done, total: r.total, since: round.since }
+    }
     const walking = st?.walk
     if (walking) {
       out.folderTab = {
@@ -684,6 +845,15 @@ export function createNetworthRefresher ({
       }
       const total = folderWalkTotal(walking.walk)
       if (total != null) out.folderTab.total = total
+    }
+    // WHO GETS THE TICK, for a user whose game is not running. From the
+    // presence answers NOW, not from the last tick: a status sent right after
+    // a presence edge (or during a cooldown, when no tick chooses) is right.
+    // everyMs is the spacing of the idle GROUP, so the page says "about".
+    if (presenceOf(user) === 'idle') {
+      const names = lastNames.length ? lastNames : [user]
+      const allIdle = names.every(u => presenceOf(u) === 'idle')
+      out.pace = { mode: allIdle ? 'rests' : 'yields', everyMs: idleRest ? 0 : idleEvery * intervalMs }
     }
     return out
   }
@@ -721,5 +891,5 @@ export function createNetworthRefresher ({
     return out
   }
 
-  return { start, stop, tickOnce, statusFor }
+  return { start, stop, tickOnce, statusFor, roundSince, prioritize, etaFor, pace: () => paceNow }
 }

@@ -20,7 +20,7 @@ import vm from 'node:vm'
 
 const here = p => fileURLToPath(new URL(p, import.meta.url))
 
-const JS_FILES = ['app.js', 'networth.js', 'history.js', 'settings.js', 'shell.js', 'tabs.js', 'networth-sync.js', 'highlight.js', 'history-chart.js']
+const JS_FILES = ['app.js', 'networth.js', 'history.js', 'settings.js', 'shell.js', 'tabs.js', 'networth-sync.js', 'highlight.js', 'history-chart.js', 'whispers.js']
 const HTML_FILES = ['index.html', 'networth.html', 'history.html', 'settings.html']
 
 // ---------------------------------------------------------------------------

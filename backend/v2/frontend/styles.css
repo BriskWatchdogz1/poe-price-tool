@@ -41,6 +41,8 @@ body{background:var(--bg); color:var(--text); font-family:var(--sans); font-size
 .cd .foot{display:flex; align-items:center; justify-content:space-between; margin-top:12px;
   font-size:12px; color:var(--faint);}
 .cd .foot .up{color:var(--good); font-family:var(--mono);}
+/* A C:D value from poe.ninja that is older than its threshold (B29) must not stay green. */
+.cd .foot .stale{color:var(--warn); font-family:var(--mono);}
 .spark{height:34px; margin-top:10px; display:block; width:100%;}
 
 .ref{margin-top:2px;}
@@ -108,6 +110,25 @@ body{background:var(--bg); color:var(--text); font-family:var(--sans); font-size
   font-size:13px; color:#0b0e11; background:var(--warn);}
 .ratebanner .tx b{font-weight:600;}
 .ratebanner .tx span{color:var(--muted);}
+
+/* Buyer whispers of this session (whispers.js): a collapsed block above the
+   cards. below = you sell under the market (red), above = over it (green). */
+.whispers{margin:0 0 16px; padding:9px 14px; border-radius:11px; border:1px solid var(--border-soft);
+  background:var(--panel); font-size:14px;}
+.whispers summary{cursor:pointer; color:var(--muted);}
+.whispers summary .badge{margin-left:6px;}
+.whispers .wnote{margin:8px 0; font-size:12px; color:var(--faint);}
+.whispers .wlist{list-style:none; margin:0; padding:0;}
+.whispers .wrow{display:flex; flex-wrap:wrap; gap:4px 12px; padding:6px 0; border-top:1px solid var(--border-soft);}
+.whispers .wtime, .whispers .wwho{color:var(--muted); font-family:var(--mono); font-size:12px;}
+.whispers .witem{color:var(--text);}
+.whispers .wprice{color:var(--muted);}
+.whispers .wwhere{color:var(--faint);}
+.whispers .wverdict{font-weight:600;}
+.whispers .wv-below{color:var(--crit);}
+.whispers .wv-above{color:var(--good);}
+.whispers .wv-fair{color:var(--text);}
+.whispers .wv-nc, .whispers .wv-pending{color:var(--faint); font-weight:400;}
 
 .grid{display:grid; grid-template-columns:repeat(auto-fill,minmax(440px,1fr)); gap:12px; align-items:start;}
 .card{position:relative; background:var(--panel); border:1px solid var(--border-soft); border-radius:12px;
@@ -330,6 +351,8 @@ body{background:var(--bg); color:var(--text); font-family:var(--sans); font-size
 .x:hover{background:rgba(217,112,102,.14); border-color:#5a2f2c; color:#e69a93;}
 
 .empty{display:none; grid-column:1 / -1; text-align:center; color:var(--faint); padding:60px 20px;}
+.empty .emptyhint{display:block; margin-top:8px; font-size:12px; color:var(--muted);}
+.empty .emptyhint:empty{display:none;}
 
 /* ---------- League selector (F2) ---------- */
 .leaguebar{display:flex; align-items:center; gap:8px;}
@@ -402,6 +425,12 @@ body{background:var(--bg); color:var(--text); font-family:var(--sans); font-size
    each in a fixed order, separated by a hairline, no hierarchy between them. */
 .statusline .statusmsg{display:block;}
 .statusline .statusmsg + .statusmsg{margin-top:7px; padding-top:7px; border-top:1px solid rgba(216,162,74,.22);}
+/* The price-source summary: prices are not current, or several parts are out at once. */
+.statusline .statusmsg.blind{color:var(--crit); font-weight:600;}
+/* Settings page: the Sources block. */
+.srctable{width:100%; border-collapse:collapse; font-size:13px;}
+.srctable th,.srctable td{text-align:left; padding:4px 8px; border-bottom:1px solid var(--border-soft);}
+.srctable tr.bad td{color:var(--warn);}
 
 /* ---------- Identity (multi-user routing, no login) ---------- */
 /* "Who am I" chip in the logo. Subtle, right-aligned. */

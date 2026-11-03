@@ -84,7 +84,7 @@ test('a stuck updater is reported as stuck, not as healthy', async t => {
   const dir = await tmpDir(t)
   const hu = createHostUpdate({ dir })
 
-  // The state that used to be invisible: the script is running and writing its
+  // The state that looks healthy: the script is running and writing its
   // heartbeat, and it exits at a lock a dead run left behind. Fresh heartbeat,
   // and not one request will ever be picked up.
   await writeFile(hu.heartbeatPath, 'at=2026-01-01T00:00:00Z\nstuck-since=2026-01-01T03:00:00Z\n')

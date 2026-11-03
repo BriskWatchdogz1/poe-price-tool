@@ -24,38 +24,102 @@
 // blaming the wrong interval. Being wrong about which minute an item arrived in
 // is worse than having no breakdown at all.
 //
-// ROBUSTNESS, same discipline as the rest of /config: missing/empty/corrupt
-// file -> start empty, never throw. Writes are atomic (tmp + rename), so a
-// reader never sees a half file. A read-only /config disables the writing side
-// silently (`writable = false`) instead of erroring once a minute.
+// LOADING follows every other /config store (store-file.mjs, docs/bugs.md B27
+// and B31). A missing file is the normal first start and stays silent. A file
+// that is not JSON, not an object, or has no format number `v` or no `u` map
+// is moved to `<name>.broken-<timestamp>` with ONE warning, and the sidecar
+// starts empty. A file with a newer `v` (written by a newer release, met after
+// a rollback), one that is there but cannot be read, and a broken one that
+// cannot be moved are left as they are: the sidecar then runs in memory only
+// and never writes over them, whatever writable flag the caller hands down.
+// A single malformed user entry or row is dropped on its own. The load never
+// throws. Writes are atomic (tmp + rename), so a reader never sees a half
+// file. A read-only /config disables the writing side (`writable = false`)
+// instead of erroring once a minute.
 import { readFile, writeFile, rename, unlink } from 'node:fs/promises'
+import { jsonErrorSummary } from '../json-error.mjs'
+import { moveAside } from '../store-file.mjs'
 
 const FORMAT = 1
 let tmpCounter = 0
 
-export function createHistoryItems (filePath) {
+// What starting without the file costs; ends every warning about it.
+const EMPTY_MEANS = 'starting without a breakdown: the next point has no item movers and skips the price guard'
+
+/**
+ * createHistoryItems(filePath, { log, now, readFileImpl, renameImpl, writeFileImpl })
+ *
+ * readFileImpl, renameImpl and writeFileImpl are test seams only: how the file
+ * is read (a permission error without chmod or root), how a broken one is
+ * moved aside, and how save() writes its tmp file (a full disk without one).
+ */
+export function createHistoryItems (filePath, {
+  log = console,
+  now = Date.now,
+  readFileImpl = readFile,
+  renameImpl = rename,
+  writeFileImpl = writeFile
+} = {}) {
   // user -> { at:<ms>, items:Map(name -> [qty, chaosTotal]) }
   let entries = new Map()
+  // What the caller wants (history.mjs hands its own flag down before every
+  // save), and what the load decided: a file this process must not write over.
+  let wanted = true
+  let keepOff = false
+  // Error codes of failed writes already logged (one line per code).
+  const writeWarned = new Set()
 
   const side = {
-    writable: true,
+    get writable () { return wanted && !keepOff },
+    set writable (v) { wanted = !!v },
     get path () { return filePath },
 
-    // Reads the file into memory. Anything unparsable or structurally wrong is
-    // treated as "no sidecar yet" — this is a convenience cache, not a backup.
+    // Reads the file into memory. Losing it is not free: the next point then
+    // has no item movers and skips the price guard (both compare against this
+    // breakdown), and the guard's memory loses the prices of the names in it
+    // (guard-state.mjs leaves those to this file), which is why docs/admin.md
+    // backs it up with the series.
     async load () {
       entries = new Map()
       let raw
       try {
-        raw = await readFile(filePath, 'utf8')
-      } catch {
-        return entries // ENOENT or unreadable -> start fresh
+        raw = await readFileImpl(filePath, 'utf8')
+      } catch (e) {
+        // Any error but ENOENT means a file is there that this process never
+        // saw: the next point's breakdown must not replace it without a word.
+        if (e?.code !== 'ENOENT') {
+          keepOff = true
+          log.warn?.(`[networth-history-items] could not read ${filePath} (${e?.code || e?.message}) — ${EMPTY_MEANS}, and not writing over it; fix or remove it and restart`)
+        }
+        return entries
       }
-      let doc
-      try { doc = JSON.parse(raw) } catch { return entries }
-      const users = doc && typeof doc === 'object' ? doc.u : null
-      if (!users || typeof users !== 'object') return entries
-      for (const [user, rec] of Object.entries(users)) {
+      let doc = null
+      let reason = null
+      try {
+        doc = JSON.parse(raw)
+        if (!doc || typeof doc !== 'object' || Array.isArray(doc)) throw new Error('not a JSON object')
+      } catch (e) {
+        reason = jsonErrorSummary(e)
+      }
+      if (!reason && !Number.isInteger(doc.v)) reason = 'no usable format number v'
+      if (!reason && doc.v > FORMAT) {
+        keepOff = true
+        log.warn?.(`[networth-history-items] ${filePath} has format ${doc.v}, newer than the ${FORMAT} this version reads (written by a newer release?) — ${EMPTY_MEANS}, running in memory only and leaving the file untouched; update again to use it, or move it away and restart to start over`)
+        return entries
+      }
+      if (!reason && doc.v < FORMAT) reason = `format ${doc.v} is older than ${FORMAT}`
+      if (!reason && (!doc.u || typeof doc.u !== 'object' || Array.isArray(doc.u))) reason = 'u is missing or not an object'
+      if (reason) {
+        try {
+          const to = await moveAside(filePath, { label: 'broken', now, renameImpl })
+          log.warn?.(`[networth-history-items] ${filePath} is not usable (${reason}) — moved to ${to}; ${EMPTY_MEANS}`)
+        } catch (e) {
+          keepOff = true
+          log.warn?.(`[networth-history-items] ${filePath} is not usable (${reason}) and could not be moved aside (${e?.code || e?.message}) — ${EMPTY_MEANS}, running in memory only and leaving the file untouched; fix or remove it and restart`)
+        }
+        return entries
+      }
+      for (const [user, rec] of Object.entries(doc.u)) {
         if (!user || !rec || typeof rec !== 'object') continue
         if (typeof rec.at !== 'number' || !Number.isFinite(rec.at)) continue
         if (!Array.isArray(rec.i)) continue
@@ -84,6 +148,11 @@ export function createHistoryItems (filePath) {
     // Atomic full rewrite (tmp + rename), same discipline as store.mjs and
     // history.rewrite(). Returns false when nothing could be written — the
     // caller keeps running either way, it just loses the restart safety net.
+    // The answer matters there: only a true lets the guard memory leave the
+    // names of this breakdown to the file (history.mjs, persistGuard;
+    // docs/bugs.md B34). A failed write is logged once per error code, like a
+    // failed write of the guard file: it repeats at every point while the
+    // cause lasts, and one line says all there is to say.
     async save () {
       if (!side.writable) return false
       const u = {}
@@ -92,13 +161,18 @@ export function createHistoryItems (filePath) {
       }
       const tmpPath = `${filePath}.${process.pid}.${++tmpCounter}.tmp`
       try {
-        await writeFile(tmpPath, JSON.stringify({ v: FORMAT, u }), 'utf8')
+        await writeFileImpl(tmpPath, JSON.stringify({ v: FORMAT, u }), 'utf8')
         await rename(tmpPath, filePath)
         return true
-      } catch {
+      } catch (e) {
         // Disk hiccup / read-only volume -> drop the durable copy, never take
-        // the refresher down over a convenience cache.
+        // the refresher down over a sidecar whose loss costs one delta.
         await unlink(tmpPath).catch(() => {})
+        const code = e?.code || e?.message || String(e)
+        if (!writeWarned.has(code)) {
+          writeWarned.add(code)
+          log.warn?.(`[networth-history-items] could not write ${filePath} (${code}) — the file keeps its previous content; until a write succeeds, a restart finds no breakdown for a newer point (the next point then has no item movers and skips the price guard), and the brake's memory keeps every price itself`)
+        }
         return false
       }
     }

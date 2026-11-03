@@ -1,63 +1,46 @@
 // backend/v2/networth/folder-walk.mjs
 // Walking ONE folder tab (Unique/Map stash), one request at a time, as a piece
-// of plain data that can be put down between requests and picked back up.
+// of plain data that can be put down between requests and picked back up. It
+// sends nothing itself, holds no client, keeps no clock and decides nothing
+// about when the next request may go out: it is handed an `api` with exactly
+// two methods and calls one of them once per step.
 //
-// WHY THIS IS NOT A LOOP INSIDE THE CLIENT ANY MORE. A folder tab's items live
-// in sub-folders on the newer endpoint, so reading one costs 1+N requests: 1+18
-// for the unique stash, 1+30 for the map stash, and 38 in total for the map
-// stash as it is measured on the production account. That was ONE step of the
-// refresher — one iteration of its `busy`-guarded, strictly sequential tick —
-// and since the pace between two stash requests is derived from GGG's published
-// limits rather than from a 1.5s constant, those 38 requests are 38 spacings
-// long: ~15 minutes at 24s, ~50 minutes at the 80s a stricter rule set derives.
+// WHY A STATE AND NOT A LOOP. A folder tab's items live in sub-folders on the
+// newer endpoint, so reading one costs 1+N requests: 1+18 for the unique stash,
+// 1+30 for the map stash, 38 in total for the map stash as measured on the
+// production account. At the pace derived from GGG's published limits (not a
+// 1.5s constant) that is 38 spacings: ~15 minutes at 24s, ~50 at the 80s a
+// stricter rule set derives. Inside one refresher step that would hold the
+// global `busy` flag, and the round-robin only advances once a step returns:
+// no other tab and no other USER, a full round pushed from hours into days. So
+// the refresher holds the walk between ticks and spends ONE request per tick on
+// it. THE REQUESTS ARE THE SAME — 1+N, in the same order, at the same pace.
 //
-// For the whole of that time NOTHING ELSE HAPPENED. Not another tab, and — this
-// is the part that made it a complaint rather than a curiosity — not another
-// USER: the `busy` flag is global and the round-robin only advances once a step
-// returns, so on a deployment with several configured users one folder tab
-// pushed a full round from hours into days.
-//
-// So the walk is now a state, not a stack frame. The refresher holds it between
-// ticks and spends ONE request per tick on it, which is what every other step
-// costs. THE REQUESTS ARE THE SAME REQUESTS — 1+N, in the same order, at the
-// same derived pace — they are simply no longer all inside one turn.
-//
-// WHAT THIS MODULE DOES NOT DO: send anything itself, hold a client, keep a
-// clock, or decide when the next request may go out. It is handed an `api` with
-// exactly two methods and calls one of them once per step.
-//
-// THE STATE IS DELIBERATELY IN MEMORY AND NOT IN THE STORE. networth/store.mjs
-// keys a user's tabs by index and persists on every `setTab`, and everything
-// that reads it — the snapshot, `tabList`, the refresher's own `coverageOf` —
-// treats an entry as a tab that has been READ. A half-walked folder tab written
-// there would be exactly the "the Maps tab holds 0 items" of docs/bugs.md B7,
-// with the difference that this time the tool would have written it itself. So
-// the partial walk lives next to `st.tabs` and `st.attempts` in the refresher's
-// per-user memory, with the same property those have: a restart forgets it and
-// the tab is walked again from the beginning — the same 1+N requests the old
-// all-in-one step would also have had to spend again. Nothing partial ever
-// reaches the store; the tab is written once, complete, exactly as before.
+// THE STATE IS IN MEMORY, NEVER IN THE STORE. networth/store.mjs keys a user's
+// tabs by index and persists on every `setTab`, and the snapshot, `tabList` and
+// the refresher's `coverageOf` treat an entry as a tab that has been READ. A
+// half-walked folder tab there would be the "the Maps tab holds 0 items" of
+// docs/bugs.md B7, written by the tool itself. The partial walk lives next to
+// `st.tabs` and `st.attempts` in the refresher's per-user memory: a restart
+// forgets it and the tab is walked again from the beginning (the same 1+N).
+// Nothing partial reaches the store; the tab is written once, complete.
 //
 // ONE THING IS NOT FETCHED, AND IT IS NOT A HOLE. When GGG's own
 // `metadata.map.section` says a map-stash page is `tier<N>`, the walk steps over
 // it without a request: normal maps are never priced, and those pages are most
-// of the 1+N (networth/map-sections.mjs, and docs/bugs.md B19 for the version of
-// this that was built on names and cost a whole tab). A skip is accounted as a
-// KNOWN state — the walk chose not to ask — where an unanswered sub-tab stays
-// unknown and still stops the tab from being written. It is logged on the same
-// line that says how the tab was read, every time, because a skip that nobody
-// can see is indistinguishable from stock that vanished.
+// of the 1+N (networth/map-sections.mjs; docs/bugs.md B19 for the name-based
+// version that cost a whole tab). A skip is a KNOWN state; an unanswered
+// sub-tab stays unknown and still stops the tab from being written. Skips are
+// logged on the line that says how the tab was read, every time: an invisible
+// skip looks like stock that vanished.
 //
-// AND "PARTIAL" IS NOT ONLY "A REQUEST THREW". That was the gap: a sub-tab can
-// answer HTTP 200 with a body that carries no items array at all (B7 measured
-// it and could name no other way for the map stash to come back empty without a
-// single error line), and such a walk finished normally and handed its SUBSET
-// to the store as the whole tab. The missing part then read back as stock
-// leaving the stash and, on the next turn that got a real answer, as the same
-// stock arriving — docs/bugs.md B2. So `folderWalkComplete` asks the question
-// the cursor cannot: did every listed sub-tab answer? A walk that cannot say yes
-// throws `kind:'unread'` out of `finishFolderWalk` instead of returning what it
-// has, and the tab keeps the last contents it was actually read with.
+// "PARTIAL" IS NOT ONLY "A REQUEST THREW". A sub-tab can answer HTTP 200 with
+// no items array at all (B7); a SUBSET handed to the store as the whole tab
+// reads as stock leaving the stash and, on the next real answer, arriving
+// (docs/bugs.md B2). So `folderWalkComplete` asks what the cursor cannot: did
+// every listed sub-tab answer? If not, `finishFolderWalk` throws
+// `kind:'unread'` and the tab keeps the last contents it was actually read
+// with.
 
 import { describeSkippedSections } from './map-sections.mjs'
 
@@ -133,7 +116,7 @@ export function folderWalkComplete (w) {
   // walk did not fail to learn what is in a tier page, it decided not to ask —
   // and the decision was taken on a field GGG sent, before any request went
   // out. An entry that was asked and answered with something other than an
-  // items array still fails this check, exactly as before.
+  // items array still fails this check.
   return w.withItemsArray + w.skipped >= w.childIds.length
 }
 

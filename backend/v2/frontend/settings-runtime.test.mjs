@@ -318,7 +318,7 @@ test('the admin configuration table: widgets from the type, a readable source, a
       await openAdmin()
 
       // ---- the password that guards all of this -----------------------------
-      // It is still the one printed in the repository, and it no longer guards
+      // It is still the one printed in the repository, and it does not guard
       // only a read-only diagnostic view: the restart button and the table
       // below it hang on it too. So the area says so, where the decision is
       // made rather than in a container log nobody reads.
@@ -673,7 +673,7 @@ test('the update button: disabled without an updater, and the whole round trip w
         'the block is not hidden — somebody who never sees it never sets it up')
       assert.match(await text('#updSetup'), /^No update script is set up on the host/)
       assert.match(await text('#updSetup'), /deploy\/host-update\.sh/, 'and it names what to install')
-      assert.match(await text('#updSetup'), /docs\/admin\.md/, 'and where to read about it')
+      assert.match(await text('#updSetup'), /docs\/runbooks\.md, "Install the update script"/, 'and where to read about it')
 
       // ---- the host script announces itself ---------------------------------
       await writeFile(heartbeatPath, 'at=2026-01-01T00:00:00Z\n')

@@ -52,6 +52,18 @@ test('the allow-list holds nothing secret and nothing that would orphan data', (
   for (const spec of SETTABLE) assert.ok(!/_FILE$|_DIR$|_STORE$|_PATH$|^PORT$/.test(spec.name), spec.name)
 })
 
+// The operator calibrates the thin-market bar from this text. The valuator
+// feeds it two kinds of evidence (valuator.mjs fromFaustus: the chaos of the
+// hour the price came from; fromExchangeMap / exchangeSingle: a poe.ninja
+// line's volumePrimaryValue, missing == thin), so the text has to name both —
+// it once spoke of "the hour" alone, which is true for Faustus only.
+test('the thin-market bar says which turnover it is compared with, for both sources', () => {
+  const d = SETTABLE_BY_NAME.get('POE_NETWORTH_THIN_TURNOVER_C').description
+  assert.match(d, /Faustus: the hour the price came from/)
+  assert.match(d, /poe\.ninja exchange: the line's own volume/)
+  assert.match(d, /without one counts as thin/)
+})
+
 // ---------------------------------------------------------------------------
 // The settings that are deliberately absent. Each one was argued once (see the
 // block above the validation in config-overrides.mjs and the same list in
@@ -111,9 +123,9 @@ test('the allow-list may narrow a range for the browser, never widen one', () =>
   // The narrowing there is today, kept as a worked example: the table sets no
   // upper bound on the refresher interval — an hour between ticks is still a
   // refresher, and the environment may say so — while the browser path stops
-  // there. The FLOOR of that same row is no longer an example of narrowing: it
-  // moved into the table, because 5 s typed into a compose file is the same 720
-  // stash reads an hour as 5 s typed into the form.
+  // there. The FLOOR of that same row is not a narrowing: it is in the table,
+  // because 5 s typed into a compose file is the same 720 stash reads an hour
+  // as 5 s typed into the form.
   const sync = SETTABLE_BY_NAME.get('POE_NETWORTH_SYNC_INTERVAL_MS')
   const syncTable = NUMERIC_SETTINGS_BY_NAME.get('POE_NETWORTH_SYNC_INTERVAL_MS')
   assert.equal(syncTable.max, undefined)
@@ -125,7 +137,7 @@ test('the allow-list may narrow a range for the browser, never widen one', () =>
 })
 
 // ---------------------------------------------------------------------------
-// The eight dials that decide how often somebody else's server gets asked are
+// The nine dials that decide how often somebody else's server gets asked are
 // reachable through a web form behind a password. Their ranges are pinned HERE,
 // each with the reason its number can be pointed at, so that widening one is a
 // deliberate edit to a test that says why — never a side effect of tidying a
@@ -143,7 +155,8 @@ test('every request-volume setting has a floor (and the one budget a ceiling) th
     POE_CORPSE_BUDGET_PER_HOUR: [0, 30],                // 0 = ask nothing; 30 = all the pacing can deliver
     POE_FAUSTUS_REFRESH_MS: [3_600_000, null],          // the digests are hourly
     POE_CD_REFRESH_MS: [900_000, null],                 // NINJA_MIN_MS, which the server enforces anyway
-    POE_DATA_REFRESH_MS: [3_600_000, null]              // patch-cadence sources, trade-budget catalogue call
+    POE_DATA_REFRESH_MS: [3_600_000, null],             // patch-cadence sources, trade-budget catalogue call
+    POE_NINJA_MAP_TTL_MS: [900_000, null]               // NINJA_MIN_MS: below it a rebuild re-reads cached answers
   }
   // A SWITCH IS NOT IN THIS TABLE, and that is not an omission. "Floor" is a
   // statement about a number that can be turned down until it is dangerous; a
@@ -247,7 +260,8 @@ test('the settings that change how often somebody else is asked are marked, and 
     'POE_FAUSTUS_REFRESH_MS',       // GGG's exchange CDN
     'POE_NETWORTH_COOLDOWN_MS',     // GGG's stash API, after a 429
     'POE_NETWORTH_SKIP_TIER_MAPS',  // GGG's stash API — the only switch in the group
-    'POE_NETWORTH_SYNC_INTERVAL_MS' // GGG's stash API
+    'POE_NETWORTH_SYNC_INTERVAL_MS', // GGG's stash API
+    'POE_NINJA_MAP_TTL_MS'          // poe.ninja, 14 overview requests per rebuild
   ])
   assert.equal(SETTABLE_BY_NAME.get('POE_NETWORTH_SKIP_TIER_MAPS').traffic, 'lower',
     'switching the skip ON is what sends less, so it runs the same way round as the intervals')

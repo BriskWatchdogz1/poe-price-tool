@@ -37,6 +37,8 @@
     .totals .div{font-family:var(--mono); font-size:25px; font-weight:600; color:var(--divine); letter-spacing:-.01em;}
     .totals .div u{font-size:12px; color:var(--faint); text-decoration:none; margin-left:3px; letter-spacing:.1em; text-transform:uppercase;}
     .totals .c{font-family:var(--mono); font-size:14.5px; color:var(--chaos);}
+    /* How much of the total rests on prices marked uncertain (still counted). */
+    .totals .unc{font-size:12.5px; color:var(--warn); cursor:help;}
     .tohistory{margin-left:auto; font-size:13px; color:var(--muted); text-decoration:none;
       border:1px solid var(--border); border-radius:8px; padding:5px 12px;}
     .tohistory:hover{color:var(--chaos); border-color:var(--chaos-deep);}
@@ -159,6 +161,10 @@
     .tabcell{color:var(--muted); font-size:13px;}
     /* Which feed priced the row — an identifier, so it is set apart from the
        item's own text and never competes with the numbers next to it. */
+    /* Confidence column: the reason a price is doubted, explained in the
+       tooltip; Each and Total of such a row take the same colour. */
+    .unccell .unc{color:var(--warn); font-size:12px; white-space:nowrap; cursor:help;}
+    td.uncv .val{color:var(--warn);}
     .srccell{color:var(--faint); font-size:12px; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; white-space:nowrap;}
     .val{color:var(--text);} .val.div{color:var(--divine);} .val .u{color:var(--faint); font-size:11.5px;}
     .empty{padding:34px; text-align:center; color:var(--faint);}
@@ -199,6 +205,11 @@
     .unpriced{margin:6px 22px 34px; font-size:13px; color:var(--muted);}
     .unpriced summary{cursor:pointer; color:var(--warn); font-size:12.5px; padding:4px 0;}
     .unpriced li{font-family:var(--mono); font-size:12px; padding:2px 0; list-style:none;}
+    .belowsec{margin:0 22px 34px; padding-top:14px; border-top:1px solid var(--border-soft);}
+    .belowsec h3.sect{font-size:12px; letter-spacing:.14em; text-transform:uppercase; color:var(--warn); margin:0 0 6px;}
+    .belowsec .belownote,.belowsec .belowskip{font-size:12.5px; color:var(--muted); margin:0 0 6px;}
+    .belowsec .belowwrap{padding:2px 0 8px;}
+    .belowsec thead th{cursor:default;}
     .historysec{margin:0 22px 34px; padding-top:14px; border-top:1px solid var(--border-soft);}
     .historysec h3.sect{font-size:12px; letter-spacing:.14em; text-transform:uppercase; color:var(--faint); margin:0 0 8px;}
     .historysec li{font-family:var(--mono); font-size:12.5px; color:var(--muted); padding:3px 0; list-style:none;}
@@ -211,7 +222,7 @@
       .toolbar{position:static;}
     }
     @media (max-width:600px){
-      .mhead,.statusline,.summary,.overview,.toolbar,.stripe,.wrap,.unpriced,.historysec{padding-left:14px; padding-right:14px;}
+      .mhead,.statusline,.summary,.overview,.toolbar,.stripe,.wrap,.unpriced,.historysec,.belowsec{padding-left:14px; padding-right:14px;}
       .statusline{margin-left:0; margin-right:0;}
     }
   </style>
@@ -318,7 +329,7 @@
          page now (history.html) — a sparkline next to the numbers had no axes,
          no scale, and made every recorded minute a click target. -->
     <section class="summary">
-      <div class="totals"><span class="div" id="totalDiv">—</span><span class="c" id="totalChaos">—</span></div>
+      <div class="totals"><span class="div" id="totalDiv">—</span><span class="c" id="totalChaos">—</span><span class="unc" id="totalUncertain" hidden data-i18n-title="nw.uncertainTotalTitle"></span></div>
       <a class="tohistory" href="/history.html" data-i18n="nw.toHistory">History →</a>
     </section>
 
@@ -338,6 +349,7 @@
           <button type="button" data-v="grouped" class="on" data-i18n="nw.viewGrouped">Grouped</button>
         </div>
         <div class="chips" id="kindChips"></div>
+        <button type="button" class="chip" id="uncOnly" hidden data-i18n="nw.uncOnly" data-i18n-title="nw.uncOnlyTitle" title="Show only rows whose price is marked uncertain">Uncertain only</button>
         <button type="button" class="actbtn" id="hlToggle" title="Turns the visible selection into a search string for the in-game stash search field" data-i18n-title="nw.stashHighlightTitle"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg><span data-i18n="nw.stashHighlight">Stash Highlight</span></button>
       </div>
 
@@ -359,6 +371,24 @@
         <summary id="unpricedSummary"></summary>
         <ul id="unpricedList"></ul>
       </details>
+
+      <section class="belowsec" id="belowBox" hidden>
+        <h3 class="sect" data-i18n="nw.below.heading">Listed below market</h3>
+        <p class="belownote" data-i18n="nw.below.note">Your own price notes under this tool’s market value, by the same rule as a buyer whisper’s “below market”. All premium tabs, whatever the selection above.</p>
+        <div class="wrap belowwrap"><table id="belowList">
+          <thead><tr>
+            <th data-i18n="nw.below.colItem">Item</th>
+            <th data-i18n="nw.below.colTab">Tab</th>
+            <th data-i18n="nw.below.colWhere">Position</th>
+            <th class="r" data-i18n="nw.below.colListed">Listed</th>
+            <th class="r" data-i18n="nw.below.colMarket">Market</th>
+            <th class="r" data-i18n="nw.below.colRatio">Ratio</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table></div>
+        <p class="belowskip" id="belowMore" hidden></p>
+        <p class="belowskip" id="belowSkipped" hidden></p>
+      </section>
     </div>
 
     <section class="historysec" id="historyBox" hidden>

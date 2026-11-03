@@ -9,16 +9,15 @@
 // before the next request from them. Repeated 4xx (invalid-request threshold)
 // -> abort instead of hammering away. The cookie value never appears in any message.
 //
-// A 429 IS NOT RETRIED HERE. It used to be: sleep Retry-After+1 (capped at 90s)
-// and try again, up to `maxRetries` times — which is up to SIX requests fired
-// into a throttle GGG had already declared, before the refresher's ten-minute
-// cooldown ever got a say. The client now propagates the very first 429 as
-// kind:'ratelimit' with the Retry-After it was given, and the caller
-// (networth/refresher.mjs) owns the wait. That is one request per 429 instead
-// of six, and the wait becomes a state the operator can SEE — a cooldown with
-// an end time in the status line — rather than a sleep inside a fetch. This
-// repository has two real Trade-API bans behind it; the retry loop was the last
-// place in the stash path that answered a throttle with more traffic.
+// A 429 IS NOT RETRIED HERE. Sleeping Retry-After+1 (capped at 90s) and trying
+// again up to `maxRetries` times would fire up to SIX requests into a throttle
+// GGG has already declared, before the refresher's ten-minute cooldown gets a
+// say. The client propagates the very first 429 as kind:'ratelimit' with the
+// Retry-After it was given, and the caller (networth/refresher.mjs) owns the
+// wait: one request per 429, and the wait is a state the operator can SEE — a
+// cooldown with an end time in the status line — rather than a sleep inside a
+// fetch. This repository has two real Trade-API bans behind it; nothing in the
+// stash path answers a throttle with more traffic.
 //
 // The pacing derived from the state counters (delayFor) is a different thing
 // and keeps its cap: see MAX_PACING_SLEEP_MS below.
@@ -40,8 +39,8 @@ import { noteSubTabShape } from './subtab-shape.mjs'
 import { planFolderChildren } from './map-sections.mjs'
 
 const STASH_BASE = 'https://www.pathofexile.com/character-window/get-stash-items'
-// Browser-like UA — Cloudflare blocks generic agents (precedent:
-// BROWSER_UA in server.mjs).
+// Browser-like UA — Cloudflare blocks generic agents (the same string the
+// trade searches send, BROWSER_UA in shims/ipc-host.mjs).
 const BROWSER_UA =
   'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) ' +
   'Chrome/126.0.0.0 Safari/537.36'
@@ -216,9 +215,9 @@ export function resetSessionScope () { accountScopeByPolicy.clear() }
 // caller takes the maximum of this and stash-pacer.mjs's spacing, so the two
 // answers stay separable — this one says "the window you can see is filling up",
 // the other says "this is the rate the published limits allow at all".
-// The Retry-After branch no longer describes the 429 path — a 429 is propagated
-// on the spot and never slept on here (see the header note). It still fires for
-// the rarer case of a Retry-After on a response that was not a 429.
+// The Retry-After branch is not the 429 path — a 429 is propagated on the spot
+// and never slept on here (see the header note). It fires for the rarer case
+// of a Retry-After on a response that was not a 429.
 // Anything this returns above MAX_PACING_SLEEP_MS is not slept out either: the
 // request is not sent at all and the wait goes to the caller's cooldown.
 export function delayFor (parsed, { baseMs = 1500, bucketSecOf = bucketSecFor } = {}) {
@@ -246,9 +245,8 @@ export function createStashClient ({
   // Injected only by tests, so a derived wait can be asserted instead of waited
   // out. Production sleeps for real.
   sleep = ms => new Promise(r => setTimeout(r, ms)),
-  // 5xx ONLY. A 429 is not retried at all any more (see the header note), so
-  // this no longer bounds how many requests a rate limit can cost — that number
-  // is one.
+  // 5xx ONLY. A 429 is not retried at all (see the header note), so this does
+  // not bound how many requests a rate limit can cost — that number is one.
   maxRetries = 5, onProgress = () => {},
   requestTimeoutMs = envNum('POE_STASH_TIMEOUT_MS'),
   // Only the folder-tab path routes through this (everything else still writes
@@ -283,9 +281,9 @@ export function createStashClient ({
   // How long ONE step may sit inside a header-derived pacing sleep. It is NOT a
   // shortcut past a rate limit: a pacing wait longer than this is not truncated
   // and then sent anyway (that fires a request into a window GGG's own headers
-  // call full, which is how the 90s cap used to behave). It is handed to the
-  // caller as a 'ratelimit' instead — zero requests, and the refresher's
-  // cooldown does the waiting where the status line can show it.
+  // call full). It is handed to the caller as a 'ratelimit' instead — zero
+  // requests, and the refresher's cooldown does the waiting where the status
+  // line can show it.
   //
   // Why a cap at all, rather than sleeping out whatever the headers say: the
   // sleep happens inside a step that holds the refresher's `busy` flag for ALL
@@ -358,9 +356,9 @@ export function createStashClient ({
         // budget: an Ip-only set means this request was not authenticated.
         noteSessionScope(parsed, log)
         nextDelayMs = delayFor(parsed, { baseMs: baseDelayMs })
-        // …and the reactive brake outlives this client too. A state counter at
-        // the top of a 1800s window used to be forgotten the moment the tick
-        // ended, so the next tick opened by sending into the full window.
+        // …and the reactive brake outlives this client too: a state counter at
+        // the top of a 1800s window must not be forgotten when the tick ends,
+        // or the next tick opens by sending into the full window.
         pacer.noteBrake(nextDelayMs)
         if (r.status === 429) {
           // NO retry. GGG has said stop; the only thing a retry can add is
@@ -439,7 +437,7 @@ export function createStashClient ({
       // response that decides anything. `planFolderChildren` reads GGG's own
       // `metadata.map.section` and marks the `tier<N>` pages of the MAP stash;
       // everything it does not understand it leaves alone, so a stash shaped
-      // differently from this one is read whole exactly as before
+      // differently from this one is read whole
       // (networth/map-sections.mjs). Nothing is dropped from `childIds` — the
       // skip is a set laid over the list, because the walk still has to account
       // for every sub-tab GGG listed.
@@ -505,8 +503,8 @@ export function createStashClient ({
      *
      * THIS NEVER ANSWERS "EMPTY" FOR "COULD NOT READ". An empty array means GGG
      * said the tab holds nothing; anything else — a body without an items array,
-     * a folder walk whose sub-tabs did not all answer, an unexpected status the
-     * folder path used to swallow — throws `kind: 'unread'`. The caller keeps
+     * a folder walk whose sub-tabs did not all answer, an unexpected status on
+     * the folder path — throws `kind: 'unread'`. The caller keeps
      * the tab's stored contents and tries again on a later turn.
      */
     async fetchTab (tabIndex, tab = null) {

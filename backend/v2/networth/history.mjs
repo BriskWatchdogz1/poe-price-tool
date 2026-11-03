@@ -1,50 +1,44 @@
 // Net-worth history — the time series behind the History page's trend chart.
-//
-// WHY A SEPARATE FILE (and not networth-store.json):
-// the per-tab store is rewritten IN FULL on every single setTab, i.e. every
-// ~30s. Parking 48h of points inside it would re-serialize the whole series
-// with each tab sync. This file instead is APPEND-ONLY (NDJSON, one point per
-// line) and gets rewritten only when retention actually has something to drop.
+// A separate file and not networth-store.json: the per-tab store is rewritten
+// IN FULL on every setTab (~30s), so the series would be re-serialized with
+// every tab sync. This file is APPEND-ONLY (NDJSON, one point per line) and
+// rewritten only when retention actually has something to drop.
 //
 // Line shape (/config/networth-history.ndjson):
 //   {"u":"<user>","at":<epoch ms>,"c":<total chaos>,"cd":<chaos per divine>,
 //    "d":{...item delta, see below}}
 //
-//   OLD LINES MAY CARRY MORE. Until the header sparkline was removed, every
-//   line also held `t`, a per-tab chaos breakdown — 42% of the line for a field
-//   nothing read once that chart was gone. It is no longer written; recorded
-//   lines that still have it are read normally (unknown fields are ignored, not
-//   a reason to skip a point) and age out with retention. No migration.
+//   OLDER LINES MAY CARRY `t`, a per-tab chaos breakdown (42% of the line) that
+//   nothing reads and that is not written; they are read normally (unknown
+//   fields are ignored, not a reason to skip a point) and age out with
+//   retention. No migration.
 //
-//   d is OPTIONAL — lines written before this field existed simply have none.
-//   Every read path treats a missing d as "no detail recorded", never as an
-//   error. The item breakdown the next d is diffed against outlives a restart
-//   in a sidecar file (history-items.mjs) instead of only in memory; the point
-//   LINE is unchanged by that, so older lines stay readable as they are.
+//   d is OPTIONAL: every read path treats a missing d as "no detail recorded",
+//   never as an error. The item breakdown the next d is diffed against outlives
+//   a restart in a sidecar file (history-items.mjs); the point LINE stays as it
+//   is.
 //
 //   cd is stored PER POINT on purpose: reconstructing the divine value of an
-//   old point with today's ratio would fake movement that never happened.
-//
-//   AND EVERY READER HAS TO HONOUR IT, which is where this used to fall apart:
-//   the field was served (series() as the third column) and then not used —
-//   the history page divided every chaos figure it printed by the rate of the
-//   NEWEST point, so axis, tooltips, event rows and the window net were all
-//   re-valued whenever the rate ticked. events() therefore stamps each bucket
-//   with its own `cd` as well, and the page values a point at the rate it was
-//   recorded at.
+//   old point with today's ratio would fake movement that never happened. AND
+//   EVERY READER HAS TO HONOUR IT: series() serves it as the third column,
+//   events() stamps each bucket with its own `cd`, and the page values a point
+//   at the rate it was recorded at (not every figure at the NEWEST point's
+//   rate).
 //
 // PRIVACY: only the local routing name (`u`, same key the store already uses)
 // is written. No accountName, and the POESESSID cookie never comes near this
 // module.
 //
-// ROBUSTNESS: a missing, empty, truncated or corrupt file NEVER throws — this
-// is a rebuildable convenience series, not a backup. Unparsable lines are
-// skipped individually (a half-written tail line after a hard container kill
-// costs exactly one point).
+// ROBUSTNESS: a missing, empty, truncated or corrupt file NEVER throws.
+// Unparsable lines are skipped individually (a half-written tail line after a
+// hard container kill costs exactly one point). That is no licence to treat the
+// file as disposable: past points cannot be fetched again, so the series
+// belongs in a backup (docs/runbooks.md, "Backup and restore").
 import { readFile, appendFile, writeFile, rename, unlink } from 'node:fs/promises'
 import { round1 } from '../ninja.mjs'
 import { createHistoryItems, defaultItemsPath } from './history-items.mjs'
 import { createPriceGuard, findSpikeRanges } from './price-guard.mjs'
+import { createGuardStateFile, defaultGuardStatePath } from './guard-state.mjs'
 
 export const DEFAULT_MIN_INTERVAL_MS = 60_000            // at most one point per minute per user
 // Longest shown range (14d) plus a day of slack. At one point per minute that
@@ -119,9 +113,30 @@ export function createNetworthHistory (filePath, {
   now = () => Date.now(),
   // Implausible-price brake (see price-guard.mjs). Injectable so tests can
   // drive it; `false` disables it entirely.
-  priceGuard = undefined
+  priceGuard = undefined,
+  // Its memory across restarts (guard-state.mjs): the file, derived from
+  // filePath like the items sidecar unless a test names one, and the league it
+  // belongs to (a file of another league is not restored).
+  guardStatePath = null,
+  league = null,
+  log = console,
+  // Test seam only: handed to the items sidecar (history-items.mjs), so a test
+  // can make its read, move or write fail without chmod or root.
+  itemsSeams = {}
 } = {}) {
   const guard = priceGuard === false ? null : (priceGuard || createPriceGuard({ now }))
+  // The guard's memory across restarts (guard-state.mjs). Only a guard that can
+  // export and import itself is persisted; a test double with just apply() is not.
+  const guardFile = (guard && typeof guard.exportState === 'function' && typeof guard.importState === 'function')
+    ? createGuardStateFile(guardStatePath || defaultGuardStatePath(filePath), { league, log, now })
+    : null
+  const guardWarned = new Set()
+  // user -> `at` of a sidecar entry that is still on disk although a change of
+  // stash tabs dropped it: the write that should have removed it failed
+  // (docs/bugs.md B35). Carried in the guard file, whose write follows at that
+  // call site, so the next start leaves exactly that entry out. Cleared by the
+  // next sidecar write that lands: the file then matches memory again.
+  const staleSidecar = new Map()
   // In-memory mirror of the retained lines, ascending by `at`. The file is the
   // durable copy; every read path answers from here.
   let points = []
@@ -133,7 +148,68 @@ export function createNetworthHistory (filePath, {
   // the NEWEST breakdown is kept — the diff never looks further back than one
   // point, and a per-line copy would blow the NDJSON up by ~1000x.
   const lastItems = new Map()
-  const itemsFile = createHistoryItems(itemsPath || defaultItemsPath(filePath))
+  const itemsFile = createHistoryItems(itemsPath || defaultItemsPath(filePath), { ...itemsSeams, log, now })
+
+  // Restores the guard's memory. AFTER loadLastItems on purpose: the guard file
+  // leaves out the names the adopted sidecar carries with a price, and
+  // importState puts exactly those back from it, at the point the sidecar is
+  // anchored on (see exportState in price-guard.mjs). Never fatal.
+  // Not after a change of league: the sidecar records no league, so its prices
+  // are the old league's, and the memory has to start empty as the warning
+  // says — a name new to this league is judged by the arrival bar, not held
+  // against an old-league price for a whole hold window.
+  // The file is read BEFORE loadLastItems (loadGuardDoc), because it also says
+  // which sidecar entries are stale (`stale`, see staleSidecar).
+  async function loadGuardDoc () {
+    if (!guardFile) return null
+    try { return await guardFile.load() } catch (e) {
+      log.warn?.(`[networth-guard] ${guardFile.path} could not be read (${e?.code || e?.message || e}) — starting with an empty memory and not writing over it; fix or remove it and restart`)
+      return null
+    }
+  }
+
+  async function restoreGuard (doc) {
+    if (!guardFile) return
+    const covered = new Map()
+    for (const [user, items] of lastItems) {
+      const at = itemsFile.get(user)?.at
+      if (Number.isFinite(at)) covered.set(user, { at, items })
+    }
+    const r = guard.importState(doc, { covered: guardFile.foreignLeague ? null : covered })
+    if (doc) {
+      const saved = Number.isFinite(doc.savedAt) ? new Date(doc.savedAt).toISOString() : 'unknown'
+      log.log?.(`[networth-guard] restored ${r.held} hold(s) and ${r.known} remembered price(s) from ${guardFile.path} (saved ${saved}); ${r.expired} expired, ${r.skipped} unreadable; ${r.fromSidecar} price(s) taken from the items sidecar`)
+    }
+  }
+
+  // Writes the guard's memory right after the sidecar, after a recorded point
+  // and when a change in the set of stash tabs drops a breakdown from it (see
+  // append): both describe the same moment, and `covered` is that moment's
+  // breakdown.
+  // `sidecarWritten` is whether the sidecar save of THIS moment returned true.
+  // Anything else covers nothing: a file the sidecar must leave alone
+  // (history-items.mjs), or a write that just failed. The names it would carry
+  // may then be missing from it after a restart (a failed write after a point
+  // leaves the previous sidecar, which the anchor check drops), so the guard
+  // file keeps their prices itself (docs/bugs.md B31, B34).
+  // Only when the content changed (guard-state.mjs). A write error is reported
+  // once per error code and never takes the refresher down; so is a failed
+  // sidecar write (history-items.mjs, save). The stale sidecar entries
+  // (staleSidecar) travel along as `stale`.
+  async function persistGuard (sidecarWritten) {
+    if (!guardFile || !hist.writable) return
+    const covered = sidecarWritten === true ? lastItems : null
+    const stale = staleSidecar.size ? Object.fromEntries(staleSidecar) : null
+    try {
+      await guardFile.save(() => ({ ...guard.exportState({ covered }), stale }))
+    } catch (e) {
+      const code = e?.code || e?.message || String(e)
+      if (!guardWarned.has(code)) {
+        guardWarned.add(code)
+        log.warn?.(`[networth-guard] could not write ${guardFile.path} (${code}) — the memory stays in this process only`)
+      }
+    }
+  }
 
   function lastPointOf (user) {
     for (let i = points.length - 1; i >= 0; i--) if (points[i].u === user) return points[i]
@@ -159,15 +235,31 @@ export function createNetworthHistory (filePath, {
 
   // Restores the per-user item breakdown from the sidecar — but ONLY where it
   // is anchored on the newest retained point of that user. A sidecar that does
-  // not line up (its point never made it into the NDJSON, or retention has
-  // since dropped it) would make the next delta span two intervals and blame
-  // the wrong minute; no breakdown is the better answer there.
-  async function loadLastItems () {
+  // not line up (its point never made it into the NDJSON, retention has since
+  // dropped it, or the sidecar write after the point's line did not land:
+  // stopped in between, or a failed write) would make the next delta span two
+  // intervals and blame the wrong minute; no breakdown is the better answer
+  // there.
+  // Nor an entry the guard file marks as stale (`stale`, user -> at): a change
+  // of stash tabs dropped it and the write that should have removed it from
+  // the file failed (docs/bugs.md B35). It is still anchored, so the anchor
+  // check alone would adopt it, and the first point after the restart would
+  // diff across the change of tabs. The mark is kept while the entry is still
+  // on disk; a mark whose entry is gone or newer is obsolete and dropped.
+  async function loadLastItems (stale = null) {
     lastItems.clear()
+    staleSidecar.clear()
     let stored
     try { stored = await itemsFile.load() } catch { return } // never fatal
     for (const [user, rec] of stored) {
       const anchor = lastPointOf(user)
+      const staleAt = stale && typeof stale === 'object' && !Array.isArray(stale) ? stale[user] : undefined
+      if (staleAt === rec.at) {
+        staleSidecar.set(user, rec.at)
+        itemsFile.delete(user)
+        log.log?.(`[networth-history-items] not adopting the breakdown of "${user}" from ${itemsFile.path}: a change of stash tabs dropped it before the restart and the write that should have removed it failed — the next point of "${user}" carries no delta`)
+        continue
+      }
       if (anchor && rec.at === anchor.at && rec.items.size) lastItems.set(user, rec.items)
       else itemsFile.delete(user)
     }
@@ -180,6 +272,11 @@ export function createNetworthHistory (filePath, {
 
     get points () { return points },
     get itemsPath () { return itemsFile.path },
+    get guardStatePath () { return guardFile ? guardFile.path : null },
+    // False on a read-only /config and after the load met a memory file from a
+    // newer release, or one it could not read or move aside (left alone; the
+    // memory then stays in this process).
+    get guardStateWritable () { return !!guardFile && guardFile.writable && hist.writable },
 
     async load () {
       let raw
@@ -187,8 +284,15 @@ export function createNetworthHistory (filePath, {
         raw = await readFile(filePath, 'utf8')
       } catch {
         // ENOENT or unreadable -> start fresh, never crash. No points means no
-        // anchor, so a sidecar could not be adopted anyway.
-        points = []; lastItems.clear(); return
+        // anchor, so a sidecar could not be adopted anyway; it is still read,
+        // so a broken one is moved aside and one that cannot be read is not
+        // written over (history-items.mjs). The guard's memory does not hang on
+        // the series, so it is restored all the same.
+        points = []
+        const doc = await loadGuardDoc()
+        await loadLastItems(doc?.stale)
+        await restoreGuard(doc)
+        return
       }
       const cutoff = now() - retentionMs
       const out = []
@@ -211,13 +315,26 @@ export function createNetworthHistory (filePath, {
         const dropped = pruneSpikes()
         if (dropped) await hist.rewrite().catch(() => {})
       }
-      await loadLastItems()
+      const doc = await loadGuardDoc()
+      await loadLastItems(doc?.stale)
+      await restoreGuard(doc)
     },
 
     // Last stored timestamp for a user (throttle + tests).
     lastAt (user) {
       const p = lastPointOf(user)
       return p ? p.at : null
+    },
+
+    // The newest recorded point of a user TOGETHER with the item breakdown it
+    // was recorded with — both halves of the same moment, or null. A farm
+    // session (sessions.mjs) needs exactly that pair at its start and its end;
+    // a breakdown that is not anchored on the point would blame the wrong minute.
+    latest (user) {
+      const p = lastPointOf(user)
+      const items = lastItems.get(user)
+      if (!p || !items || itemsFile.get(user)?.at !== p.at) return null
+      return { at: p.at, c: p.c, cd: Number(p.cd) > 0 ? Number(p.cd) : 0, items }
     },
 
     // Appends ONE point unless the last one for this user is younger than
@@ -237,8 +354,8 @@ export function createNetworthHistory (filePath, {
     // `unpriced` is the list of names that ARE in the stash but carry no price
     // this minute (`{name, count}` where count is PIECES). It never adds a chaos
     // to the point — it exists so the diff can tell "gone" from "still here,
-    // just not priced". A caller that omits it gets the old reading, in which
-    // the two are the same thing.
+    // just not priced". A caller that omits it gets the reading in which the
+    // two are the same thing.
     //
     // IT HAS TO BE ALL OF THEM. The snapshot's own `unpriced` is capped at 100
     // names for the page it is drawn on, and a name below that cut reads as gone
@@ -270,13 +387,26 @@ export function createNetworthHistory (filePath, {
         // when this call would not have written a point anyway, or the next one
         // a minute later would diff across the change all the same.
         lastItems.delete(user)
+        const droppedAt = itemsFile.get(user)?.at
         if (itemsFile.delete(user)) {
           // …and out of the sidecar as well, or a restart would adopt it again:
           // it is still anchored on the newest point, which is exactly the test
           // loadLastItems applies. Never fatal — the sidecar can cost a delta,
           // it can never falsify one.
           itemsFile.writable = hist.writable
-          await itemsFile.save().catch(() => {})
+          const wrote = await itemsFile.save().catch(() => false)
+          // When this write did not land, the sidecar of the point before
+          // stays on disk and still holds the breakdown just dropped, anchored
+          // on the user's newest point. The guard file written next marks that
+          // entry as stale, and the next start leaves it out (docs/bugs.md B35).
+          if (wrote === true) staleSidecar.clear()
+          else if (Number.isFinite(droppedAt)) staleSidecar.set(user, droppedAt)
+          // The names that just left the sidecar are no longer covered, so
+          // their remembered prices now belong in the guard's file. When this
+          // write did not land, the sidecar on disk is anchored for the other
+          // users unless an earlier write after a point failed, and then
+          // leaving their names to it would drop them (docs/bugs.md B34).
+          await persistGuard(wrote === true)
         }
         return false
       }
@@ -329,9 +459,17 @@ export function createNetworthHistory (filePath, {
       }
       // Sidecar AFTER the line landed, and never gated on its own success: if
       // it lags behind, the anchor check on the next load simply drops it. The
-      // sidecar can only ever cost a delta, never falsify one.
+      // sidecar can only ever cost a delta, never falsify one. The guard file
+      // is written either way, told whether the sidecar landed: a lagging one
+      // carries none of this point's names after a restart (docs/bugs.md B34).
       itemsFile.writable = hist.writable
-      await itemsFile.save()
+      let wrote = false
+      let saveError = null
+      try { wrote = await itemsFile.save() === true } catch (e) { saveError = e }
+      // A file that landed matches memory, so no entry on disk is stale any more.
+      if (wrote) staleSidecar.clear()
+      await persistGuard(wrote)
+      if (saveError) throw saveError
       appendsSinceCompact++
       // Rewrite only when retention has something to drop AND we've appended a
       // while (~hourly at one point/min) — not on every single append.
@@ -371,11 +509,8 @@ export function createNetworthHistory (filePath, {
     //
     //   { range, points: [[at, chaos, cd]], coverageMs, retentionMs, total }
     //
-    // A fourth column used to carry the per-tab breakdown of `t` for the header
-    // sparkline. That chart is gone and no reader was left, so neither the
-    // column nor the key dictionary it indexed into is served any more; points
-    // recorded with `t` simply contribute their first three values like every
-    // other point.
+    // No per-tab column and no key dictionary: points recorded with `t`
+    // contribute their first three values like every other point.
     //
     // coverageMs = how much history exists AT ALL for this user (independent of
     // the requested window), so the frontend can say "collecting data…" instead
@@ -394,14 +529,14 @@ export function createNetworthHistory (filePath, {
     // The trend panel answers "what was that jump?" for a stretch of line; this
     // answers "what came in and what went out?" for the whole window, and it
     // answers ONLY that: a row counts when its QUANTITY changed. Pure price
-    // moves are deliberately dropped — they are what made the old panel a wall
-    // of ±2c rows, and they are already in the curve's own height.
+    // moves are deliberately dropped — they would make the panel a wall of ±2c
+    // rows, and they are already in the curve's own height.
     //
     // "Losing a price" is one of those price moves and not a movement of stock,
     // which is why the breakdown the rows are derived from counts unpriced
-    // names as stock at zero (see foldItems). Before that, an item whose price
-    // flickered off and back on produced a departure and an arrival that were
-    // mirror images to the decimal, on a stash nobody had touched.
+    // names as stock at zero (see foldItems). Otherwise an item whose price
+    // flickers off and back on produces a departure and an arrival that are
+    // mirror images to the decimal, on a stash nobody has touched.
     //
     // Derived from the stored deltas, so nothing new needs recording. Each
     // stored row is [name, dq, dv, priceShare], where dv - priceShare is the
@@ -666,6 +801,10 @@ export function foldItems (items, unpriced) {
 // while the incident is still on screen, not about keeping a second series.
 // A name valued from several tabs normally shares one source; when it does not,
 // all of them are named (sorted, so the line is stable) rather than one picked.
+// A row marked uncertain names its doubt next to its feed
+// (`faustus [uncertain: thin-market]`), so the next incident says whether its
+// number was one the valuation already doubted — the next trace for
+// docs/bugs.md B1.
 export function foldSources (items) {
   const seen = new Map()
   if (!Array.isArray(items)) return new Map()
@@ -674,7 +813,7 @@ export function foldSources (items) {
     const src = it && typeof it.source === 'string' && it.source ? it.source : null
     if (!name || !src) continue
     const set = seen.get(name) || new Set()
-    set.add(src)
+    set.add(typeof it.uncertain === 'string' && it.uncertain ? `${src} [uncertain: ${it.uncertain}]` : src)
     seen.set(name, set)
   }
   return new Map([...seen].map(([name, set]) => [name, [...set].sort().join('+')]))

@@ -76,14 +76,14 @@ services:
       # - POE_GAP_LOG_MAX=200              # distinct gaps kept per kind (failed parses / unresolved mods); the least frequent are dropped over the cap
       # - POE_GAP_LOG_TEXT_MAX=400         # characters kept per recorded text
       # - POE_LANG_SKEW_WARN_RATIO=0.005   # fraction of the English set a localized one may lack before the admin view warns
-      # --- the update button (needs deploy/host-update.sh on the HOST; see docs/admin.md) ---
+      # --- the update button (needs deploy/host-update.sh on the HOST; install: docs/runbooks.md, "Install the update script") ---
       # - POE_UPDATE_DIR=/config           # where the container leaves its update request and reads the host script's
       #                                    # heartbeat + result. Must be the same directory the script has as CONFIG_DIR
       # - POE_UPDATE_HEARTBEAT_MAX_AGE_MS=1200000  # how old the host script's heartbeat may get before the admin area
       #                                    # says no updater is installed (20 min = three missed 5-minute runs + slack).
       #                                    # Raise it if you run the script on a slower schedule — or if you drive the
       #                                    # script with a systemd Type=oneshot timer, which starts no second run to
-      #                                    # refresh the heartbeat while a build is in progress (docs/admin.md)
+      #                                    # refresh the heartbeat while a build is in progress (docs/runbooks.md)
     volumes:
       # Persistent per-user config (POESESSID, stores, history).
       #
@@ -103,6 +103,6 @@ services:
       # the config directory lies in the BUILD CONTEXT, which is why
       # .dockerignore excludes it — POESESSID and the admin password live in
       # here and have no business being sent to the docker daemon. The host
-      # script checks that exclusion before it builds. See docs/admin.md,
-      # "Update button".
+      # script checks that exclusion before it builds. See docs/runbooks.md,
+      # "Install the update script".
       - ./config:/config

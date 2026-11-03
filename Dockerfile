@@ -73,8 +73,9 @@ COPY --from=build --chown=node:node /app/node_modules/pathofexile-dat        ./n
 COPY --from=build --chown=node:node /app/node_modules/pathofexile-dat-schema ./node_modules/pathofexile-dat-schema
 COPY --from=build --chown=node:node /app/node_modules/ooz-wasm              ./node_modules/ooz-wasm
 COPY --from=build --chown=node:node /app/backend/v2/server.mjs          ./backend/v2/server.mjs
-# The installed version shown in the browser comes from package.json (read by
-# version.mjs); without it the server says "unknown".
+# The installed version shown in the browser and named in the tool's own
+# User-Agent comes from package.json (read by version.mjs); without it the
+# server says "unknown".
 COPY --from=build --chown=node:node /app/package.json                     ./package.json
 COPY --from=build --chown=node:node /app/backend/v2/version.mjs           ./backend/v2/version.mjs
 # Once-a-day release check against GitHub (the module server.mjs imports).
@@ -94,14 +95,32 @@ COPY --from=build --chown=node:node /app/backend/v2/patch-version.mjs    ./backe
 # Why a background check failed, in a form the status line can act on (the class
 # of the failure plus the filter its reason passes through).
 COPY --from=build --chown=node:node /app/backend/v2/check-failure.mjs    ./backend/v2/check-failure.mjs
+# The state of each price source (source-status message) and the per-key
+# failure log behind poe.ninja's log lines: one at the start, one at recovery.
+COPY --from=build --chown=node:node /app/backend/v2/source-health.mjs    ./backend/v2/source-health.mjs
+COPY --from=build --chown=node:node /app/backend/v2/fail-log.mjs         ./backend/v2/fail-log.mjs
+# The hotkey daemon's own channel (GET /daemon/events, POST /daemon/heartbeat):
+# the feed of its cards, what the daemons report about themselves, the caller
+# rule of those routes and their bounded request bodies.
+COPY --from=build --chown=node:node /app/backend/v2/daemon-feed.mjs      ./backend/v2/daemon-feed.mjs
+COPY --from=build --chown=node:node /app/backend/v2/daemon-presence.mjs  ./backend/v2/daemon-presence.mjs
+COPY --from=build --chown=node:node /app/backend/v2/daemon-user.mjs      ./backend/v2/daemon-user.mjs
+COPY --from=build --chown=node:node /app/backend/v2/http-body.mjs        ./backend/v2/http-body.mjs
+# Buyer whispers (POST /daemon/whisper): the templates and the verdict.
+COPY --from=build --chown=node:node /app/backend/v2/whisper.mjs          ./backend/v2/whisper.mjs
+COPY --from=build --chown=node:node /app/backend/v2/whisper-price.mjs    ./backend/v2/whisper-price.mjs
 # The numeric half of the configuration: the one reader for "a number out of the
 # environment" plus the table of defaults, ranges and which settings accept a
 # literal 0. server.mjs reads every number in its config block through them.
 COPY --from=build --chown=node:node /app/backend/v2/env-number.mjs       ./backend/v2/env-number.mjs
 COPY --from=build --chown=node:node /app/backend/v2/numeric-settings.mjs ./backend/v2/numeric-settings.mjs
 # Summarises a JSON.parse failure WITHOUT quoting the file it failed on. Used by
-# both stores that read hand-editable JSON out of /config.
+# every reader of a JSON file in /config that reports a parse failure
+# (config-overrides, user-lang-store, store-file).
 COPY --from=build --chown=node:node /app/backend/v2/json-error.mjs       ./backend/v2/json-error.mjs
+# How a /config store reads its file: an unusable one is moved aside, a newer one
+# left alone (networth/*-store.mjs and user-lang-store.mjs import it).
+COPY --from=build --chown=node:node /app/backend/v2/store-file.mjs       ./backend/v2/store-file.mjs
 COPY --from=build --chown=node:node /app/backend/v2/rate-limit-signal.mjs ./backend/v2/rate-limit-signal.mjs
 # GGG's X-Rate-Limit headers, parsed. Its own module so the trade audit can read
 # them without importing the net-worth stack — see the note in the file.

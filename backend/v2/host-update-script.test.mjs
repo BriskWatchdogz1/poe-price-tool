@@ -1,11 +1,9 @@
-// The HOST script, actually executed.
-//
-// deploy/host-update.sh is the part of this feature that runs outside the
-// container, as root on somebody's home server, and the part that carries the
-// whole security argument. "It looks harmless" is not a test, so it is run
-// here for real against a stub `git`, a stub `docker` and a temporary /config
-// directory — the two constants at its head are rewritten into the copy under
-// test, which is also a check that they are still constants at the head.
+// The HOST script, actually executed. deploy/host-update.sh runs outside the
+// container, as root on somebody's home server, and carries the whole security
+// argument. So it is run here for real against a stub `git`, a stub `docker`
+// and a temporary /config directory — the two constants at its head are
+// rewritten into the copy under test, which also checks that they are still
+// constants at the head.
 //
 // What is pinned:
 //   - the heartbeat is written on EVERY run, including the ones with nothing
@@ -21,13 +19,11 @@
 //     their full argument list, and a request file stuffed with shell
 //     metacharacters, a branch name and a second command changes none of it.
 //
-// AND THE OTHER HALF OF THE THREAT MODEL, which is the same one: the /config
-// directory is WRITABLE BY THE CONTAINER, and this script runs as root. So the
-// attacker here is not somebody sending a request — it is somebody who decides
-// what is behind each of those names. Every one of these is executed against
-// the real script:
-//   - a symlink at the staging path the script used to write through: it must
-//     not become a way to have root truncate a file outside the volume
+// THE OTHER HALF OF THE THREAT MODEL: the /config directory is WRITABLE BY THE
+// CONTAINER and this script runs as root, so the attacker decides what is
+// behind each of those names. Each case runs against the real script:
+//   - a symlink at a predictable staging path: it must not become a way to
+//     have root truncate a file outside the volume
 //   - a FIFO in the place of a file the script writes: it must not park the
 //     run forever (which would stop the heartbeat for good)
 //   - the request as a directory, and the lock pre-created in the shared
@@ -37,12 +33,11 @@
 //   - the CHECKOUT inside the shared directory (or the two being one): refused,
 //     because that one makes the container able to write the tree this script
 //     builds
-//
-// AND THE DIRECTION THAT IS NOT AN ATTACK, which is pinned here just as hard,
-// because refusing it was a bug: CONFIG_DIR inside REPO_DIR is what `git clone`
-// plus the shipped `./config:/config` mount produces on every installation that
-// follows the README. It must run — on the one condition the script can check,
-// that the build context excludes what the container writes.
+// AND THE DIRECTION THAT IS NOT AN ATTACK, pinned just as hard: CONFIG_DIR
+// inside REPO_DIR is what `git clone` plus the shipped `./config:/config` mount
+// produces on every installation that follows the README. It must run — on the
+// one condition the script can check, that the build context excludes what the
+// container writes.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
@@ -344,9 +339,9 @@ test('host script: a lock planted in the shared directory is not the lock', asyn
   t.after(() => rm(tmp, { recursive: true, force: true }))
   const s = await stage(tmp)
 
-  // The lock used to live in /config, so the container could create it once and
-  // the updater would never run again — a switch for turning updates off, in
-  // the one directory the container can write.
+  // A lock in /config could be created by the container once, and the updater
+  // would never run again — a switch for turning updates off, in the one
+  // directory the container can write.
   await mkdir(join(s.config, 'update.lock'))
   await writeFile(join(s.config, 'update-request'), 'requested-at=2026-01-01T00:00:00Z\n')
 
@@ -423,8 +418,8 @@ test('host script: the arrangement every README install produces is accepted, no
   t.after(() => rm(tmp, { recursive: true, force: true }))
   // `git clone` + `docker compose up -d --build` and nothing else: the compose
   // file mounts `./config`, so the shared directory is a SUBDIRECTORY OF THE
-  // CHECKOUT. The script used to reject exactly this, which made the feature
-  // unusable for everyone who followed the instructions. The nesting hands the
+  // CHECKOUT. Rejecting this would make the feature unusable for everyone who
+  // follows the instructions. The nesting hands the
   // container nothing — a bind mount goes one way, and the checkout it sits in
   // is not mounted anywhere.
   const s = await stage(tmp, { layout: 'config-in-repo' })

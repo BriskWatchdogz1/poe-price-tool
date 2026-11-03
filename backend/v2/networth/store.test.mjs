@@ -1,6 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, writeFile, readdir, rm } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createNetworthStore } from './store.mjs'
@@ -86,10 +87,10 @@ test('pruneTabs: removes tabs the account no longer has, once a second list agre
   await cleanup()
 })
 
-// pruneTabs used to believe the live tab list absolutely, so ONE short or empty
-// response took stored tabs with it — a wipe of a whole user's stash on a single
-// bad answer, and the last known way to reach the partial-store window of B2.
-// A drop now needs two consecutive lists that agree about the same tab. There is
+// pruneTabs must not believe the live tab list absolutely: ONE short or empty
+// response would take stored tabs with it — a wipe of a whole user's stash on a
+// single bad answer, and a way to reach the partial-store window of B2. A drop
+// needs two consecutive lists that agree about the same tab. There is
 // deliberately no threshold on "how much shorter": that would be a guessed
 // number, and requiring agreement needs none.
 function pruneStore () {
@@ -228,24 +229,101 @@ test('persistence roundtrip: reloading returns tabs + history', async () => {
   await cleanup()
 })
 
-test('migration: old schema_version:1 store -> treated as empty, no crash', async () => {
-  const { p, cleanup } = await fresh()
-  // Old snapshot-based store (v1).
+function recorder () {
+  const warnings = []
+  return { warnings, log: { warn: m => warnings.push(m), log: () => {} } }
+}
+
+const BROKEN = /^nw\.json\.broken-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z$/
+
+test('an old schema_version:1 store is moved aside, the store starts empty and stays writable', async () => {
+  const { dir, p, cleanup } = await fresh()
+  // Old snapshot-based store (v1): structurally incompatible, no migration.
   await writeFile(p, JSON.stringify({ schema_version: 1, snapshots: { player1: [{ at: 't', totalChaos: 999 }] } }), 'utf8')
-  const s = createNetworthStore(p)
+  const { warnings, log } = recorder()
+  const s = createNetworthStore(p, { log })
   await s.load()
   assert.equal(s.data.schema_version, 2)
   assert.deepEqual(s.data.users, {})
   assert.deepEqual(s.tabList('player1'), [])
+  const files = await readdir(dir)
+  assert.equal(files.length, 1)
+  assert.match(files[0], BROKEN)
+  assert.equal(existsSync(p), false)
+  assert.equal(warnings.length, 1)
+  assert.ok(warnings[0].includes('schema_version 1 is older than 2'))
+  assert.ok(warnings[0].includes(p))
+  assert.equal(s.writable, true)
+  await s.setTab('player1', 0, tab(0, 'A'))
+  assert.equal(JSON.parse(await readFile(p, 'utf8')).schema_version, 2)
   await cleanup()
 })
 
-test('migration: corrupt JSON -> treated as empty, no crash', async () => {
-  const { p, cleanup } = await fresh()
+test('corrupt JSON is moved to .broken-<timestamp> with one warning, the store starts empty', async () => {
+  const { dir, p, cleanup } = await fresh()
   await writeFile(p, '{ this is broken', 'utf8')
-  const s = createNetworthStore(p)
+  const { warnings, log } = recorder()
+  const s = createNetworthStore(p, { log })
   await s.load()
   assert.equal(s.data.schema_version, 2)
   assert.deepEqual(s.data.users, {})
+  const files = (await readdir(dir)).filter(f => BROKEN.test(f))
+  assert.equal(files.length, 1)
+  assert.equal(await readFile(join(dir, files[0]), 'utf8'), '{ this is broken')
+  assert.equal(warnings.length, 1)
+  assert.ok(warnings[0].includes('invalid JSON'))
+  assert.ok(warnings[0].includes('the stash is read again tab by tab'))
+  await cleanup()
+})
+
+test('a store file from a newer release is left untouched and the store runs in memory', async () => {
+  const { dir, p, cleanup } = await fresh()
+  const original = JSON.stringify({ schema_version: 3, users: { player1: { tabs: {} } } })
+  await writeFile(p, original, 'utf8')
+  const { warnings, log } = recorder()
+  const s = createNetworthStore(p, { log })
+  await s.load()
+  assert.equal(s.writable, false)
+  assert.deepEqual(s.data.users, {})
+  await s.setTab('player1', 0, tab(0, 'A'))
+  assert.equal(await readFile(p, 'utf8'), original)
+  assert.notEqual(s.getTab('player1', 0), null)
+  assert.equal((await readdir(dir)).filter(f => /\.broken-/.test(f)).length, 0)
+  assert.equal(warnings.length, 1)
+  await cleanup()
+})
+
+test('users that is not an object is moved aside, not emptied and overwritten', async () => {
+  const { dir, p, cleanup } = await fresh()
+  await writeFile(p, JSON.stringify({ schema_version: 2, users: null }), 'utf8')
+  const { warnings, log } = recorder()
+  const s = createNetworthStore(p, { log })
+  await s.load()
+  assert.equal((await readdir(dir)).filter(f => BROKEN.test(f)).length, 1)
+  assert.equal(warnings.length, 1)
+  assert.ok(warnings[0].includes('users is missing or not an object'))
+  await cleanup()
+})
+
+test('price notes ride in the same schema: kept across a reload, and a file written before them still loads', async () => {
+  const { dir, p, s, cleanup } = await fresh()
+  const listed = [{ name: 'Headhunter', kind: 'unique', qty: 1, x: 3, y: 7, note: '~price 5 chaos', fromTab: false, chaosEach: 900, uncertain: null }]
+  await s.setTab('player1', 0, { ...tab(0, 'Sale'), listed })
+  const s2 = createNetworthStore(p)
+  await s2.load()
+  assert.deepEqual(s2.getTab('player1', 0).listed, listed)
+
+  // A store file from before the field: same schema_version, no `listed` key.
+  // It is read as it is, nothing is moved aside, the key is simply missing.
+  const old = join(dir, 'old.json')
+  await writeFile(old, JSON.stringify({ schema_version: 2, users: { player1: { tabs: { 0: { ...tab(0, 'Old'), syncedAt: 1 } }, history: [] } } }), 'utf8')
+  const rec = recorder()
+  const s3 = createNetworthStore(old, { log: rec.log })
+  await s3.load()
+  assert.equal(s3.writable, true)
+  assert.equal(s3.getTab('player1', 0).name, 'Old')
+  assert.equal(s3.getTab('player1', 0).listed, undefined)
+  assert.deepEqual(rec.warnings, [])
+  assert.deepEqual((await readdir(dir)).filter(f => f.includes('broken')), [])
   await cleanup()
 })

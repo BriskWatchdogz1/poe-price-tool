@@ -19,7 +19,7 @@
 // process (POST /restart) and writes the configuration file that the next start
 // reads (POST /config-override). The trust model is unchanged and stays
 // unchanged — LAN, no authentication, one password — but "the default is still
-// in force" is no longer a small thing to leave unsaid. `usingDefault()` below
+// in force" is not a small thing to leave unsaid. `usingDefault()` below
 // is what the server says it with: one loud line at startup, and a notice in
 // the admin area itself. Deliberately NOT a forced password change: locking an
 // operator out of his own box on a LAN tool is the worse failure, and the

@@ -1,65 +1,44 @@
 // Reading a NUMBER out of the environment — one reader, one rule.
 //
-// THE DEFECT THIS REPLACES. `Number(process.env.X) || DEFAULT` is the shortest
-// way to read a numeric setting and it cannot express ZERO: `Number('0') || 25`
-// is 25. An operator who sets `POE_CORPSE_BUDGET_PER_HOUR=0` to stop the corpse
-// pricer from asking the Trade API for anything got 25 queries an hour and no
-// hint that the setting had done nothing at all. This repository has two real
-// Trade-API bans behind it, so "the off switch silently did not switch
-// anything" is not a cosmetic bug here.
+// WHY. `Number(process.env.X) || DEFAULT` cannot express ZERO: `Number('0') ||
+// 25` is 25, so `POE_CORPSE_BUDGET_PER_HOUR=0` (stop asking the Trade API)
+// would give 25 queries an hour and no hint — with two real Trade-API bans
+// behind this repository. `''`, `'   '`, `'abc'` and `'-1'` would land on the
+// default just as quietly, indistinguishable from "not set"; a value somebody
+// typed is worth a report, the absence of one is not. So the reader takes what
+// a call site knows: the default, the allowed range, and whether an explicit
+// zero is legal HERE — a per-setting question, never a global one
+// (`POE_CORPSE_BUDGET_PER_HOUR=0` means "ask nothing";
+// `POE_NETWORTH_COOLDOWN_MS=0` removes the backoff a 429 buys and
+// `POE_NETWORTH_SYNC_INTERVAL_MS=0` ticks against GGG without pause). The table
+// is numeric-settings.mjs; docs/admin.md gives the same answer for operators.
 //
-// Zero is only the loudest case. `''`, `'   '`, `'abc'` and `'-1'` land on the
-// default just as quietly, and afterwards none of them can be told apart from
-// "not set". A value somebody deliberately typed and the absence of a value are
-// two different situations, and only one of them is worth being quiet about.
-//
-// WHAT REPLACES IT: one reader with the three things a call site actually
-// knows — the default, the allowed range, and whether an explicit zero is a
-// legal setting HERE. Zero is a per-setting question and never a global one:
-// `POE_CORPSE_BUDGET_PER_HOUR=0` means "ask nothing", which is exactly what an
-// operator must be able to say, while `POE_NETWORTH_COOLDOWN_MS=0` removes the
-// backoff a 429 buys us and `POE_NETWORTH_SYNC_INTERVAL_MS=0` ticks against GGG
-// without pause. So every setting says which it is; see numeric-settings.mjs
-// for the table, and docs/admin.md for the same answer in operator language.
-//
-// WHAT AN UNUSABLE VALUE DOES: it is reported, loudly, and the DEFAULT is used.
-// Not a hard startup abort — and that is a decision, held to for every setting:
-//   - every fallback here is the DOCUMENTED DEFAULT, and for the settings that
-//     decide request volume that is also the conservative direction, because
-//     their ranges are floors (plus one ceiling): the values they refuse are
-//     the ones that would send MORE than the default does.
-//     IT IS NOT THE SAFER NUMBER IN EVERY CASE, and the exceptions are the two
-//     settings whose dangerous direction is UP, where a refused value BELOW the
-//     default falls back up to it:
-//       POE_CORPSE_BUDGET_PER_HOUR=0.5 (or =none) -> 25 Trade-API queries an
-//         hour, more than was asked for. A plain 0 is honoured, so the off
-//         switch itself is safe; it is the typo next to it that is not.
-//       POE_FAUSTUS_UNION_HOURS=3.5 -> the module default of 8, and a pass
-//         fetches one hourly CDN digest per unioned hour, so the fallback more
-//         than doubles the files an operator reaching for three was after.
-//     Refusing to start over either of them buys no safety over starting on the
-//     default; it only removes the tool. What it does buy is the log line, and
-//     that is the half that has to be loud.
-//   - the container runs `restart: unless-stopped`, and the only way to correct
-//     a setting from the browser is a server that listens. A typo in
+// AN UNUSABLE VALUE is reported, loudly, and the DOCUMENTED DEFAULT is used —
+// never a hard startup abort, for every setting alike (a rule with exceptions
+// is not one an operator can learn):
+//   - for the request-volume settings the default is the conservative side,
+//     since their ranges are floors (plus one ceiling). NOT IN EVERY CASE: four
+//     settings land a refused value on MORE requests than were asked for. Three
+//     have their dangerous direction UP and a refused value below the default
+//     falls back up to it: POE_CORPSE_BUDGET_PER_HOUR=0.5 (or =none) -> 25
+//     Trade-API queries an hour; POE_FAUSTUS_UNION_HOURS=3.5 -> the module
+//     default of 8, one hourly CDN digest per unioned hour;
+//     POE_MAX_REQUEUE_ON_RECONNECT=-1 (or =none) -> 10 `auto` Trade-API
+//     searches per reconnect (a plain 0 is honoured for both). The fourth is a
+//     ceiling on a divisor: POE_NETWORTH_IDLE_EVERY=5000 is refused (max 1000)
+//     and runs on every 10th tick, more stash reads for idle players than asked
+//     for, never more than without game detection. Refusing to start buys no
+//     safety over the default; the log line is the half that has to be loud.
+//   - the container runs `restart: unless-stopped`: a typo in
 //     `docker-compose.override.yml` that killed the boot would restart-loop
-//     with no admin area left to undo it — the exact lockout
-//     config-overrides.mjs argues about at length for the override file, except
-//     that the environment has no quarantine bracket around it at all.
-//   - everything the admin area can write is range-checked before it ever
-//     reaches the environment (config-overrides.mjs `validateSetting`), so this
-//     path only ever fires on a hand-written compose value.
-// The rule is the same for every setting on purpose. A rule with exceptions is
-// not one an operator can learn, and this defect was found by an operator who
-// had learnt the wrong one.
-//
-// A NEGATIVE VALUE IS NEVER ACCEPTED. Not one setting in this tool has a
-// meaning below zero — a negative interval, budget, cap or threshold is a typo
-// every time — so `min` starts at 0 and the specs only ever narrow it.
-//
-// THE LINE IS PRINTED ONCE per (variable, value). `POE_MAX_LISTINGS` is read
-// per search rather than once at boot, so an unusable value would otherwise
-// write a log line per priced item and bury the rest of the log.
+//     with no admin area left to undo it, and the environment has no quarantine
+//     bracket (config-overrides.mjs has one for the override file).
+//   - everything the admin area writes is range-checked first
+//     (config-overrides.mjs `validateSetting`), so this path only fires on a
+//     hand-written compose value.
+// A NEGATIVE VALUE IS NEVER ACCEPTED: no setting has a meaning below zero, so
+// `min` starts at 0 and the specs only narrow it. THE LINE IS PRINTED ONCE per
+// (variable, value): `POE_MAX_LISTINGS` is read per search, not once at boot.
 
 /** The (variable -> raw value) pairs already complained about. */
 const reported = new Map()

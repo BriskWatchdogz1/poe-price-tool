@@ -170,7 +170,7 @@ test('every priced row names the feed that priced it', { timeout: 120_000 }, asy
     // The page opens in the grouped view; the flat list is the one this test
     // reads first.
     await evalJs(`document.querySelector('#viewSeg button[data-v="list"]').click()`)
-    assert.deepEqual(await headers(), ['Item', 'Tab', 'Qty', 'Each', 'Total', 'Source'],
+    assert.deepEqual(await headers(), ['Item', 'Tab', 'Qty', 'Each', 'Total', 'Confidence', 'Source'],
       'the table has to name the feed\n' + srvLog.join(''))
 
     // Default sort is total value descending: Divine Orb 600, Imperial Legacy
@@ -179,8 +179,7 @@ test('every priced row names the feed that priced it', { timeout: 120_000 }, asy
       'each row states its own source, and a row without one states nothing rather than something')
 
     // Sorting by the new column must work on the mixed set, missing value
-    // included — a NaN comparison used to be the price of a non-numeric
-    // column here.
+    // included — a non-numeric column must not end in a NaN comparison.
     await evalJs(`document.querySelector('#wrap thead th[data-k="source"]').click()`)
     assert.deepEqual(await sources(), ['—', 'exchange:DivinationCard', 'faustus'],
       'text sorts as text, and the row without a source is not the string "null" in the middle')
@@ -199,7 +198,7 @@ test('every priced row names the feed that priced it', { timeout: 120_000 }, asy
       `[...document.querySelectorAll('#wrap .grp')].map(g => [...g.querySelectorAll('thead th')].map(th => th.textContent.replace(/[▲▼]/g, '')))`)
     assert.ok(groupHeaders.length >= 2, 'both kinds got a group')
     for (const h of groupHeaders) {
-      assert.deepEqual(h, ['Item', 'Tab', 'Qty', 'Each', 'Total', 'Source'],
+      assert.deepEqual(h, ['Item', 'Tab', 'Qty', 'Each', 'Total', 'Confidence', 'Source'],
         'the grouped view must not be the one place a price has no origin')
     }
   } finally {

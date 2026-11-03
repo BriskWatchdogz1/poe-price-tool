@@ -2,9 +2,10 @@
 // Refreshes the vendored Awakened PoE Trade data snapshot in
 // renderer/public/data/en/ from upstream master (network!).
 //
-// CLI, NOT imported by the server/container — same role as
-// backend/v2/base-names-gen.mjs. Run it when a new league patch ships items
-// the price check cannot identify any more ("new unique is not recognised"):
+// CLI; the data refresher (backend/v2/data-refresher.mjs) imports
+// UPSTREAM_BASE, FILES and diffLines from it, so the image carries it — same
+// role as backend/v2/base-names-gen.mjs. Run it when a new league patch ships
+// items the price check cannot identify any more ("new unique is not recognised"):
 // items.ndjson is the item database the APT parser resolves names against, and
 // stats.ndjson is what the mod matcher reads, so an unknown unique means the
 // snapshot is simply older than the patch.
@@ -22,6 +23,7 @@ import { readFile, writeFile } from 'node:fs/promises'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
+import { AGENT_BASE } from './version.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const RENDERER_DIR = path.join(HERE, '../../renderer')
@@ -48,8 +50,12 @@ export const FILES = ['items.ndjson', 'stats.ndjson', 'client_strings.js', 'app_
 
 const INDEX_SCRIPT = 'src/assets/make-index-files.mjs'
 
-async function fetchText (url) {
-  const res = await fetch(url)
+// Every download names the tool: name and version (version.mjs), then the
+// purpose. fetchImpl is injectable so the tests never touch the network.
+const UA = `${AGENT_BASE} (APT data update, personal LAN tool)`
+
+async function fetchText (fetchImpl, url) {
+  const res = await fetchImpl(url, { headers: { 'User-Agent': UA } })
   if (!res.ok) throw new Error(`Fetch failed (${res.status} ${res.statusText}): ${url}`)
   return res.text()
 }
@@ -151,9 +157,9 @@ export function regenerateIndices ({ run = spawnSync } = {}) {
   return true
 }
 
-export async function updateAptData ({ dryRun = false } = {}) {
+export async function updateAptData ({ dryRun = false, fetchImpl = fetch } = {}) {
   console.log(`Fetching the APT data snapshot from ${UPSTREAM_BASE} ...`)
-  const fetched = await Promise.all(FILES.map(f => fetchText(`${UPSTREAM_BASE}/${f}`)))
+  const fetched = await Promise.all(FILES.map(f => fetchText(fetchImpl, `${UPSTREAM_BASE}/${f}`)))
 
   let changed = 0
   let removalsSeen = 0

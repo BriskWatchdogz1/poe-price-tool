@@ -1,13 +1,11 @@
 // backend/v2/rate-limit-signal.mjs
 // SINGLE source of truth for "is this error a trade rate-limit / ban, and for how
-// many seconds should we back off?". Three copies of this logic used to live in
-// server.mjs and networth/trade-client.mjs — and they had
-// DRIFTED: one of them only knew the harmless client-side wording, so a REAL
-// GGG ban fell through its detector and it kept crawling straight into the ban,
-// snowballing 3h -> 11h. Keep ALL rate-limit reasoning here so the detectors can
-// never diverge again. (trade-client.mjs still carries its own circuit-breaker
-// classifier; converging it is a safe follow-up, not required — it is the MOST
-// complete of the three, so it was never the drift risk.)
+// many seconds should we back off?". Copies of this logic drift: a detector
+// that only knew the harmless client-side wording let a REAL GGG ban fall
+// through, and its caller kept crawling straight into the ban, snowballing 3h
+// -> 11h. Keep ALL rate-limit reasoning here so the detectors cannot diverge.
+// (trade-client.mjs carries its own circuit-breaker classifier; it is the most
+// complete one, so it is not the drift risk.)
 //
 // A rate-limit / ban reaches us in these forms — recognise ALL of them:
 //   1. Client-side backpressure: APT's preventQueueCreation throws
@@ -78,7 +76,7 @@ export function isBanSignal (errOrMsg) {
 // starts refusing for minutes-to-hours it has LEARNED a real server-side limit.
 // Observed: "Retry after 13283 seconds" (3.7h) reported as client — nothing was
 // sent, but we are unmistakably limited. Below this, a client wait is ordinary
-// backpressure and must stay quiet (a 60s pause used to raise a false alarm).
+// backpressure and must stay quiet (a 60s pause is no alarm).
 export const CLIENT_GATE_MIN_SEC = 300
 
 // Should this signal raise the GLOBAL ban gate + banner (vs. a quiet local

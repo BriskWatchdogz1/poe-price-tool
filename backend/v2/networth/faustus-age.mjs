@@ -1,47 +1,33 @@
 // backend/v2/networth/faustus-age.mjs
 // HOW OLD IS A FAUSTUS PRICE, and how old may it be before the tool stops
-// presenting it as a current one.
-//
-// ── The defect this exists for ─────────────────────────────────────────────
-// Faustus prices carried exactly one timestamp, the store's `updatedAt` — when
-// the REFRESHER last ran. That says nothing about the number: faustus.mjs walks
-// back up to POE_FAUSTUS_UNION_HOURS (default 8) completed hours and takes the
-// newest hour in which a market was informative, so an item that last traded
-// eight hours ago and an item that traded in the last completed hour arrive in
-// the same map, in the same refresh, indistinguishable.
-//
-// Measured against two live cards of the same league at the same minute
-// (Allflame, 2026-08-13), which is what made the difference visible:
+// presenting it as a current one. The store's `updatedAt` says when the
+// REFRESHER last ran, nothing about the number: faustus.mjs walks back up to
+// POE_FAUSTUS_UNION_HOURS (default 8) completed hours and takes the newest
+// hour in which a market was informative, so an item that last traded eight
+// hours ago and one from the last completed hour arrive in the same refresh,
+// indistinguishable. Measured on two live cards of the same league at the same
+// minute (Allflame, 2026-08-13):
 //
 //   card                tool     in-game sell   in-game buy   hour range shown
 //   Imperfect Memories    19c        21c            38c       none (single ratio)
 //   The Chosen          206.6c       147c           180c      142..300c
 //
-// Same code path, same label, and 10 % low against 40 % high. A systematic
-// market-SIDE error cannot produce that: a rate that always sat between bid and
-// ask would land above 21 for the first card, not below it. What separates the
-// two is the observation behind them — one hour that traded 142..300 with a
-// volume-weighted average of 206.6, against an hour with a single ratio. A card
-// whose market moved from ~300 to ~147 while its digest hour aged is exactly the
-// shape of the first row, and nothing on screen said the two numbers were from
-// two different times.
+// Same code path, 10 % low against 40 % high: no systematic market-SIDE error
+// does that (a rate between bid and ask would land above 21 for the first
+// card). What separates them is the observation — an hour that traded 142..300
+// with a volume-weighted average of 206.6, against a single ratio — and nothing
+// on screen said the two were from different times.
 //
-// ── What the age is measured from ──────────────────────────────────────────
-// From the END of the digest hour the price was observed in, not its start and
-// not the fetch: `at` is the hour's unix START (faustus.mjs `detail.at`), the
-// hour is closed 3600s later, and everything after that is the number getting
-// old. Age 0 = the hour has just closed.
+// THE AGE is measured from the END of the digest hour the price was observed
+// in: `at` is the hour's unix START (faustus.mjs `detail.at`), the hour closes
+// 3600s later. Age 0 = the hour has just closed.
 //
-// ── The lag nobody can tune away ───────────────────────────────────────────
-// Even a perfectly fresh price is not new:
-//   - faustus.mjs asks for the last COMPLETED hour (`lastHour`), so at the
-//     moment of the fetch the observation is already up to one hour old, and
-//   - the refresher ticks every POE_FAUSTUS_REFRESH_MS (default 1h), so up to
-//     one further interval passes before the next fetch replaces it.
-// So the freshest a served price can ever be is `HOUR + refreshMs` old, and a
-// gate below that would reject every price there is. That is arithmetic about
-// the source, not a preference, which is why `maxAgeMs` below is floored at it
-// rather than trusting the setting to be sane.
+// THE LAG NOBODY CAN TUNE AWAY: faustus.mjs asks for the last COMPLETED hour
+// (`lastHour`), so at the fetch the observation is up to one hour old, and the
+// refresher ticks every POE_FAUSTUS_REFRESH_MS (default 1h), so up to one
+// further interval passes before the next fetch replaces it. The freshest a
+// served price can be is `HOUR + refreshMs` old; a gate below that would reject
+// every price, so `maxAgeMs` below is floored at it.
 import { readEnvNumber } from '../env-number.mjs'
 
 const HOUR_MS = 60 * 60 * 1000

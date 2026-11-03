@@ -825,18 +825,18 @@ export function validate ({
     const cand = deByRef.get(s.ref) ?? []
     if (!cand.some(x => x.matchers.length > 0)) uncovered.push(s.ref)
   }
-  // WHICH GAP IS A REASON TO THROW THE RUN AWAY — and this is the half that was
-  // wrong until 2026-08-18 (docs/bugs.md B23).
+  // WHICH GAP IS A REASON TO THROW THE RUN AWAY (corrected 2026-08-18,
+  // docs/bugs.md B23).
   //
-  // The bar used to be `uncovered / every English ref`, and it fires hardest in
+  // The bar is NOT `uncovered / every English ref`: that fires hardest in
   // exactly the situation where refusing helps least: English comes from an
   // upstream that ships on its own schedule, the localized side is derived from
   // the game data of a patch, and when upstream runs ahead the newly added stats
   // have no target text ANYWHERE to be derived from. Refusing to write then
   // keeps the PREVIOUS set live — a set that does not carry those refs at all.
   // A ref with an empty matcher list and a ref that is missing outright are the
-  // same thing to every reader of this data: no match. So the refusal bought
-  // nothing and cost every stat the run WOULD have resolved.
+  // same thing to every reader of this data: no match. So such a refusal buys
+  // nothing and costs every stat the run WOULD have resolved.
   //
   // The question the gate has to ask is therefore not "how complete is this
   // set" but "did this run LOSE something the live set already had". Two

@@ -76,8 +76,22 @@
       <div class="tx"><b id="rbmsg"></b><span id="rbwait"></span></div>
     </div>
 
+    <!-- Buyer whispers of this session (`whisper` / `whispers`, whispers.js).
+         Collapsed while empty; every field is set as text. -->
+    <details class="whispers" id="whispers">
+      <summary><span data-i18n="pc.whispers.heading">Buyer whispers (this session)</span> <span class="badge" id="whisperCount">0</span></summary>
+      <p class="wnote" data-i18n="pc.whispers.note">Your own listed price against this tool’s market price. Kept in memory only, without the buyer’s name; a server restart forgets the list.</p>
+      <ul class="wlist" id="whisperList"></ul>
+    </details>
+
     <div class="grid" id="grid">
-      <div class="empty" id="empty" data-i18n="pc.empty">No items in the queue. Price-check something in-game.</div>
+      <!-- The text sits in its own span: applyDom sets textContent on a
+           data-i18n element, which would wipe the hint next to it. The hint is
+           filled from `daemon-status` (app.js, renderDaemonHint). -->
+      <div class="empty" id="empty">
+        <span data-i18n="pc.empty">No items in the queue. Price-check something in-game.</span>
+        <span class="emptyhint" id="emptyHint"></span>
+      </div>
     </div>
   </main>
 </div>
@@ -95,6 +109,7 @@
 
 <script src="i18n.js"></script>
 <script src="shell.js"></script>
+<script src="whispers.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

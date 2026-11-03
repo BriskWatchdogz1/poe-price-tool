@@ -84,6 +84,12 @@ test('config endpoints: gate, no secrets, live vs restart, and the way back', { 
   await writeFile(credPath, JSON.stringify({ player1: { accountName: ACCOUNT, poesessid: SESSID } }))
   // Seeded BEFORE the start: this is the state a restart finds.
   await writeFile(overridesPath, JSON.stringify({ POE_APP_NAME: OVERRIDE_NAME }))
+  // A net-worth store written by a NEWER release (the state after a rollback):
+  // the server must leave it alone and say in the runtime list that this store
+  // runs in memory only (store-file.mjs).
+  const nwStorePath = join(tmp, 'networth-store.json')
+  const NEWER_STORE = JSON.stringify({ schema_version: 99, users: {} })
+  await writeFile(nwStorePath, NEWER_STORE)
 
   const srv = spawn(process.execPath, [join(ROOT, 'backend/v2/server.mjs')], {
     cwd: ROOT,
@@ -106,7 +112,9 @@ test('config endpoints: gate, no secrets, live vs restart, and the way back', { 
       POE_SESSID: SESSID,
       POE_NETWORTH_ACCOUNT: ACCOUNT,
       POE_NETWORTH_CONFIG: credPath,
-      POE_NETWORTH_STORE: join(tmp, 'networth-store.json'),
+      POE_NETWORTH_STORE: nwStorePath,
+      POE_FAUSTUS_STORE: join(tmp, 'faustus-store.json'),
+      POE_CORPSE_STORE: join(tmp, 'corpse-store.json'),
       POE_NETWORTH_HISTORY: join(tmp, 'networth-history.ndjson'),
       POE_NETWORTH_AUTOSYNC: '0',
       POE_FAUSTUS_DISABLED: '1',
@@ -185,6 +193,13 @@ test('config endpoints: gate, no secrets, live vs restart, and the way back', { 
     assert.equal(body.runtime.some(e => e.name === 'POE_APP_NAME'), false,
       'the editable ones are not repeated there — one page, one answer per setting')
     assert.equal(body.quarantined, false)
+    // store.writable, not the mkdir result: the net-worth store met a file from
+    // a newer release and runs in memory, the other two write normally.
+    const runtimeValue = n => body.runtime.find(e => e.name === n)?.value
+    assert.equal(runtimeValue('net-worth store writable'), '0')
+    assert.equal(runtimeValue('Faustus store writable'), '1')
+    assert.equal(runtimeValue('corpse store writable'), '1')
+    assert.equal(await readFile(nwStorePath, 'utf8'), NEWER_STORE, 'the newer file is left byte for byte')
 
     // ---- live really is live ------------------------------------------------
     let res = await setKey('POE_APP_NAME', 'Renamed live')

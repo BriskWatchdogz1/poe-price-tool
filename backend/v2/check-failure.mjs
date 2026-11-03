@@ -1,44 +1,30 @@
-// WHY a background check failed, in a form a status line can act on.
-//
-// The data refresher already logged the reason of every failed check — one line
-// a day, in the container log. What it persisted was the OUTCOME only, so the
-// browser could say "no successful check of lang-data for 5 days" and nothing
-// else. For an operator who is not reading the log that sentence is the whole
-// story, and it does not contain the one thing that decides what to do next:
-// whether this is an upstream that is briefly away (wait) or an answer this
-// build refuses / cannot read (act). See docs/bugs.md B24.
-//
-// Two values travel from the failure site to the status line:
+// WHY a background check failed, in a form a status line can act on. Without
+// the reason the browser could only say "no successful check of lang-data for 5
+// days", which lacks the one thing that decides what to do next: an upstream
+// that is briefly away (wait) or an answer this build refuses / cannot read
+// (act). See docs/bugs.md B24. Two values travel from the failure site to the
+// status line:
 //
 //   reason  the sentence that is already in the log, filtered (see below).
 //   kind    one of FAIL_KIND — set AT THE SITE THAT KNOWS, never derived from
 //           the wording of the reason afterwards. A failure nobody classified
 //           stays `unknown`, and the status line then shows the reason with no
-//           advice attached rather than inventing one. Guessing a cause here
-//           would be the exact defect this module was written for.
+//           advice attached rather than inventing one.
 //
-// THE REASON IS FOREIGN TEXT. It quotes upstream bodies, error messages of a
-// child process and URLs, and it ends up in a browser. So it is filtered — with
-// the same vocabulary the update block's host output is filtered by, at the
-// granularity THIS text has.
-//
-// It used to go through `redactOutput()` whole, and that was a defect of its
-// own: that filter drops every LINE naming something that could be a credential,
-// and the reason IS one line. `key count`, `Unexpected token …` and the quoted
-// body of a captive portal all trip the vocabulary, so the first real failure
-// showed a credential placeholder INSTEAD of its cause — and asserted a
-// credential had been near it. The line granularity is right for a build
-// protocol and wrong here, so the reason gets the value granularity instead:
-// control characters out, credentials inside a URL masked, and every VALUE a
-// credential-shaped name is handed replaced by `***`, while the words around it
-// stay. `key=abcdef` carries a secret; the word `key` in `key count` does not.
-//
-// The security claim is unchanged and is stated where it is implemented
-// (secret-keys.mjs): names and shapes are caught, a bare secret that names
-// nothing is not — the same limit `redactOutput` has always documented.
-//
-// On top of that the reason is folded to a single line and capped, because this
-// is a status line and not a log view.
+// THE REASON IS FOREIGN TEXT: it quotes upstream bodies, error messages of a
+// child process and URLs, and it ends up in a browser. So it is filtered with
+// the vocabulary the update block's host output is filtered by, at the
+// granularity THIS text has. Not through `redactOutput()`: that drops every
+// LINE naming something that could be a credential, and the reason IS one line
+// — `key count`, `Unexpected token …` and the quoted body of a captive portal
+// all trip the vocabulary, and the cause would be replaced by a credential
+// placeholder. So the reason gets value granularity: control characters out,
+// credentials inside a URL masked, and every VALUE a credential-shaped name is
+// handed replaced by `***`, while the words around it stay (`key=abcdef`
+// carries a secret; the word `key` in `key count` does not). The limit is the
+// one stated where it is implemented (secret-keys.mjs): names and shapes are
+// caught, a bare secret that names nothing is not, as for `redactOutput`. The
+// reason is folded to a single line and capped: a status line, not a log view.
 import { stripControlChars, maskUrlCredentials } from './host-update.mjs'
 import { maskSecretValues } from './secret-keys.mjs'
 

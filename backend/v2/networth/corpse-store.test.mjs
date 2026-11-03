@@ -2,7 +2,7 @@
 // atomic persist, league-guarded. Mirrors faustus-store's discipline.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createCorpseStore } from './corpse-store.mjs'
@@ -76,14 +76,39 @@ test('NaN/Infinity are stored as null: never a corrupt price', async () => {
   await cleanup()
 })
 
-test('load tolerates a corrupt / outdated file -> empty store', async () => {
-  const { p, s, cleanup } = await fresh()
-  await s.setPrice('Standard', 'X', 1, 5_000_000)
-  const { writeFile } = await import('node:fs/promises')
+function recorder () {
+  const warnings = []
+  return { warnings, log: { warn: m => warnings.push(m), log: () => {} } }
+}
+
+test('a corrupt file is moved aside with one warning, the store starts empty', async () => {
+  const { dir, p, cleanup } = await fresh()
   await writeFile(p, '{ not json', 'utf8')
-  const s2 = createCorpseStore(p)
-  await s2.load()
-  assert.deepEqual(s2.data.entries, {})
+  const { warnings, log } = recorder()
+  const s = createCorpseStore(p, { log })
+  await s.load()
+  assert.deepEqual(s.data.entries, {})
+  const broken = (await readdir(dir)).filter(f => /^corpse\.json\.broken-/.test(f))
+  assert.equal(broken.length, 1)
+  assert.equal(await readFile(join(dir, broken[0]), 'utf8'), '{ not json')
+  assert.equal(warnings.length, 1)
+  assert.ok(warnings[0].includes('POE_CORPSE_BUDGET_PER_HOUR'))
+  assert.equal(s.writable, true)
+  await cleanup()
+})
+
+test('a file from a newer release is left untouched and setPrice does not write', async () => {
+  const { p, cleanup } = await fresh()
+  const original = JSON.stringify({ schema_version: 2, entries: { X: { chaos: 1, at: 1 } } })
+  await writeFile(p, original, 'utf8')
+  const { log } = recorder()
+  const s = createCorpseStore(p, { log })
+  await s.load()
+  assert.equal(s.writable, false)
+  const t = 5_000_000
+  await s.setPrice('Standard', 'Y', 3, t)
+  assert.equal(await readFile(p, 'utf8'), original)
+  assert.equal(s.getPrice('Y', t + 1), 3)
   await cleanup()
 })
 
@@ -125,5 +150,44 @@ test('setPrice with no stored league (legacy file) keeps the entries', async () 
   await s.load()
   await s.setPrice('Standard', 'Rock Golem', 7, t + 1000)
   assert.equal(s.getPrice('Forest Tiger', t + 2000), 42)
+  await rm(dir, { recursive: true, force: true })
+})
+
+// docs/pricing-logic.md "Uncertain prices": the valuator marks a corpse price
+// averaged from too few offers. The count is stored with the price (`n`,
+// additive — no schema bump), and everything it cannot vouch for reads null.
+test('setPrice keeps the listing count, and an entry without it reads as unknown', async () => {
+  const { p, s, cleanup } = await fresh({ ttlMs: 6 * HOUR })
+  const t = 6_000_000
+  await s.setPrice('Standard', 'X', 10, t, 1)
+  assert.equal(s.getListings('X'), 1)
+  assert.equal(JSON.parse(await readFile(p, 'utf8')).entries.X.n, 1, 'the count is persisted')
+  // No price, no count: a cached null has nothing to vouch for.
+  await s.setPrice('Standard', 'Y', null, t, 0)
+  assert.equal(s.getListings('Y'), null)
+  assert.equal(s.get('Y').n, undefined)
+  // A broken count is dropped, never stored.
+  await s.setPrice('Standard', 'Half', 10, t, 1.5)
+  await s.setPrice('Standard', 'Negative', 10, t, -1)
+  await s.setPrice('Standard', 'Omitted', 10, t)
+  assert.equal(s.getListings('Half'), null)
+  assert.equal(s.getListings('Negative'), null)
+  assert.equal(s.getListings('Omitted'), null)
+  assert.equal(s.getListings('Never priced'), null)
+  await cleanup()
+})
+
+test('a file written before the listing count existed loads, and its entries read as unknown', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'ppt-corpse-'))
+  const p = join(dir, 'corpse.json')
+  const t = 7_000_000
+  await writeFile(p, JSON.stringify({
+    schema_version: 1, updatedAt: t, league: 'Standard', entries: { 'Forest Tiger': { chaos: 42, at: t }, Bad: { chaos: 9, at: t, n: 'x' } }
+  }))
+  const s = createCorpseStore(p, { ttlMs: 6 * HOUR })
+  await s.load()
+  assert.equal(s.getPrice('Forest Tiger', t + 1000), 42)
+  assert.equal(s.getListings('Forest Tiger'), null)
+  assert.equal(s.getListings('Bad'), null)
   await rm(dir, { recursive: true, force: true })
 })

@@ -163,8 +163,8 @@ test('unpriced block follows the stash-tab selection', { timeout: 120_000 }, asy
   const unpricedSummary = () => evalJs(`document.getElementById('unpricedSummary').textContent`)
   const tabCells = () => evalJs(`[...document.querySelectorAll('#wrap tbody .tabcell')].map(td => td.textContent)`)
   // What the ×N of the rows actually add up to. The summary has to open with
-  // this number — the headline used to be in a different unit (stash entries)
-  // and could sit either side of it.
+  // this number — a headline in a different unit (stash entries) could sit
+  // either side of it.
   const listedPieces = () => evalJs(
     `[...document.querySelectorAll('#unpricedList li')]
        .reduce((sum, li) => sum + Number(li.textContent.match(/×(\\d+)/)[1]), 0)`)

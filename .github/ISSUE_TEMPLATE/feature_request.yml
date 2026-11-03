@@ -1,0 +1,34 @@
+name: Feature request
+description: Suggest a change or an addition.
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Larger changes are best discussed here before anybody writes code; CONTRIBUTING.md, section "Pull requests", says which changes are taken. **Never paste your POESESSID, your account name, or lines from `Client.txt` that contain character or player names.**
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What do you want to do that the tool does not let you do?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What should it do instead?
+    validations:
+      required: true
+
+  - type: textarea
+    id: api-load
+    attributes:
+      label: Requests to GGG
+      description: "Would this send more requests to the Trade API or the Stash API? The tool keeps that load low on purpose: a trade ban can cover the whole IP address."
+
+  - type: input
+    id: server-version
+    attributes:
+      label: Server version
+      description: Settings page, block "Releases", the line "Installed".

@@ -1,41 +1,31 @@
-// What the tool could NOT do, kept where somebody can look at it.
+// What the tool could NOT do, kept where somebody can look at it. The premise
+// of the German rollout (design doc, section 6): the second user is not
+// technical and will never report a bug; an item that comes back wrong or not
+// at all makes him stop using the tool, quietly. So the backend records its own
+// gaps, in a shape that survives being looked at once a week.
 //
-// The premise of the German rollout (design doc, section 6): the second user is
-// not technical and will never report a bug. An item that comes back wrong or
-// not at all makes him stop using the tool, quietly. So the backend has to
-// record its own gaps instead of waiting for a report — and it has to do it in
-// a shape that survives being looked at once a week, not one line per event in
-// a log nobody opens.
-//
-// Two kinds of gap are recorded, both from the price-check path (server.mjs):
-//
-//   parse         the engine refused the clipboard text outright. Nothing
-//                 reaches the browser, the user sees no card at all.
+// Two kinds, both from the price-check path (server.mjs):
+//   parse         the engine refused the clipboard text outright. No card
+//                 reaches the browser; an empty Price Check page only says
+//                 the last item could not be read (`daemon-status`), and the
+//                 player's daemon journal has one line for it, neither says
+//                 which text it was.
 //   unknownMod    the item parsed, but a mod line stayed unresolved — neither
 //                 the vendored stat DB nor GGG's stat catalogue knew it. The
 //                 card shows it read-only and the search silently ignores it,
-//                 which is the more dangerous of the two: there IS a price, it
-//                 is just the price of a different item.
+//                 the more dangerous of the two: the price is that of a
+//                 different item.
 //
-// AGGREGATION, NOT A JOURNAL. Every record folds into a counted entry, keyed by
-// language + kind + a stable signature of the text. The same broken mod line
-// seen 200 times is one row with count 200, not 200 rows — which is also what
-// makes "sorted by frequency" mean anything.
-//
-// MEMORY. A price-check tool runs for months; an unbounded Map keyed by user
-// input is a leak with extra steps. Three bounds, all configurable:
-//   - the stored text is trimmed, whitespace-collapsed and truncated,
-//   - the number of entries per kind is capped,
-//   - over the cap, the LEAST frequent entry is evicted (oldest wins the tie),
-//     because the point of the list is the recurring gap, not the one-off.
-// Evictions are counted and reported, so a truncated list never pretends to be
-// complete.
-//
-// NOT PERSISTED. The log lives in memory and starts empty after a restart.
-// That is a deliberate limit, not an oversight: a gap that matters recurs the
-// next time the user price-checks that item, and a persisted file would need
-// its own write path, its own size policy and its own corruption handling for
-// data that is diagnostic, never authoritative.
+// AGGREGATION, NOT A JOURNAL: every record folds into a counted entry keyed by
+// language + kind + a stable signature of the text (the same broken mod line
+// seen 200 times is one row with count 200), sorted by frequency. MEMORY, three
+// configurable bounds: the stored text is trimmed, whitespace-collapsed and
+// truncated; the entries per kind are capped; over the cap the LEAST frequent
+// entry is evicted (oldest wins the tie). Evictions are counted and reported,
+// so a truncated list never pretends to be complete. NOT PERSISTED, by design:
+// the log lives in memory and starts empty after a restart; a gap that matters
+// recurs at the next price check of that item, and the data is diagnostic,
+// never authoritative.
 
 // The two kinds, as they appear in the API and in the UI grouping.
 export const GAP_PARSE = 'parse'

@@ -13,7 +13,11 @@
        What this page is FOR, and what it deliberately is not: it answers "what
        came in and what went out?". The curve carries the shape, the list
        carries the reasons, and both cover the same window. Pure price moves
-       appear in neither — they were the noise that made the old panel useless. */
+       appear in neither — they were the noise that made the old panel useless.
+       It also measures sessions: farm sessions started and ended by button
+       (or the daemon's key), game sessions that follow the game, the balance
+       of one in a card, all of them in a table with each farm session under
+       its game evening. */
 
     .main{padding:0 0 40px; display:flex; flex-direction:column;}
     .mhead{position:static; padding-left:22px; padding-right:22px; margin-bottom:0;}
@@ -116,6 +120,40 @@
     .unitinfo > summary:hover{color:var(--chaos); border-color:var(--chaos-deep);}
     .unitinfo > summary:focus-visible{outline:2px solid var(--chaos); outline-offset:2px;}
     .unitinfo p{margin:8px 0 2px; max-width:78ch; font-size:12.5px; line-height:1.6; color:var(--muted);}
+
+    /* ---- farm sessions: buttons in the toolbar, the balance card, the list ---- */
+    .sessbtn{font:inherit; font-size:13px; font-weight:600; color:var(--chaos); background:var(--panel-2);
+      border:1px solid var(--border); border-radius:8px; padding:6px 14px; cursor:pointer;}
+    .sessbtn.end{color:var(--crit);}
+    .sessbtn.ghost{color:var(--muted); font-weight:500;}
+    .sessbtn:disabled{opacity:.5; cursor:default;}
+    .sessmsg{margin:0 22px 10px; font-size:12.5px; color:var(--crit);}
+    .sess{margin:0 22px 18px; background:var(--panel-2); border:1px solid var(--border); border-radius:12px; padding:12px 14px;}
+    .sesstop{display:flex; gap:10px; align-items:baseline; margin-bottom:8px;}
+    .sesstop b{font-size:13.5px;}
+    .sessstate{font-size:11.5px; text-transform:uppercase; letter-spacing:.06em; color:var(--faint);}
+    .sessstate.preliminary, .sessstate.starting{color:var(--divine);}
+    .sesstop .sessbtn{margin-left:auto;}
+    .sessgrid{display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:8px 16px;}
+    .sessgrid span{display:block; font-size:12px; color:var(--muted);}
+    .sessgrid b{font-family:var(--mono); font-size:14px;}
+    .sesslists{display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-top:10px;}
+    .sesslists h3{margin:0 0 4px; font-size:12px; color:var(--muted); text-transform:uppercase; letter-spacing:.06em;}
+    .sessnote{margin:6px 0 0; font-size:12px; color:var(--faint); line-height:1.5;}
+    .sesswarn{margin:6px 0 0; font-size:12.5px; color:var(--divine);}
+    .sess .unitinfo{margin:8px 0 0;}
+    .sesshead{margin-top:22px;}
+    .sesswrap{margin:0 22px; overflow-x:auto;}
+    .sesstab{width:100%; border-collapse:collapse; font-size:13px;}
+    .sesstab th{text-align:left; color:var(--muted); font-weight:500; padding:4px 8px; border-bottom:1px solid var(--border);}
+    .sesstab td{padding:5px 8px; font-family:var(--mono); border-bottom:1px solid var(--border-soft); cursor:pointer;}
+    .sesstab tr.sel td{background:var(--panel);}
+    .sesstab td.kind{font-family:inherit; white-space:nowrap;}
+    .sesstab tr.game td.kind{font-weight:600;}
+    /* A farm session under the game evening it was started in. */
+    .sesstab tr.child td.kind{padding-left:26px; color:var(--muted);}
+    .sesstab tr.child td.kind::before{content:'\21B3\00a0'; color:var(--faint);}
+    .sesstab td.state{font-family:inherit;}
   </style>
 </head>
 <body>
@@ -207,7 +245,11 @@
       </div>
       <span class="spacer"></span>
       <span class="sum" id="headSum"></span>
+      <button type="button" class="sessbtn" id="sessBtn" title="Measure what you earn from now on: loot and market movement, per hour" data-i18n-title="hi.sessStartTitle" hidden><span id="sessBtnLbl" data-i18n="hi.sessStart">Start farm session</span></button>
+      <button type="button" class="sessbtn ghost" id="sessDiscard" title="Throw the running farm session away; it leaves no line in the list" data-i18n-title="hi.sessDiscardTitle" hidden><span data-i18n="hi.sessDiscard">Discard</span></button>
     </div>
+    <p class="sessmsg" id="sessMsg" role="status" hidden></p>
+    <section class="sess" id="sessCard" aria-live="polite" hidden></section>
 
     <div class="chartbox">
       <!-- The one question this chart provokes — "why did it drop when I sold
@@ -239,6 +281,13 @@
     </div>
     <div class="events" id="events"></div>
     <p class="evnone" id="evNone" hidden></p>
+
+    <div class="evhead sesshead"><h2 data-i18n="hi.sessions">Sessions</h2><span class="note" id="sessNote"></span></div>
+    <div class="sesswrap"><table class="sesstab" id="sessTable" hidden><thead><tr>
+      <th data-i18n="hi.sessColKind">Session</th><th data-i18n="hi.sessColStart">Started</th><th data-i18n="hi.sessColDur">Duration</th><th data-i18n="hi.sessColLoot">Loot</th>
+      <th data-i18n="hi.sessColMarket">Market</th><th data-i18n="hi.sessColTotal">Total</th><th data-i18n="hi.sessColPerHour">Loot/h</th><th data-i18n="hi.sessColState">State</th>
+    </tr></thead><tbody id="sessRows"></tbody></table></div>
+    <p class="evnone" id="sessNone" data-i18n="hi.sessListEmpty" hidden>No sessions yet. Start a farm session with the button above the chart.</p>
   </main>
 </div>
 

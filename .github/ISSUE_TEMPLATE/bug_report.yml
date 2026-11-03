@@ -1,0 +1,88 @@
+name: Bug report
+description: Something does not work as the documentation says.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Never paste your POESESSID, your account name, or lines from `Client.txt` that contain character or player names.** Read every log below before you paste it and replace such values with `<removed>`. The self-test and the journal can also show your server's address; replace it if you do not want it public.
+
+  - type: input
+    id: server-version
+    attributes:
+      label: Server version
+      description: Settings page, block "Releases", the line "Installed".
+      placeholder: "0.2.1"
+    validations:
+      required: true
+
+  - type: input
+    id: daemon-version
+    attributes:
+      label: Daemon version
+      description: Settings page, block "Releases", the line "Your hotkey daemon". Write "no daemon" if you do not use it.
+    validations:
+      required: true
+
+  - type: input
+    id: league
+    attributes:
+      label: League
+      placeholder: "Standard"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: client-language
+    attributes:
+      label: Game client language
+      options:
+        - English
+        - German
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+    validations:
+      required: true
+
+  - type: textarea
+    id: seen
+    attributes:
+      label: What did you see instead?
+      description: If it is about one item, include the item text (copied in the game with Ctrl+Alt+C).
+    validations:
+      required: true
+
+  - type: textarea
+    id: selftest
+    attributes:
+      label: Output of ./daemon/selftest.sh
+      description: Run it in the daemon's clone on the game PC. Leave empty if the problem is not on the daemon side.
+      render: text
+
+  - type: textarea
+    id: journal
+    attributes:
+      label: Daemon journal
+      description: "The last lines of the daemon's log: `journalctl --user -u poe-price-daemon -n 50`"
+      render: text
+
+  - type: textarea
+    id: container-log
+    attributes:
+      label: Server log
+      description: "The lines around the problem, from the server's clone: `docker compose logs --tail 100 poe-price-tool`"
+      render: text
+
+  - type: checkboxes
+    id: no-secrets
+    attributes:
+      label: Before you submit
+      options:
+        - label: Nothing above contains a POESESSID, an account name or Client.txt lines with names.
+          required: true

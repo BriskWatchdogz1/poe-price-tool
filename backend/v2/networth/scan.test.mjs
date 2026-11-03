@@ -7,14 +7,17 @@ import { join } from 'node:path'
 import { createNetworthStore } from './store.mjs'
 import { aggregate } from './aggregate.mjs'
 import { scanTabs } from './scan.mjs'
+import { round1 } from '../ninja.mjs'
 
 // Raw "GGG" item: { kind, name, stack, c }. c==null -> unpriced.
 const item = (kind, name, c, stack = 1) => ({ kind, name, stack, c })
 const normalize = ggg => ({ kind: ggg.kind, name: ggg.name, stack: ggg.stack ?? 1, _c: ggg.c })
+// Rounds like the real one (valuator.mjs value()): chaosEach and chaosTotal to
+// 0.1 c for display, `each` unrounded.
 const valuator = {
   async value (desc) {
     if (desc._c == null) return null
-    return { chaosEach: desc._c, chaosTotal: desc._c * desc.stack, source: 'mock' }
+    return { chaosEach: round1(desc._c), chaosTotal: round1(desc._c * desc.stack), each: desc._c, source: 'mock' }
   }
 }
 
@@ -169,5 +172,41 @@ test('a scanned tab stores unpriced entries and unpriced PIECES as two numbers t
   assert.equal(snap.counts.unpricedPieces, 8)
   assert.equal(snap.tabs[0].unpricedPieces, 8)
   assert.equal(snap.unpriced.reduce((sum, u) => sum + u.count, 0), 8)
+  await cleanup()
+})
+
+test('a scanned tab keeps the price notes of its priced items, with their cell, and nothing else', async () => {
+  const { s, cleanup } = await freshStore()
+  const noted = (kind, name, c, note, x, y, stack = 1) => ({ ...item(kind, name, c, stack), note, x, y })
+  const client = mockClient({
+    tabs: [{ index: 0, name: 'Sale', type: 'PremiumStash' }],
+    contents: {
+      0: [
+        noted('unique', 'Headhunter', 900, '~price 5 chaos', 3, 7),
+        noted('stackable', 'Chaos Shard', 0.05, '~b/o 1/20 chaos', 0, 0, 20), // stored unrounded, not as 0.1
+        noted('unique', 'No Price', null, '~price 5 chaos', 1, 1), // unpriced: nothing to compare
+        noted('unique', 'Just A Note', 10, 'for my alt', 2, 2),     // not a price note
+        item('unique', 'No Note', 10)
+      ]
+    }
+  })
+  await scanTabs(base(client, s))
+  const tab = s.getTab('player1', 0)
+  assert.deepEqual(tab.listed, [
+    { name: 'Headhunter', kind: 'unique', qty: 1, x: 3, y: 7, note: '~price 5 chaos', fromTab: false, chaosEach: 900, uncertain: null },
+    { name: 'Chaos Shard', kind: 'stackable', qty: 20, x: 0, y: 0, note: '~b/o 1/20 chaos', fromTab: false, chaosEach: 0.05, uncertain: null }
+  ])
+  await cleanup()
+})
+
+test('a scanned tab keeps its stash tab type, so a whisper can tell a quad tab', async () => {
+  const { s, cleanup } = await freshStore()
+  const client = mockClient({
+    tabs: [{ index: 0, name: 'Quad', type: 'QuadStash' }, { index: 1, name: 'Plain' }],
+    contents: { 0: [item('unique', 'Headhunter', 900)], 1: [item('unique', 'Kaom', 5)] }
+  })
+  await scanTabs(base(client, s))
+  assert.equal(s.getTab('player1', 0).type, 'QuadStash')
+  assert.equal(s.getTab('player1', 1).type, null, 'a tab list without a type stores null, not a guess')
   await cleanup()
 })

@@ -9,7 +9,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
-import { diffLines, namespaceCounts, entryKeys, regenerateIndices } from './apt-data-update.mjs'
+import { diffLines, namespaceCounts, entryKeys, regenerateIndices, updateAptData, UPSTREAM_BASE, FILES } from './apt-data-update.mjs'
+import { AGENT_BASE } from './version.mjs'
 import { loadItemsIndex, normalizeItem } from './networth/normalize.mjs'
 import { createValuator } from './networth/valuator.mjs'
 
@@ -180,4 +181,25 @@ test('net worth: the links tiebreak picks the right one of the three ninja lines
   // Unlinked: must NOT inherit the 6L price — the base line without `links` wins.
   assert.equal(await priceOf(4), 14)
   assert.equal(await priceOf(0), 14)
+})
+
+// --- the download itself (fetch injected, no network) -----------------------
+
+test('every download of the CLI names the tool, its version and its purpose', async t => {
+  // The double answers with the vendored files themselves, so the dry run finds
+  // nothing to report and nothing is written either way.
+  const DATA = new URL('../../renderer/public/data/en/', import.meta.url)
+  const seen = []
+  const fetchImpl = async (url, opts = {}) => {
+    seen.push({ url, headers: opts.headers || {} })
+    const body = await readFile(new URL(url.slice(UPSTREAM_BASE.length + 1), DATA), 'utf8')
+    return { ok: true, status: 200, statusText: 'OK', text: async () => body }
+  }
+  // Any request that misses the injected double fails instead of going out.
+  t.mock.method(globalThis, 'fetch', async url => { throw new Error(`no network in this test: ${url}`) })
+  t.mock.method(console, 'log', () => {})
+  t.mock.method(console, 'warn', () => {})
+  await updateAptData({ dryRun: true, fetchImpl })
+  assert.deepEqual(seen.map(s => s.url), FILES.map(f => `${UPSTREAM_BASE}/${f}`))
+  for (const s of seen) assert.equal(s.headers['User-Agent'], `${AGENT_BASE} (APT data update, personal LAN tool)`)
 })

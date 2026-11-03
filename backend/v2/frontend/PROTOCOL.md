@@ -4,14 +4,11 @@ The frontend opens a single WebSocket to `/events` (same origin, `ws://` or
 `wss://` matching the page). All traffic is JSON, one object per frame.
 
 **Every message carries a `type` discriminator** (the single channel needs it);
-the remaining fields are exactly as specified below. There are **19 distinct
-`type` values**: 16 that the backend (`server.mjs`) sends to the frontend and 4
+the remaining fields are exactly as specified below. There are **24 distinct
+`type` values**: 21 that the backend (`server.mjs`) sends to the frontend and 4
 that the frontend sends back — `networth-history` is the one name used in both
-directions (the request and its answer share it). Every type added since the
-original six is additive, so unknown types are ignored by older clients.
-
-Unknown `type` values are ignored by the frontend, so the protocol can be
-extended without breaking older clients.
+directions (the request and its answer share it). Unknown `type` values are
+ignored by the frontend, so a new type does not break an older client.
 
 ---
 
@@ -24,9 +21,8 @@ used **only for routing** (LAN, trusted).
 
 - **Browser identity** — cookie `ppt_user=<user>`. Sent same-origin on the WS
   handshake; the server reads it from `req.headers.cookie`. A valid user (in
-  `POE_USERS`) joins that room. Missing/unknown cookie → the server sends
-  `need-identity` and does **not** join a room (the frontend then shows a picker
-  and reconnects once the cookie is set). `GET /users` →
+  `POE_USERS`) joins that room; a missing/unknown cookie gets `need-identity`
+  (below) and no room. `GET /users` →
   `{ "users": [...], "appName": "Trade Console", "langs": { "player1": "en" } }`
   offers the list for that picker; `appName` is the display name (`POE_APP_NAME`)
   and `langs` maps each user to the client language their items are parsed in.
@@ -36,14 +32,20 @@ used **only for routing** (LAN, trusted).
   **present but names an unknown user** (typo in the daemon's `PPT_USER`) is
   **rejected** with `400 {"error":"unknown user \"…\"","users":[…]}` and logged
   server-side — it is *not* silently routed to `POE_USERS[0]` (which would pollute
-  the first user's room and hide the typo). The daemon POSTs fire-and-forget, so
-  the 4xx surfaces the misconfiguration without breaking it.
+  the first user's room and hide the typo). The daemon does not retry; it writes
+  the status and the answer into its journal (one line per cause, repeats
+  throttled), so the 4xx surfaces the misconfiguration on the player's machine.
+  The daemon's own channel (`/daemon/*`, HTTP, see `GET /daemon/events`)
+  requires `X-User` and `X-PPT-Daemon`; there is no `POE_USERS[0]` fallback
+  there. Its feed carries only cards a daemon posted itself into that user's
+  room.
 
-**Message routing:** `queue-status` is **global** — the queue is shared, so
-every client of every room sees the same depth / rate-limits. **Everything else**
+**Message routing:** `queue-status`, `rate-limit` and `source-status` are
+**global** — the queue and the price sources are shared, so every client of every
+room sees the same depth, ban and source ages. **Everything else**
 (`league-state`, `cd-ratio`, `reference`, `item-added`, `price-result`,
 `ninja-ref`, `networth-latest`, `networth-result`, `networth-history`,
-`networth-sync-status`) is **per-room** — a client only ever receives messages
+`networth-sync-status`, `networth-session`, `daemon-status`, `whisper`, `whispers`) is **per-room** — a client only ever receives messages
 for its own user. `set-league` changes only the sending user's league. poe.ninja
 caches are keyed by league, so two users on the same league share them.
 
@@ -54,7 +56,7 @@ caches are keyed by league, so two users on the same league share them.
 Sent right after a WS connect when the `ppt_user` cookie is missing or unknown.
 The connection is **not** placed in a room and receives no further messages until
 the client reconnects with a valid cookie. The frontend responds by showing the
-identity picker (buttons from `users`).
+identity picker (buttons from `users`) and reconnects once the cookie is set.
 
 ---
 
@@ -119,11 +121,9 @@ that `mods[].selected` already describes, so nothing is echoed for it.
 top of them, and only when a card is rendered from scratch (first appearance or
 the reconnect replay). A re-send onto a card that is already on screen still
 touches nothing but the price/status block, so in-progress mod edits survive.
-Without this field a reload re-rendered the picker at the defaults while the
-price block kept the user's own, differently-filtered result — a listing count
-next to a selection that never produced it. The reload applies the selection
-only; it never re-runs the search (that would spend trade-API budget on a page
-refresh).
+Applied on a reload, it keeps the picker in line with the result its price
+block shows. The reload applies the selection only; it never re-runs the
+search (that would spend trade-API budget on a page refresh).
 
 ### `item-removed` — server dropped a card (backend → frontend)
 ```json
@@ -133,8 +133,8 @@ Sent when the backend evicts a card on its own — currently only when a room hi
 its server-side item cap (`POE_MAX_ITEMS_PER_ROOM`, default 50) and the oldest
 card is pushed out to make room for a new one. The frontend removes that card
 (same fade-out as a user dismiss) **without** echoing a `dismiss` back (the server
-has already forgotten it). Additive: older clients ignore the unknown type and
-keep showing the stale card until they reconnect.
+has already forgotten it). A client that does not know the type keeps showing
+the stale card until it reconnects.
 
 ### `price-result` — prices for one item
 ```json
@@ -232,11 +232,10 @@ which side is right — both real numbers are already on the card.
 }
 ```
 `depth` counts the foreground jobs waiting in the shared queue (`priority` and `auto`
-tiers); `bgDepth` counts the waiting `background` jobs. There is no queue panel and no
-per-policy dots any more: the frontend reads only `rateLimits`, and as soon as the
-worst `used / limit` reaches 85 % it shows a soft warning in the rate-limit banner
-("Trade API rate limit almost exhausted"). A hard ban (`rate-limit` below) wins over
-that warning.
+tiers); `bgDepth` counts the waiting `background` jobs. The frontend shows no queue
+panel and reads only `rateLimits`: as soon as the worst `used / limit` reaches 85 % it
+shows a soft warning in the rate-limit banner ("Trade API rate limit almost
+exhausted"). A hard ban (`rate-limit` below) wins over that warning.
 
 ### `rate-limit` — shared trade-queue ban banner (backend → frontend)
 ```json
@@ -251,7 +250,7 @@ a live "Retry in ~Xh Ym" countdown. Only Retry-Afters **≥ `POE_RATE_LIMIT_BANN
 (default 60 s) banner — routine multi-second serial-queue backpressure does not. Cleared
 with `{ "type": "rate-limit", "active": false }` when a search gets through again; the
 banner also self-hides once `until` elapses. Sent on **connect** (active or inactive
-snapshot). Additive — older clients ignore the unknown type. The affected card's
+snapshot). The affected card's
 `item-added` also carries `priceStatus: "rate-limited"` (+ `retryAfterSec`) instead of a
 silent `queued`.
 
@@ -264,7 +263,27 @@ silent `queued`.
 the 7-day C:D trend (poe.ninja) and drives the left-rail spark. The real ratio comes
 from poe.ninja's **currency EXCHANGE** (Faustus) endpoint (`exchange/current/overview`,
 `lines[]` with `id:"divine"` → `primaryValue`), not the player-trade stash overview.
-Falls back to `POE_CD_RATIO` (215) when poe.ninja is unreachable.
+Falls back to `POE_CD_RATIO` (215) when poe.ninja has never answered; a value that
+came from poe.ninja once stays in place during an outage and ages visibly.
+
+A value from poe.ninja carries three optional fields; the fallback carries none
+of them:
+
+```json
+{ "type": "cd-ratio", "chaosPerDivine": 1265, "trendHint": "live · poe.ninja",
+  "sparkline": [...], "asOf": 1793600000000, "now": 1793606400000, "staleAfterMs": 10800000 }
+```
+
+- `asOf` — epoch ms of the poe.ninja answer the ratio comes from (not of the
+  last attempt: during an outage the server keeps the last good answer, up to
+  `POE_NINJA_MAX_AGE_MS`).
+- `now` — server clock at send time; the page ages `asOf` against it.
+- `staleAfterMs` — the threshold of the `ninja-cd` source (see `source-status`).
+  When `POE_SOURCE_STALE_MS` is changed in the admin area, every room whose C:D
+  carries an `asOf` gets the message again with the new threshold.
+  Past it the page shows `stale · poe.ninja · 5 h` instead of `trendHint`, in
+  amber instead of green. `trendHint` itself keeps its values `live · poe.ninja`
+  / `fallback`, so a client that reads no `asOf` still shows them.
 
 ### `ninja-ref` — poe.ninja reference price for a card (F3, optional)
 ```json
@@ -333,9 +352,17 @@ Feeds the left rail's three reference sections. Each row renders **name** (left)
   `sell` object — `src` describes the DISPLAYED number, which for Mirror is
   poe.ninja's; `sell` is separate provenance with its own timestamp
   (`sell.updatedAt`) and does not change what `src` reports.
-- **refreshedAt** — epoch ms of the poe.ninja fetch behind this message, baked
-  in server-side so a cache hit keeps the real time instead of "now". It stamps
-  the `src: "ninja"` rows only.
+- **refreshedAt** — epoch ms of the poe.ninja ANSWER behind this message (the
+  fetcher's `fetchedAt`), not of the rebuild: during a poe.ninja outage the
+  server serves its last good answer, and the stamp keeps that answer's time.
+  Baked in server-side so a cache hit keeps the real time instead of "now". It
+  stamps the `src: "ninja"` rows only. The same answer is also not written into
+  the rail history twice (`reference-history.mjs`, `ob`), counted per feed:
+  an old exchange answer adds no Mirror point, an old item overview no beast
+  point, and the Faustus rows keep getting theirs. They in turn get a point
+  only when the Faustus store was refreshed since their last one
+  (`sell.updatedAt`), so a Faustus outage freezes their sparklines and not the
+  poe.ninja rows'.
 - **sell** (optional, currency + lifeforce rows only) — informational
   provenance for the row's sell-side comparison: which currency pays a
   SELLER of this item more right now. The client does not render this object
@@ -362,9 +389,9 @@ Feeds the left rail's three reference sections. Each row renders **name** (left)
   - `only` — exactly one side is attested (the other is too thin or missing):
     that side is named, WITHOUT a percentage, and no comparison is claimed.
   - Field absent — no attested side, Faustus store stale/foreign-league, or
-    Faustus disabled. Mirror then renders exactly as before (its number is
-    poe.ninja's); the lifeforce/Sulphur rows lose their number too (`"—"`), because
-    for them the `sell` object IS the number.
+    Faustus disabled. Mirror still shows its number (poe.ninja's); the
+    lifeforce/Sulphur rows show `"—"`, because for them the `sell` object IS the
+    number.
   Beast rows never carry `sell` (no exchange market exists for them).
 
 Field/derivation notes:
@@ -385,8 +412,8 @@ Field/derivation notes:
   No attested side (stale/foreign-league/disabled Faustus, or both markets too thin) →
   `display` is `"—"`, no `sell` field, `sparkline` `[]`. The row claims nothing; it never
   falls back to poe.ninja's market value, because the section is headed "Selling".
-  These rows key their history under `s:<faustus name>`; the pre-sell-side `j:` points
-  (poe.ninja market middles) are deliberately NOT reused and simply age out.
+  These rows key their history under `s:<faustus name>`, a key of their own, so no
+  `j:` point (a poe.ninja market middle) is ever spliced onto their Faustus series.
 - **beasts** — from `stash/current/item/overview?type=Beast` (value in
   `chaosValue`/`divineValue`). Filtered `count ≥ 15` (poe.ninja's number of data
   points, not `listingCount`, which does not separate confidence): poe.ninja floors
@@ -399,20 +426,34 @@ Sent on **connect** (cached snapshot to the fresh client), on the **≥15 min po
 (broadcast), and after a **`set-league`** switch (re-fetched + broadcast). Best-effort:
 poe.ninja errors never throw; a missing section falls back to `[]`.
 
+### The page status line — one slot, several messages
+
+The **page status line** is the one-line slot every page reserves directly under
+its heading (`#appStatus`); it stays collapsed while no sender has anything to
+say. `Shell.setStatus(text, key)` keeps one message per key (`sync` for
+`networth-sync-status`, `sources` and `blind` for `source-status`, `session` for
+`networth-session`, `daemon` for `daemon-status` on the Price Check page, `data`
+for `data-status`, `release` for `release-status`), renders them in the fixed
+order `blind`, `sync`, `sources`, `session`, `daemon`, `data`, `release`
+(`STATUS_ORDER` in `shell.js`) and collapses the slot only when the last one is
+gone. `blind` appears when no enabled price source is fresh and at least one is
+stale (the exact rule is under `source-status` below), or when at least two
+parts are out at once (prices, a trade ban, an expired POESESSID); a single ban
+or a single expired cookie already has its own display.
+
 ### `networth-sync-status` — background-sync state for the page status line
 ```json
 { "type": "networth-sync-status", "state": "expired", "until": 1792948400000 }
 ```
-The **page status line** is the one-line slot every page reserves directly under
-its heading (`#appStatus`); it stays collapsed while no sender has anything to
-say.
-
 Per-room. Sent on **connect** and whenever the net-worth refresher's state for
 this user changes (auth pause entered/lifted, 429 cooldown entered, trade-API
-ban gate raised or lifted) or the user's credentials are saved through the
-settings dialog. `state` is one of:
+ban gate raised or lifted, the user starting or stopping to yield or rest —
+see `pace` below) or the user's credentials are saved through the settings
+dialog, and to every user when a daemon's presence changes
+(`POST /daemon/heartbeat`). `state` is one of:
 
-- `ok` — background sync is running (the status line stays empty),
+- `ok` — background sync is running (the status line stays empty, unless a
+  `pace` or a `sessionRound` below is there to say),
 - `expired` — the stored POESESSID failed auth; the refresher paused this user
   until a new cookie is saved,
 - `cooldown` — syncing is on hold; `until` (epoch ms, only present here) is when
@@ -431,10 +472,27 @@ settings dialog. `state` is one of:
     own end time, absent only if the gate could not name one.
 - `missing` — no credentials are configured for this user.
 
-Three further fields describe what the refresher is *doing*, because `state` alone
-cannot: `ok` used to mean both "walking the stash tab by tab" and "one step has
-been stuck for ten minutes" (see `docs/bugs.md`, B5). All of them are
-**optional** and only present when there is something to report:
+- `pace` (optional) — present only for a user whose daemon reports the game not
+  running (`POST /daemon/heartbeat`): `{ "mode": "yields" | "rests", "everyMs": 300000 }`.
+  `yields`: other players are playing (or have no such daemon) and get the
+  ticks; this user's tabs are read on every `POE_NETWORTH_IDLE_EVERY`-th tick,
+  shared among the users who yield, so `everyMs` is about, not exact. `rests`:
+  no game runs anywhere; one tab per `everyMs`. `everyMs` `0`
+  (`POE_NETWORTH_IDLE_REST=1`), in either mode: this user's tabs are not read
+  while their game is not running. Sent only while the background sync runs, and
+  shown only with `state` `ok`. The mode is taken from the presence answers at
+  the time the status is made; a change of who yields, also within one mode,
+  sends a new status to the users it concerns. Absent means the normal
+  round-robin, which is also what a missing or stale heartbeat, an older daemon
+  and the time right after a server start fall back to. A player whose game
+  just stopped keeps the normal pace (no `pace`) until each of their tabs was
+  read once since then, at most `POE_SYNC_AFTER_GAME_MAX_MS`. The total pace
+  never rises because of it.
+
+Three further fields describe what the refresher is *doing*, because `state` `ok`
+alone cannot tell "walking the stash tab by tab" from "one step has been stuck for
+ten minutes" (see `docs/bugs.md`, B5). All of them are **optional** and only
+present when there is something to report:
 
 ```json
 {
@@ -467,6 +525,30 @@ been stuck for ten minutes" (see `docs/bugs.md`, B5). All of them are
 All three are a snapshot of the moment the message is sent. Nothing pushes a new
 one while a step is running, so a page that has been open through a stall sees
 it on its next connect, not live.
+
+- **`sessionRound`** (optional) — `{ "done": 12, "total": 40, "since": 1793604080000 }`:
+  a farm or game session of this user started or ended at `since`, and the
+  refresher is reading every live tab of this user once from then on before it
+  reads one twice (the session's baseline or final balance waits for that read;
+  `networth-session` below). `done` of `total` tabs are read. It orders only
+  this user's own ticks: no extra tick, no shorter interval, the idle rules
+  unchanged, and a tab-list refresh waits until the round is complete. Sent
+  after each step of this user while the round runs and once when it ends;
+  absent when there is no round or no tab list yet. Every page says it on
+  its sync line while `state` is `ok`, after a pace sentence when there is one
+  (`networth-sync.js` `syncLineText` on Net Worth and Settings; which page
+  draws what is in the paragraph below).
+
+Which page draws which `networth-sync-status` state: the Net Worth and Settings
+pages write the `sync` key themselves with their own, richer line (cooldown times,
+`mine`, `tradeBan`, `pace`, `sessionRound`) and pass only the state to the shell
+(`Shell.noteSyncState`, for the `blind` rule). The History and Price Check pages
+use the shell's line and show `networth-sync-status` **only for `state:
+"expired"`** ("Background sync is paused: the stored POESESSID has expired. Renew
+it on the settings page.") and for a `pace` or a `sessionRound` with `state:
+"ok"` ("Sync yields: your game is not running — about one tab every 5 min.",
+"Reading every tab once for the session (12 of 40)."); every other state clears
+the key there, because cooldowns lift by themselves and `missing` is not a pause.
 
 The stored POESESSID value itself **never** appears in this message (nor in any
 other message or HTTP response) — not masked, not truncated, not as a length.
@@ -506,11 +588,23 @@ not raw stash data:
                     "chaosEach": 215, "chaosTotal": 9030, "tabs": ["Currency"] } ],
   "items":      [ { "name": "Divine Orb", "kind": "currency", "tab": "Currency",
                     "tabIndex": 3, "qty": 42, "chaosEach": 215, "chaosTotal": 9030,
-                    "source": "faustus" } ],
+                    "source": "faustus", "uncertain": null },
+                  { "name": "Imperial Legacy", "kind": "divcard", "tab": "Cards",
+                    "tabIndex": 4, "qty": 14, "chaosEach": 4.6, "chaosTotal": 64.4,
+                    "source": "exchange:DivinationCard", "uncertain": "thin-market" } ],
   "unpriced":   [ { "name": "Some Corpse", "kind": "corpse", "count": 2,
                     "tabIndex": 3 } ],
   "counts":     { "priced": 812, "unpriced": 40, "unpricedPieces": 44,
-                  "skipped": 1907 }
+                  "skipped": 1907 },
+  "belowMarket": { "rows": [ { "name": "Headhunter", "kind": "unique",
+                    "tab": "Sale", "tabIndex": 5, "left": 3, "top": 5, "qty": 1,
+                    "note": "~price 100 chaos", "fromTab": false,
+                    "amount": 100, "unit": "chaos",
+                    "listedChaosEach": 100, "marketChaosEach": 900,
+                    "listedChaos": 100, "marketChaos": 900, "lossChaos": 800,
+                    "ratio": 0.11, "pct": 89 } ],
+                   "more": 0,
+                   "notCompared": { "rate-unknown": 1 } }
 }
 ```
 
@@ -518,6 +612,41 @@ not raw stash data:
 `ninja:currency`, `item:<type>`, `corpse:trade`, `chaos`, …); `null` for a row stored
 before the field existed. The values are listed in `docs/pricing-logic.md`
 ("Which feed priced an item").
+
+`items[].uncertain` says whether the tool doubts its own number: `null` when
+nothing about the price is known to be guessed, otherwise one reason code —
+`thin-market`, `gem-guessed`, `variant-guessed`, `links-guessed`,
+`few-listings` (meanings in `docs/pricing-logic.md`, "Uncertain prices"; the
+list is `UNCERTAIN` in `networth/valuator.mjs`). A row folded from several stash
+entries is uncertain when any of them is. Rows stored before the field existed
+read `null`; one refresher lap re-values every tab. The field changes no number:
+`chaosEach`, `chaosTotal`, `totalChaos`, `totalDivine`, `categories` and
+`tabs[].chaos` count an uncertain row exactly like any other. The page sums the
+uncertain rows of the selected tabs itself; no total of them travels. A code the
+page does not know is shown raw rather than hidden.
+
+`belowMarket` is the "Listed below market" block (`networth/listing-audit.mjs`):
+one row per stash entry in a premium tab (never a `NormalStash`) whose price
+note — the item's own `note`, or the name of its tab when that is a price note
+(`fromTab: true`) — is under the unrounded market value
+by the buyer-whisper verdict's rule, `POE_WHISPER_LOW_RATIO` included (see
+`POST /daemon/whisper` below). `left` / `top` are the trade site's 1-based cell,
+as a whisper names them (`null` when the stash answer had none). `amount` /
+`unit` are the note as read; `listedChaos*` the note in chaos (divine at the
+current Chaos:Divine rate), `marketChaos*` the stored market value, both per
+unit (`*Each`) and for `qty` pieces, a note on a stack read as a price per unit;
+`lossChaos` = market minus listed for the stack; `ratio` / `pct` as on a
+whisper. Rows descend by `lossChaos`, at most 100 of them (`BELOW_MAX`);
+`more` is the number of further rows below the market that were left out.
+`notCompared` counts the notes that got no comparison by reason, only reasons
+that occurred: `rate-unknown` (a divine note while the rate is the fallback or
+stale), `uncertain-price` (the market price carries an `uncertain` marker),
+`unknown-currency` (neither chaos nor divine). An item without a market value
+is not kept with its note, so it is neither a row nor counted. The block
+covers every stored tab regardless of the
+page's tab selection; a tab stored before notes were kept adds nothing until
+the refresher reads it again. A snapshot from an older backend has no
+`belowMarket`; the page then shows no block.
 
 `tabs` is in in-game order (by `index`), `topItems` / `items` descend by
 `chaosTotal` (`topItems` capped, `items` complete). `counts` are the original
@@ -552,18 +681,14 @@ it *does* show, so it can never disagree with the list under it.
 **That cap is a display limit, and it stops at the wire.** The net-worth history
 recorder needs *every* unpriced name — a name in that set is proof the item is
 still in the stash, which is how a lost price is told apart from an item leaving
-(`docs/bugs.md` B2) — and a name the cap ranks out was invisible to it. The
-recorder runs in the server and now folds the per-tab store directly
-(`aggregate.mjs`, `unpricedStock`), so **no uncapped list was added to this
-message**: `unpriced` is the same 100-name display list it has always been, and
-snapshots stay the size they were.
+(`docs/bugs.md` B2). It runs in the server and folds the per-tab store directly
+(`aggregate.mjs`, `unpricedStock`), so **no uncapped list travels in this
+message**: `unpriced` is the 100-name display list.
 
-`tabs[].skipped` is there for one question the page could not answer at all
-before: a tab reading `chaos: 0, items: 0` means either that **nothing arrived**
-from GGG or that everything arrived and the classifier dropped it (rare/magic
-gear, non-unique maps). Those two look identical without this number — which is
-why the empty map stash (`docs/bugs.md`, B7) could not be judged from the
-screen. The classification itself is unchanged; only the count now travels.
+`tabs[].skipped` answers one question: a tab reading `chaos: 0, items: 0` means
+either that **nothing arrived** from GGG or that everything arrived and the
+classifier dropped it (rare/magic gear, non-unique maps); only this number tells
+the two apart (`docs/bugs.md`, B7).
 
 ### `networth-result` — a refreshed snapshot after a tab sync
 ```json
@@ -582,10 +707,8 @@ plain "something changed" signal and re-fetches its series over HTTP
 (`/networth-trend`, `/networth-events`), because the full series is far too
 large to ride along on every 30s broadcast.
 
-The frontend also tolerates `partial: true` plus an `error` string on this
-message (render what is there, show the error above it) — a leftover from the
-retired manual full-scan path, which could abort halfway. Nothing sends it
-today.
+The frontend tolerates `partial: true` plus an `error` string on this message
+(render what is there, show the error above it); the server never sends either.
 
 ### `networth-history` — the coarse total-over-time list (both directions)
 ```json
@@ -604,11 +727,10 @@ Backend → frontend, per-room, sent only as the answer to the request above.
 `history` array that `networth-store.json` keeps alongside the tabs — a short
 "recent totals" list for the Net Worth page, nothing more.
 
-**In practice `items` is empty today.** Nothing on the server writes that array
-any more (`store.appendHistory()` has no caller outside its own test), so it
-only ever holds leftovers from an older store file. An empty list simply keeps
-the page's recent-totals section hidden, which is why the message is still
-exchanged: the real series moved elsewhere.
+**In practice `items` is empty.** Nothing on the server writes that array
+(`store.appendHistory()` has no caller outside its own test), so it holds only
+what an older store file left in it. An empty list keeps the page's
+recent-totals section hidden.
 
 That real series is **not** this message. It lives in
 `networth-history.ndjson`, is far denser (a point per minute, 15 days of
@@ -637,6 +759,47 @@ value must not be able to change afterwards. The History page therefore plots
 divine (`chaos / cd`, per point) rather than chaos, and falls back to chaos only
 for a window in which not one point carries a rate.
 
+### `networth-session` — the running farm and game sessions (page status line, History page)
+```json
+{ "type": "networth-session", "now": 1793608400000,
+  "running": { "id": "s-1793604080000", "kind": "farm", "parent": "g-1793600000000", "state": "running", "baseline": "read",
+               "startedAt": 1793604080000, "loot": 731.2, "lootDiv": 3.4, "asOf": 1793608380000, "stashChanged": false },
+  "game": { "id": "g-1793600000000", "kind": "game", "parent": null, "state": "running", "baseline": "read",
+            "startedAt": 1793600000000, "loot": 902.5, "lootDiv": 4.2, "asOf": 1793608380000, "stashChanged": false },
+  "pending": 0 }
+```
+Per-room. Sent on **connect**, after a session is started, ended or discarded
+(`POST /networth-session/start|end|discard`, `POST /daemon/session`, the game
+detection), when a session's baseline is set, after every recorded history
+point while this user has a session that is running or waiting for
+confirmation, and when the stash a session is measured on changes (a changed
+tab set, a league switch). `running` is the running **farm** session and
+`game` the running **game** session (`networth/sessions.mjs`), each `null`
+when none runs. `kind` is `farm` or `game`; `parent` is the id of the game
+session a farm session was started in, else `null`. `state` is `starting`
+(the baseline is not read yet: no figures) or `running`; `baseline` is `read`
+(the first point after every tab was read once after the start), `at-press`
+(the newest point at the start, see `GET /networth-sessions`) or `null` while
+starting. `loot` is
+the stock change since the baseline valued at the baseline's prices, in chaos;
+`lootDiv` is the same at the baseline's C:D rate, or `null` when it had no
+rate. `asOf` is the history point the figures are taken from; `loot`, `lootDiv`
+and `asOf` are `null` while there is no baseline or no point to measure
+against.
+`stashChanged` is true once a tab came, went or was read for the first time
+during the session, or the league changed: the whole content of such a tab
+counts as a change, so `loot` is then no farming result. `pending` counts ended
+sessions whose balance is still preliminary. Facts only: the page ages the
+duration itself against the server clock (`now` plus the time since arrival)
+and redraws once a minute. The status line shows one running session, the
+farm session when one runs, else the game session
+(`Farm session 1:12 h · loot +3.4 div`, `Game session 3:05 h · loot +4.2 div`,
+chaos when there is no rate;
+with `stashChanged` `Farm session 0:40 h · stash tabs changed, no loot figure`;
+while `starting` `Farm session 0:02 h · baseline with the next full read`),
+under the key `session`; a message without `kind` (an older server) reads as a
+farm session. The History page also reloads `GET /networth-sessions` on it.
+
 ### `league-state` — the active league
 ```json
 { "type": "league-state", "active": "Standard", "lang": "en" }
@@ -646,13 +809,16 @@ frontend syncs its league dropdown to `active`.
 
 `lang` is the client language of this user. It rides on the **opening** message
 (the one sent right after the room assignment) and again on every **language
-change** made through `POST /user-lang` — a `set-league` broadcast leaves it out,
-because the league changed and the language did not. A page that has no WS
+change**: one made through `POST /user-lang`, and a parked choice coming back
+when its parser goes live after a data update — a `set-league` broadcast leaves
+it out, because the league changed and the language did not. A page that has no WS
 connection yet finds the same mapping in the `langs` object of `GET /users`.
 
 The language is per user and changeable at runtime: it comes from
 `/config/user-langs.json` if the user has ever chosen one, otherwise from
-`POE_USER_LANGS` (see `docs/admin.md`). A page that receives a `league-state`
+`POE_USER_LANGS` (see `docs/admin.md`). A stored choice whose parser is not
+loaded is parked: the user is on his `POE_USER_LANGS`/`POE_LANG_DEFAULT` value
+until that parser is live. A page that receives a `league-state`
 with a `lang` different from the one it is rendering in should re-read its
 string table — the switch is meant to be visible without a reload.
 
@@ -697,19 +863,6 @@ filtered and capped exactly like `reason`, it is shown whatever `lastOutcome`
 says and whatever the age is, and it carries **no** advice: it has no class, and
 inventing a remedy for it would be the same mistake in a new place.
 
-The status slot is **shared**: `Shell.setStatus(text, key)` keeps one message
-per key (`sync` for `networth-sync-status`, `data` for this one, `release` for
-`release-status`), renders them in the fixed order `sync`, `data`, `release` and
-collapses the slot only when the last one is gone.
-
-Which page draws which `networth-sync-status` state: the Net Worth and Settings
-pages write the `sync` key themselves with their own, richer line (cooldown times,
-`mine`, `tradeBan`). The History and Price Check pages use the shared line and show
-`networth-sync-status` **only for `state: "expired"`** ("Background sync is paused:
-the stored POESESSID has expired. Renew it on the settings page."); every other state
-clears the key there, because cooldowns lift by themselves and `missing` is not a
-pause.
-
 ### `release-status` — is a newer release of this tool out (page status line, settings page)
 ```json
 { "type": "release-status", "enabled": true, "installed": "0.1.0", "repo": "owner/name",
@@ -732,6 +885,115 @@ only — the page decides what to show.
 - `latest` — the latest release as last read, or `null`: `version` (without a `v`), `tag`, `url` (`null` if GitHub sent none), `publishedAt`, `name`.
 - `comparison` — `newer` (latest is above installed) | `current` (equal or lower) | `unknown` (either side missing). Derived whenever the status is read, so a freshly updated server stops reporting `newer` at boot without waiting for the next check.
 - `cooldownMs` — how long the manual check stays shut after a run.
+
+### `source-status` — age and state of the price sources (page status line, settings page)
+```json
+{ "type": "source-status", "now": 1793606400000, "since": 1793500000000,
+  "sources": [
+    { "source": "faustus", "enabled": true, "scheduled": true, "staleAfterMs": 10800000,
+      "lastSuccessAt": 1793604000000, "lastFailureAt": null, "reason": null, "failKind": null },
+    { "source": "ninja-cd", "enabled": true, "scheduled": true, "staleAfterMs": 10800000,
+      "lastSuccessAt": 1793605500000, "lastFailureAt": null, "reason": null, "failKind": null },
+    { "source": "ninja-overview", "enabled": true, "scheduled": false, "staleAfterMs": 10800000,
+      "lastSuccessAt": 1793580000000, "lastFailureAt": 1793606000000,
+      "reason": "HTTP 503", "failKind": "unreachable" },
+    { "source": "trade", "enabled": true, "scheduled": false, "staleAfterMs": null,
+      "lastSuccessAt": 1793606300000, "lastFailureAt": null, "reason": null, "failKind": null,
+      "pausedUntil": null }
+  ] }
+```
+Global (every room gets the same). Sent on **connect**, **at once** whenever a
+source starts or stops failing, when a trade ban is set or lifted and when
+`POE_SOURCE_STALE_MS` is changed in the admin area, and otherwise bundled to at
+most one message every 10 s. It costs no request of its
+own. Facts only (`source-health.mjs`) — the page decides what is stale.
+
+- `now` — server clock at send time. `since` — server start; a source without a
+  `lastSuccessAt` is aged from here (the poe.ninja times are in memory only, the
+  Faustus time comes from its store and survives a restart).
+- `sources[]` — always the four, in this order: `faustus` (GGG Currency
+  Exchange digests), `ninja-cd` (poe.ninja's currency exchange, behind
+  Chaos:Divine and the rail), `ninja-overview` (every other poe.ninja price
+  overview: uniques, gems, beasts, the net-worth exchange map), `trade` (the
+  Trade API; foreground price searches only).
+- `enabled` — false when the source is switched off here (Faustus disabled or
+  its store not writable; trade when both the price check and the corpse pricer
+  are off). A disabled source is never stale.
+- `scheduled` — true for a source a timer refreshes (`faustus`, `ninja-cd`): it
+  may go stale by age alone. False for an on-demand source (`ninja-overview`,
+  `trade`): it is only stale when its last attempt failed.
+- `staleAfterMs` — the threshold, already raised per source:
+  `faustus` max(`POE_SOURCE_STALE_MS`, 2 × `POE_FAUSTUS_REFRESH_MS`), `ninja-cd`
+  max(`POE_SOURCE_STALE_MS`, 2 × the C:D interval), `ninja-overview`
+  `POE_SOURCE_STALE_MS`, `trade` `null` (a search has no age; its outage is
+  the ban).
+- `lastSuccessAt`, `lastFailureAt` — epoch ms or `null`. `reason` — the last
+  failure, filtered and capped like `data-status` (`check-failure.mjs`); it
+  stays after a recovery as diagnosis. `failKind` — `unreachable` | `rejected` |
+  `incompatible` | `unknown` | `null`.
+- `pausedUntil` (trade only) — the end of the current ban gate, or `null`.
+
+The page ages against the server clock (`now` plus the time since arrival) and
+re-evaluates every minute. In the form `shell.js` implements it, with
+`age = serverNow − (lastSuccessAt ?? since)` and
+`failing = lastFailureAt > lastSuccessAt` (or no success at all):
+
+- **stale** = enabled and `age ≥ staleAfterMs` and (`scheduled` or `failing`);
+- **fresh** = enabled and a `lastSuccessAt` younger than `staleAfterMs`;
+- **blind prices** = some enabled price source (`faustus`, `ninja-cd`,
+  `ninja-overview`) is stale and none is fresh. The age the `blind` line names
+  is the youngest `lastSuccessAt` among them; a source that never succeeded
+  does not count, because its age is only the time since the server start.
+  With no success at all, the line says "since the server started … ago".
+
+`sources` on the status slot names every stale price source with its age and
+reason; `blind` is described under "The page status line" above. The settings page's
+Sources block renders the same derivation as a table (`Shell.sourceView`; the
+word per row from `Shell.sourceState`: switched off, paused, stale, then
+"not asked yet" without success or failure, "no answer yet" without a success
+but with a failure, otherwise "current").
+
+### `daemon-status` — when the last item arrived from this user's hotkey daemon (Price Check empty state)
+```json
+{ "type": "daemon-status", "lastItemAt": 1793606400000, "outcome": "card", "now": 1793606460000,
+  "daemon": { "presence": "unknown", "lastBeatAt": 1793606455000, "version": "0.3.0", "game": "unknown",
+              "lastGameAt": null, "features": { "downlink": "ok", "notify": "ok", "overlay": "no-qt" }, "instances": 1 },
+  "unparsed": 0 }
+```
+Sent on **connect** and broadcast **into the user's room** after every `POST /item`
+that was attributed to that user (header `X-User`, or `POE_USERS[0]` when the
+header is missing), when a heartbeat changes `presence`, `version`,
+`features` or the number of daemons (`POST /daemon/heartbeat`), and when the
+server's check every 30 s finds that a daemon went quiet (a change of
+`presence`, or fewer daemons with a fresh beat), and after a whisper the server
+could not read (`unparsed`), never once a minute for nothing. Per-room. Every such POST counts, whoever sends it: the
+test item of `daemon/selftest.sh` (stage B) is one too, and the page's texts
+say "hotkey daemon or its self-test" for that reason.
+
+- `lastItemAt` — epoch ms (server clock) of the last such POST, or `null` when none has arrived since the server started. Held in memory only; a restart forgets it.
+- `outcome` — `card` (a card was created, or the existing one re-asserted by the dedupe) | `no-parser` (answered 503, no data set for the user's language) | `parse-failed` (answered 400, the engine refused the text; it is in the admin gap view); `null` together with `lastItemAt`.
+- `now` — server clock at send time; the page ages `lastItemAt` against it, like `data-status`.
+- `daemon` — what this user's hotkey daemon last reported about itself (`POST /daemon/heartbeat`), or `null` when no daemon new enough to send heartbeats has reported since the server started (memory only). `presence`: `playing` (a fresh beat says the game runs), `idle` (every fresh beat says it does not), `unknown` (no fresh beat, or one that cannot tell); `lastBeatAt` and `lastGameAt` are server-clock times of the newest beat and of the last one that said `running`; `version`, `game` and `features` are from the newest beat; `instances` counts the daemons with a fresh beat. Each `features` value is a short state word (`ok`, `off`, `starting`, `failing`, `unsupported`, `missing`, `unreadable`, `not-a-file`, `no-qt`, `no-display`, `no-focus-check`, `wrong-platform`, `restarting`, `failed`); a daemon new enough reports `whispers` too (`off` without `client_log`; `missing`, `unreadable` or `not-a-file` for the game's log; `unsupported` for a server without `POST /daemon/whisper`) and `game`, its game detection (`ok`; `off` with `report_game = false`; else why it cannot tell: `no-xdotool`, `no-display`, `timeout`, `error`, `never-seen` for a window class not found on its display yet); the Price Check page names in its status line the ones that are not `ok`, `off`, `starting` or `unknown`, so a failure on the player's machine is visible in the browser too, and the settings page shows `version` next to the latest release. With `instances` 0 (no daemon has a fresh beat) `version`, `game` and `features` are the last report, kept until the server restarts: the status line names no feature then, and the settings page marks the version as the last report.
+- `unparsed` — how many whispers from this user's daemon matched no known template since the server started (`POST /daemon/whisper`; the texts are not kept). The Price Check page counts them in its status line when there are any.
+
+A POST naming an unknown user is attributed to nobody and changes no room (it is
+answered 400, and the daemon's journal names it); neither does a POST whose body
+could not be read. The Price Check page shows the derived sentence only under the
+empty-queue text, and re-ages it every minute. An unknown `outcome` is shown like
+`card`.
+
+### `whisper` / `whispers` — buyer whispers of this session (backend → frontend, per room)
+```json
+{ "type": "whisper", "entry": { "key": "a1b2c3d4:w12", "wid": "w12", "label": "buyer 3", "verdict": "below", "…": "as in POST /daemon/whisper" } }
+{ "type": "whispers", "entries": [ "… newest first …" ] }
+```
+`whisper` is broadcast into the user's room for every entry of `POST
+/daemon/whisper`, the immediate one and a late final one, and replaces the
+entry with the same `key` (or is put in front). `whispers` is sent on
+**connect** and replaces the list. Every field of an entry is another player's
+text and is shown as text. Memory only (`POE_WHISPER_KEEP` per user), without
+the buyer's name; a server restart empties it. The Price Check page shows them
+in the block "Buyer whispers (this session)".
 
 ---
 
@@ -874,13 +1136,117 @@ cookie as `/events`; unknown or missing user → `400`.
   the set it supports in principle. A `lang` outside it → `400
   { "error": "…not available…", "available": [...] }` — moving a user onto a
   language with no parser would turn every item he pastes into a `503`.
-- `persisted: false` means `/config` is not writable (a local run): the switch
-  applies for the lifetime of the process and will not survive a restart.
+- `persisted: false` means `/config` is not writable (a local run), or the
+  server found a `user-langs.json` it could not read, or a broken one it could
+  not move aside, and will not write over it: the switch applies for the
+  lifetime of the process and will not survive a restart.
 - A successful `POST` answers `{ "ok": true, "user", "lang", "available",
   "persisted" }` **and** broadcasts `league-state` (with the new `lang`) into
   that user's room, so every open tab of his follows immediately.
 - The value is written to `/config/user-langs.json` before the response goes
   out, and that file **beats `POE_USER_LANGS`** on the next start.
+
+## `GET /networth-sessions`, `POST /networth-session/start`, `/end`, `/discard` — farm and game sessions (HTTP)
+
+Identity: the `ppt_user` cookie; unknown → `400 {"error":"unknown user","users":[…]}`.
+The POSTs take no body. None of them sends a request to GGG: the balance is
+struck against points the history records anyway (`networth/sessions.mjs`).
+
+Two kinds of session, with the same balance and the same states. A **farm**
+session is started and ended by the player: these POSTs, or the hotkey
+daemon's session key (`POST /daemon/session`). A **game** session follows the
+game (`networth/session-control.mjs`): it starts when the user's daemon
+reports the game running (`presence` `playing`, `POST /daemon/heartbeat`) and
+none runs, and ends once no `playing` came for `POE_SESSION_GAME_GAP_MS`,
+dated to the moment the game stopped; `unknown` starts, ends and resets
+nothing by itself, and a game session that nobody can report on for
+`POE_SESSION_FINALIZE_MAX_MS` is closed as `unfinished`. A `playing` after
+`POE_SESSION_GAME_GAP_MS` or longer without a word (`unknown` all along, or an
+`idle` gap that ran out before the 30-s check saw it) ends the running game
+session, dated to the last word or to the stop, and starts a new one.
+`POE_SESSION_AUTO_GAME=0` starts no game session. A farm session started while
+a game session of the same user runs belongs to it (`parent`) and does not end
+with it. At most one running session of each kind per user. Every start and
+every end asks the refresher to read each tab of the user once from that moment
+(`sessionRound` under `networth-sync-status`), within the user's own ticks.
+
+A session starts as `starting`: its baseline is the first history point
+recorded after every live tab was read (or tried) once after the start
+(`baseline: "read"`). The newest point at the start is kept as a copy until
+the session ends; when no such point comes within
+`POE_SESSION_FINALIZE_MAX_MS`, or the session ends before it came, or the read
+lies after the end (a game session's end is dated back to the stop), the
+session starts from that copy (`baseline: "at-press"`): a read after the end
+would carry the session's own loot. A game session keeps
+that copy only when the point is younger than `POE_SESSION_BASELINE_MAX_AGE_MS`;
+without one it stays `starting`, and closes without figures if it ends so (or
+if its read lies after its end).
+
+`GET` → `{ available, persisted, now, rateMinMs, guardHoldMs, autoGame, gameGapMs, running, game, pending, done }`.
+Before it answers, it closes every ended session of this user whose
+`POE_SESSION_FINALIZE_MAX_MS` is over as `unfinished`, and moves a starting one
+past it to its copy: a new history point does that too, and so does a check
+every 30 s, but none of them may come in time (sync stopped, POESESSID
+expired). Whichever of them does it, the daemon's feed gets its `session`
+event and the user's pages their `networth-session`.
+
+- `available` — false when the background stash sync is off
+  (`POE_NETWORTH_AUTOSYNC=0`) or never started because the folder of the
+  net-worth store (`/config`) could not be created: nothing would ever be
+  measured.
+- `persisted` — false when sessions live in memory only (`/config` not
+  writable, or a sessions file from a newer release).
+- `rateMinMs` — `POE_SESSION_RATE_MIN_MS`; `guardHoldMs` — the price brake's
+  hold window (`POE_NETWORTH_GUARD_HOLD_MS`), for the withheld note.
+- `autoGame` — false with `POE_SESSION_AUTO_GAME=0`; `gameGapMs` —
+  `POE_SESSION_GAME_GAP_MS`.
+- `running` (the running farm session, or `null`), `game` (the running game
+  session, or `null`) and `pending[]` (ended sessions of both kinds, oldest
+  first) are live objects
+  `{ id, kind, parent, state: "starting"|"running"|"preliminary", baseline, startedAt, endedAt, durationMs, asOf, round, about, stashChanged, balance }`.
+  `kind` is `farm` or `game`, `parent` the id of the game session a farm
+  session belongs to (else `null`), `baseline` `read`, `at-press` or `null`
+  (no baseline yet, or none at all). `round` is `{ done, total }` live tabs
+  read or tried since the start (`starting`) or since the end (`preliminary`)
+  while the sync runs, else `null`. `about` is the refresher's estimate in
+  whole minutes until that round is complete (the steps still to take, the
+  sync interval, this user's share of the ticks and a running 429 cooldown; a
+  folder tab is 1+N steps once the refresher has walked it since the server
+  started, and one step before, so the estimate is too low until then), or
+  `null` when it cannot say. `balance` is `null`
+  while there is no baseline or no point to measure against.
+- `done[]` — at most `POE_SESSION_LIST_MAX` summaries of both kinds, newest
+  first (the History page lists them together with `running`, `game` and
+  `pending`, each farm session under the game session its `parent` names when
+  that one is in the answer),
+  `{ id, kind, parent, state: "final"|"unfinished", baseline, startedAt, endedAt, closedAt, durationMs, stashChanged, balance }`.
+  `balance` is `null` only for an `unfinished` session that had no history
+  point from after its end, or no baseline.
+- `balance` = `{ startAt, endAt, c0, c1, cd0, cd1, total, loot, market, totalDiv, lootDiv, marketDiv, lootPerHour, lootPerHourDiv, gains: [[name, qty, chaos]], losses: [[name, qty, chaos]], unpricedIn, withheld: [name], stashChanged }`,
+  chaos unless the name ends in `Div`. Divine figures are `null` without a
+  rate; the hourly figures are `null` below `rateMinMs` or with
+  `stashChanged`. `gains`/`losses` hold at most `POE_SESSION_TOP_N` rows.
+  `unpricedIn` counts item kinds that came in without a price at either end;
+  a name in `withheld` (an arrival the price brake holds at no value) is not
+  counted there.
+  Item names are English reference names, translated by the page.
+
+`POST …/start` (a farm session) → `200 { ok, persisted, session }` with
+`session.state` `starting` | `409 { "error": "already-running" }` |
+`409 { "error": "no-baseline", "maxAgeMs" }` (no history point younger than
+`POE_SESSION_BASELINE_MAX_AGE_MS`: the sync is not running for this user) |
+`409 { "error": "sync-off" }`.
+`POST …/end` (the farm session) → `200 { ok, persisted, session }` | `409 { "error": "not-running" }`.
+The History page's toolbar buttons (Start farm session, End farm session,
+Discard) send these for the farm session; a running game session has no Start
+or End there, only a Discard on its card (`?kind=game`, after a confirmation).
+`POST …/discard` → `200 { ok, persisted, session: { id, kind } }` | `409 { "error": "not-running" }`;
+it drops the running farm session, or with `?kind=game` the running game
+session, without a line in the list (an ended one cannot be discarded; any
+other `kind` → `400 {"error":"bad kind"}`). The farm sessions of a discarded
+game session keep their lines without a `parent`. Every successful POST also
+sends `networth-session` to the user's room; a start or an end also puts a
+`session` event into the daemon's feed (`GET /daemon/events`).
 
 ## `GET /config-view`, `POST /config-override`, `POST /restart` — runtime configuration (HTTP)
 
@@ -957,6 +1323,273 @@ tool and the latest public release.
 - `409 { "running": true, "cooldownMs" }` — a check is already in flight.
 - `429 { "retryAfterMs", "cooldownMs" }` — inside the 60 s cooldown after the previous manual check.
 - `401` — missing or wrong admin password.
+
+## `GET /source-status` — the price sources (HTTP)
+
+`GET /source-status` → `200` with the same object as the WS message `source-status`
+(without `type`), `cache-control: no-store`. **Open**, like `/release-status`:
+nothing in it is secret, and the reasons pass the same filter. The settings
+page's Sources block loads it once and then follows the WebSocket.
+
+## `GET /daemon/events`, `POST /daemon/heartbeat` — the hotkey daemon's own channel (HTTP)
+
+The daemon on a player's game machine does not use the WebSocket: a connect on
+`/events` replays the room, re-queues priceless cards as trade searches and
+warms the league, and a daemon whose network flaps would turn that into
+trade-API load. It uses short HTTP requests instead.
+
+Every `/daemon/*` request carries `X-PPT-Daemon: <daemon version>` (required;
+a web page cannot set it without a CORS preflight, which this server never
+grants), `X-User: <user>` (required — unlike `POST /item` there is no
+`POE_USERS[0]` fallback: a feed that defaulted to the first user would put that
+user's results on another player's screen) and `X-PPT-Instance: <random id per
+daemon start>` (optional; keeps two daemons of one user apart; without it, or
+with anything but up to 32 letters, digits and `. _ + -`, the instance is
+`default`). A version that is not such a token is recorded as `unknown`.
+
+- missing `X-PPT-Daemon` → `400 {"error":"missing X-PPT-Daemon header"}`
+- missing `X-User` → `400 {"error":"missing X-User header"}`
+- unknown user → `400 {"error":"unknown user \"…\"","users":[…]}`
+- an unknown `/daemon/` path → `404 {"error":"unknown daemon route","path":"…"}`
+- a known path with another method, a CORS preflight (`OPTIONS`) included →
+  `405 {"error":"method not allowed","allow":"GET"}` without any
+  `Access-Control-*` header
+
+Path and method are checked before the headers. Every answer is JSON with
+`cache-control: no-store`; an unexpected failure is `500 {"error":"internal"}`
+and one log line.
+
+**`GET /daemon/events?since=<seq>&boot=<id>&wait=<ms>`** — long-poll. Answers
+at once when there is something after `since`, when it has to say `reset` or
+`gap`, or when `wait` is 0; otherwise holds the request until there is, or
+until `wait` (clamped to `POE_DAEMON_POLL_MAX_HOLD_MS`) has passed.
+```json
+{ "v": 1, "boot": "bmh2k3x9a1", "seq": 42, "now": 1793606400000, "reset": false, "gap": false,
+  "events": [ { "seq": 42, "at": 1793606399000, "kind": "item", "by": "a1b2c3d4", "id": "mageblood-17",
+                "name": "Mageblood", "base": "Heavy Belt", "rarity": "unique", "stack": null, "status": "done",
+                "ahead": null, "retryAfterSec": null,
+                "price": { "source": "trade", "currency": "divine", "median": 140, "low": 125, "high": 170,
+                           "count": 259, "ageHours": null, "conflict": false, "early": false },
+                "ref": { "chaos": 21000, "divine": 150 }, "cd": 140, "final": true } ] }
+```
+- `reset: true` — `boot` is not this server's (it restarted), or `since` is
+  missing or out of range: nothing is replayed, `events` is empty; continue
+  from `seq`.
+- `gap: true` — events between `since` and the oldest one kept were dropped
+  (`POE_DAEMON_EVENTS_KEEP` per user; events older than
+  `POE_DAEMON_FEED_MAX_AGE_MS` are never delivered).
+- Only cards made or re-asserted by a `POST /item` that carried `X-PPT-Daemon`
+  are followed. After its first final state (`done` or `error`) a card takes
+  only its poe.ninja reference: a search started later on the page, or a
+  re-queue after a page reconnect, does not reach the game unless the daemon
+  posts the same item again; that re-post sends the card's current status and
+  the last price the page shows. A card is followed until
+  `POE_DAEMON_FEED_MAX_AGE_MS` after its last final state; while it is not
+  final (it waits, or a re-post found it waiting or searching), it has no
+  age.
+- `by` is the `X-PPT-Instance` of the daemon that posted the card (the last
+  one, for a re-post); a daemon shows only its own.
+- `reassert: true` is set on one event only: the replayed `item-added` of a
+  re-post that the dedupe of `POST /item` folded into a card that already
+  exists. It answers that POST the way the first event of a new card does,
+  though its `id` is known (a daemon binds each POST to a card that way). It
+  is not part of the card's state; the next event of the card lacks it.
+- Every `item` event carries the card's whole current state (the daemon
+  replaces, never merges): `status` as in `item-added`; `stack` the stack size
+  of the posted item or `null`; `ahead` is the number of jobs ahead of it in
+  the shared queue, the running one included, set once the job is queued and
+  sent again whenever it changes, `null` unless `status` is `queued`;
+  `retryAfterSec` as in `item-added`; `price.source` is `trade`, `exchange` or
+  `ninja`, `median` falls back to `low` for a result without one, `low`/`high`
+  are the exchange range when there is one, `ageHours` is
+  `exchangeAgeHours`, `conflict` says an ask-conflict marker is set;
+  `price.early` marks a Currency Exchange rate sent from memory at the POST,
+  before the card is `searching` and before the queued job confirms it (see
+  docs/pricing-logic.md); `ref` is the poe.ninja reference of a unique; `cd`
+  the Chaos:Divine rate of the user's league as poe.ninja gave it, `null`
+  while the server has none (the built-in fallback rate of the `cd-ratio`
+  message is not sent here); `final` is `true` for `done` and `error`.
+- `kind: "item-removed"` carries `by` and `id` (the room's card cap,
+  `POE_MAX_ITEMS_PER_ROOM`, evicted the card; a card dismissed on the page is
+  not reported). `kind: "whisper"` carries `by` (the instance that posted it),
+  `wid` and `entry`, a buyer-whisper verdict exactly as `POST /daemon/whisper`
+  answers it (below); every entry goes in, the immediate one and a late final
+  one. `kind: "session"` carries `by` (the instance whose session key caused
+  it, else `null`: the History page, the game detection or a check) and
+  `session`, the farm or game session as it is now:
+  `{ id, kind: "farm"|"game", parent, state, baseline, startedAt, endedAt, about, balance }`
+  (fields as in `GET /networth-sessions`; `balance` without `gains` and
+  `losses`). One goes in when a session starts (`starting`), when its baseline
+  is set (`running`), when it ends (`preliminary`), when it becomes `final`,
+  and when it is closed as `unfinished`; a discard sends none. `about` is the
+  minutes until the baseline (`starting`) or until the final balance
+  (`preliminary`), `null` otherwise or when the server cannot say. A daemon
+  ignores a `kind` it does not know.
+
+Reading the feed never queues, fetches or prices anything. `429
+{"error":"too-many-waiters","max":4}` when this user already has
+`POE_DAEMON_WAITERS_MAX` requests held; a newer request of the same instance
+answers its older one at once, empty. A held request whose connection closes
+frees its place.
+
+**`POST /daemon/heartbeat`** — body (at most 4096 bytes, else `413`; not a
+JSON object → `400 {"error":"bad json"|"not an object"}`):
+`{ "v": 1, "game": "running" | "absent" | "unknown", "everyS": 60, "features": { "downlink": "ok", "notify": "ok", "overlay": "no-qt" } }`.
+Any other `game` value counts as `unknown`. `everyS` is the daemon's own
+interval, clamped to 10…600. `features`: at most 8 entries, key and value each
+up to 24 lower-case letters and dashes; anything else is dropped. →
+`200 { "ok": true, "presence": "playing" | "idle" | "unknown", "v": 1 }`. A
+daemon sends one when it starts, when its game state or a feature state
+changes, and otherwise every `everyS` seconds. A beat counts for
+`max(POE_DAEMON_BEAT_STALE_MS, 3 × everyS)`; times come from the server clock
+only. The user's `presence` merges all daemons with a fresh beat (`playing` if
+any says `running`, `idle` only if all say `absent`, else `unknown`); a change
+of it is one log line (`[daemon] <user>: unknown -> playing (daemon <version>)`),
+one `daemon-status`, and a `networth-sync-status` to every user, because the
+net-worth refresher decides from it whose stash tab a tick reads (`pace` under
+`networth-sync-status`; `unknown` is the plain round-robin). A change to
+`playing` also starts a game session and `idle` ends one after
+`POE_SESSION_GAME_GAP_MS` (`GET /networth-sessions`).
+
+`POST /item` answers a daemon that sends `X-PPT-Daemon` the same way as one
+that does not; the card of the first is followed in the feed.
+
+## `POST /daemon/session` — the daemon's session key (HTTP)
+
+Starts or ends the user's **farm** session, exactly like the History page's
+buttons (same headers and caller rule as the other `/daemon/*` routes; the
+user is `X-User`). Body, at most 1024 bytes (else `413`; not a JSON object →
+`400 {"error":"bad json"|"not an object"}`): `{ "action": "toggle" }`.
+`action` is `toggle` (end the running farm session, else start one), `start`
+or `end`; anything else → `400 {"error":"bad action"}`.
+
+→ `200 { "ok": true, "v": 1, "action": "start"|"end", "session": { … } }`, the
+session as the feed's `session` event carries it (`state` `starting` after a
+start, `preliminary` after an end; `about` the minutes until the baseline or
+the final balance). The same event goes into the feed with `by` set to this
+`X-PPT-Instance`. Refusals → `409 { "v": 1, "error", "action" }` with `error`
+`sync-off` (no background stash sync), `no-baseline` (plus `maxAgeMs`: no
+history point younger than `POE_SESSION_BASELINE_MAX_AGE_MS` for this user),
+`already-running` or `not-running`. More than `POE_DAEMON_SESSION_MAX_PER_MIN`
+requests of this user in any minute → `429 { "v": 1, "error":
+"too-many-session-requests", "action" }`; a malformed one is refused before
+it counts. A server without this route answers
+`404 {"error":"unknown daemon route"}`. It never sends a request to GGG; the
+read it asks for comes out of the user's own ticks (`sessionRound` under
+`networth-sync-status`).
+
+## `POST /daemon/whisper` — a buyer's whisper, checked against the market (HTTP)
+
+Sent by a hotkey daemon for an incoming whisper that starts like a trade-site
+template (same headers as the other `/daemon/*` routes; `X-PPT-Instance` names
+the daemon). Body, at most 4096 bytes (else `413`; not a JSON object → `400
+{"error":"bad json"|"not an object"}`): `{ "v": 1, "wid": "w12", "body": "Hi, I
+would like to buy your …", "label": "buyer 3", "truncated": false }`. **The
+other player's name is never part of it**: it stays on the game machine;
+`label` is the daemon's pseudonym for this run, and a field `name` is never
+read. `400 {"error":"bad whisper"}` unless `wid` is `w<1–9 digits>`, `label`
+`buyer <1–9 digits>` and `body` a string of at most 2000 characters. `429
+{"error":"too-many-whispers"}` past `POE_WHISPER_MAX_PER_MIN` per user in any
+minute. A server without this route answers `404 {"error":"unknown daemon
+route"}` when it has the other `/daemon/*` routes, and `405` with the plain
+text `Method not allowed` when it is older still; a daemon reads both as "this
+server does not check whispers".
+
+→ `200 { "v": 1, "entry": { … } }` with these fields:
+
+- `key` — `<X-PPT-Instance>:<wid>`: a wid counts per daemon run and repeats
+  across restarts and between two daemons of one user. `wid`, `label`, `by`
+  (the instance), `at` (server clock), `truncated` (the daemon shortened the
+  text before sending).
+- `kind` — `single` | `bulk` | `unpriced-listing`; `lang` — the template's
+  language (`en`, `de`, `fr`, `ru`, `es`, `pt`); `league`; `tab`, `left`, `top` — where the goods lie
+  (`null` for bulk); `extraLen` — length of the buyer's own text after the
+  template (the text itself is not kept).
+- `quad` — `true` when `tab` is a quad tab (24×24 cells) by the tab type the
+  last net-worth sync stored for a tab of that name (the stash API's
+  `QuadStash`), `false` for a tab of another type, `null` when the sync cannot
+  tell (no tab of that name stored for you in this league, one stored before
+  the type was kept, two of that name with different types) and for bulk. The
+  daemon draws its stash cell frame (not the net-worth page's Stash Highlight)
+  on a 24×24 grid when `quad` is
+  `true` or `left` or `top` is above 12 (a 12×12 tab has no such cell), else
+  on a 12×12 grid. Read from the store, never from the stash API. Not on an
+  `unparsed` entry.
+- `item` — `{ text, ref, base, kind }`: the item as the whisper names it, its
+  reference name and base where known, and what it is (`unique`, `fungible`,
+  `rare`, `gem`, `magic-or-normal`, `unknown-item`). `qty` — units (bulk; 1
+  otherwise).
+- `asked` — `{ amount, unit, chaos, chaosEach }`: **your own listed price**
+  (the buyer copies the template), in the listing's unit and in chaos;
+  `null` for `unpriced-listing`; `chaos` and `chaosEach` `null` when the
+  listing's currency has no price. `market` — `{ chaosEach, chaos, source,
+  uncertain }` from the net-worth valuator (Faustus, poe.ninja; `uncertain` as
+  on the Net-Worth page), never from the trade API; `null` when there is none.
+  The chaos numbers of both are rounded for display only (one decimal from
+  1 c up, three significant digits below); `verdict`, `ratio` and `pct` come
+  from the unrounded prices.
+- `stack` — only on a `stack-unknown` entry: `{ size, from, chaosEach }`, the
+  second reading of the listed price, as the price of a stack of `size` units
+  (`chaosEach` = `asked.chaos` ÷ `size`, rounded like the other chaos
+  numbers). `from` is `whisper` (a number in front of the item name, `20 Orb
+  of Alchemy`; `item.text` keeps it, `item.ref` is the name without it) or
+  `sync` (the stack the last net-worth sync stored for an item of that name
+  at `tab`, `left`, `top`, read from the store, never from the stash API).
+  `null` when no size of 2 or more is known: then the per-unit reading
+  (`asked.chaos` against `market.chaosEach`) is the only one.
+- `caveat` — only on a `stack-unknown` entry: what would have stopped a
+  verdict also doubts the readings, so they say so. `rate-unknown` (the
+  Chaos:Divine rate behind the listing is the fallback or stale; named first,
+  as it moves every chaos number), `uncertain-price` (the market price, or the
+  price of the listing's currency, carries an `uncertain` marker), else
+  `null`. A value this page does not know is shown as it came.
+- `verdict` — `below` (you are selling under the market, below
+  `POE_WHISPER_LOW_RATIO` of it), `above` (over `POE_WHISPER_HIGH_RATIO`),
+  `fair` in between; `ratio` (your price ÷ the market value of the same
+  quantity, two decimals) and `pct` (how far off, whole percent without a
+  sign) with them. `not-compared` carries `reason`: `rare`,
+  `magic-or-normal`, `gem` (corruption is not in the whisper), `variants`
+  (more than one poe.ninja line for that unique on that base), `no-market`,
+  `unknown-currency` (the listing's currency is not one this tool knows),
+  `no-rate` (a known currency without a price right now), `other-league` (the
+  whisper names a league other than yours), `unknown-item`,
+  `no-language-data` (the server has no item names for the whisper's language
+  and none of the loaded languages knows the name exactly: `item.text` as
+  written, `item.kind` and `market` `null`, `asked` filled where the
+  listing's currency is known), `stack-unknown` (a single whisper for an item that
+  stacks: whether its price is for one unit or for the whole stack is not
+  known; the market price per unit is filled, and `stack` carries the
+  per-stack reading when a stack size is known; a captured beast, one per
+  slot, is compared), `pricing-off`
+  (`POE_PRICE_CHECK_DISABLED`), `unpriced-listing`, `rate-unknown` (the
+  Chaos:Divine rate behind the listing is the fallback or stale; the market
+  value is filled as information), `uncertain-price` (the market price, or
+  the price of the listing's currency, carries an `uncertain` marker such as
+  `thin-market`; the market value and its marker are filled as information),
+  `error` (the valuation failed; the server log has a line without the
+  whisper's text). `unparsed`: no known
+  template; the text is not kept and `daemon-status.unparsed` counts it.
+  `pending`: the valuation did not finish within
+  `POE_WHISPER_PRICE_DEADLINE_MS`; the final entry follows as a `whisper`
+  message and as a feed event with the same `wid`, also when the page list
+  keeps nothing (`POE_WHISPER_KEEP=0`).
+
+Every entry, the immediate one included, also goes into the daemon's feed, so a
+daemon that gave up waiting for the HTTP answer still gets it. A bulk whisper's
+league is the text after the first league word behind the currency (` in `,
+` dans la ligue `, ` в лиге `, ` en `, ` na `), compared with your league
+(equal, or followed by a space or `.`); the German bulk template closes its
+league (`-Liga kaufen`) and gives it whole; another league is cut to 40
+characters. The templates the server reads are data in
+`backend/v2/whisper.mjs` (English single and bulk, English single without a
+price, and single and bulk in German, French, Russian, Spanish and
+Portuguese; all but the English ones from SlimTrade's patterns, not seen in a
+real log). The server log gets
+one line per whisper, `[whisper] <user>: <kind> <lang> -> <verdict> (<reason>)`,
+never its text, item or label. A failure is `[whisper] valuation failed: …`,
+`[whisper] delivery failed: …` (handing the entry to the page or the feed) or
+`[whisper] handler failed: …`, at most one line a minute for each, the next
+one counting those left out.
 
 ## `POST /admin/data-check` — run the data auto-update now (HTTP)
 

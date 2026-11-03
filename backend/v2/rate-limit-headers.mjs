@@ -8,13 +8,12 @@
 //   Retry-After:               120                 on a 429 (and occasionally not)
 //
 // ITS OWN MODULE FOR THE REASON secret-keys.mjs IS: two unrelated paths need
-// it. The trade audit (trade-audit.mjs, /api/trade/*) used to import it out of
-// networth/stash-client.mjs, which made the trade path depend on the whole
-// net-worth stack — and once the stash client learnt to derive its pace from a
-// numeric setting (networth/stash-pacer.mjs -> numeric-settings.mjs ->
-// data-refresher.mjs -> trade-audit.mjs) that dependency closed into an import
-// cycle and broke module initialisation outright. A parser with no imports of
-// its own cannot be part of one.
+// it. Imported out of networth/stash-client.mjs, it would make the trade audit
+// (trade-audit.mjs, /api/trade/*) depend on the whole net-worth stack, and the
+// stash client's numeric setting (networth/stash-pacer.mjs ->
+// numeric-settings.mjs -> data-refresher.mjs -> trade-audit.mjs) closes that
+// dependency into an import cycle that breaks module initialisation outright.
+// A parser with no imports of its own cannot be part of one.
 //
 // Pure and total: unknown, missing or malformed headers produce empty arrays,
 // never a throw. A caller reads limits off a response it already has; it must

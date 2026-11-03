@@ -59,6 +59,7 @@ export const GUARD_MAX_HOLD_MS = 6 * 60 * 60 * 1000
  *    still judged against what this very tool last paid attention to for that
  *    name — the "same source's own history for that name" — instead of
  *    arriving unexamined. This is the cheap half and it costs no new threshold.
+ *    It survives a restart (guard-state.mjs).
  *
  * 2. FOR A NAME THE GUARD HAS NEVER SEEN there is, by construction, nothing to
  *    compare against. No factor applies, and a unit-price ceiling per category
@@ -109,10 +110,22 @@ export const GUARD_MAX_HOLD_MS = 6 * 60 * 60 * 1000
  */
 export const GUARD_ARRIVAL_MIN_DIVINE = 20
 
+// At most this many remembered prices (`known`) go into the guard's memory file
+// (guard-state.mjs); running holds and the rate are never cut. A judgement, not
+// a measurement. The file only carries names the history-items sidecar does not
+// already carry with a price (see exportState), normally a few dozen. The bound
+// only bites when whole accounts' names are uncovered at once — a change in
+// the set of stash tabs drops that user's sidecar entry (history.mjs,
+// `tabsChanged`), and a sidecar that is left alone or whose write just failed
+// covers no user at all. At roughly 50 bytes a row that is about 0.5 MB at the
+// bound.
+export const GUARD_STATE_MAX_NAMES = 10000
+
 /**
- * guardOptionsFromEnv(env, { log }) -> { factor, share, maxHoldMs, arrivalMinDivine }
+ * guardOptionsFromEnv(env, { log })
+ *   -> { factor, share, maxHoldMs, arrivalMinDivine, stateMaxNames }
  *
- * Reads the four bars out of an environment. It lives here rather than in
+ * Reads the four bars, and the bound on the memory file, out of an environment. It lives here rather than in
  * server.mjs because the module constants above are the documented defaults and
  * a second reader would drift from them — but the READING itself is the shared
  * one (env-number.mjs), so these four obey the same rule as every other numeric
@@ -124,18 +137,20 @@ export const GUARD_ARRIVAL_MIN_DIVINE = 20
  * removes the arrival bar's floor, which switches the bar off entirely (see the
  * `arrivalFloor` line in `apply`). With `||` an operator who sets it to 0 gets
  * 20 back and no error, so "every bar is settable" was true for every value
- * except the one that turns a bar off. All four take zero, which is why every
- * spec below says `zero: true`.
+ * except the one that turns a bar off. All five take zero, which is why every
+ * spec below says `zero: true` (for the memory bound, 0 writes no remembered
+ * price; holds and the rate still go to the file).
  */
-// Exported so a documentation test can ask the same question of these four that
+// Exported so a documentation test can ask the same question of these five that
 // it asks of numeric-settings.mjs's table: does docs/admin.md say what a 0 means
-// for each of them? They all take one, and all four answers are surprising in
+// for each of them? They all take one, and all five answers are surprising in
 // their own way (see the rows in that table).
 export const GUARD_SPECS = [
   ['factor', { name: 'POE_NETWORTH_GUARD_FACTOR', fallback: GUARD_FACTOR, zero: true }],
   ['share', { name: 'POE_NETWORTH_GUARD_SHARE', fallback: GUARD_SHARE, zero: true }],
   ['maxHoldMs', { name: 'POE_NETWORTH_GUARD_HOLD_MS', fallback: GUARD_MAX_HOLD_MS, zero: true }],
-  ['arrivalMinDivine', { name: 'POE_NETWORTH_GUARD_ARRIVAL_MIN_DIVINE', fallback: GUARD_ARRIVAL_MIN_DIVINE, zero: true }]
+  ['arrivalMinDivine', { name: 'POE_NETWORTH_GUARD_ARRIVAL_MIN_DIVINE', fallback: GUARD_ARRIVAL_MIN_DIVINE, zero: true }],
+  ['stateMaxNames', { name: 'POE_NETWORTH_GUARD_STATE_MAX_NAMES', fallback: GUARD_STATE_MAX_NAMES, zero: true, integer: true }]
 ]
 
 export function guardOptionsFromEnv (env = process.env, { log } = {}) {
@@ -148,8 +163,8 @@ const unit = (v, q) => (q > 0 ? v / q : null)
 const round1 = n => Math.round(n * 10) / 10
 
 /**
- * createPriceGuard({ factor, share, maxHoldMs, arrivalMinDivine, now, log })
- *   -> { apply, held, known }
+ * createPriceGuard({ factor, share, maxHoldMs, arrivalMinDivine, stateMaxNames, now, log })
+ *   -> { apply, held, known, exportState, importState }
  *
  * apply(user, prevMap, curMap, prevTotal, opts) -> { items, adjust, notes }
  *   prevMap/curMap: folded item maps (name -> [qty, chaos]) as used by
@@ -244,6 +259,7 @@ export function createPriceGuard ({
   share = GUARD_SHARE,
   maxHoldMs = GUARD_MAX_HOLD_MS,
   arrivalMinDivine = GUARD_ARRIVAL_MIN_DIVINE,
+  stateMaxNames = GUARD_STATE_MAX_NAMES,
   now = () => Date.now(),
   log = (...a) => console.warn(...a)
 } = {}) {
@@ -255,26 +271,22 @@ export function createPriceGuard ({
   // one in between carried no price, so the window counts only what was
   // actually observed. `user`/`name` are carried in the record rather than
   // parsed back out of the key, because an item name may contain anything.
-  // Memory only: after a restart the brake simply re-evaluates from the next
-  // point, which errs toward guarding rather than toward trusting a stale hold.
+  // Kept across restarts through exportState/importState (networth/
+  // guard-state.mjs); a restored hold treats the downtime as blind.
   const held = new Map()
-  // `${user}|${name}` -> { at, price }: the newest unit price the guard let
-  // through for this name. This is what makes an item that LEFT the stash and
-  // came back judgeable at all — prevMap only knows the one point before. Aged
-  // out with the hold window: an opinion older than the longest hold is not
-  // evidence any more.
+  // `${user}|${name}` -> { user, name, at, price }: the newest unit price the
+  // guard let through for this name. This is what makes an item that LEFT the
+  // stash and came back judgeable at all — prevMap only knows the one point
+  // before.
   //
-  // MEMORY ONLY, AND THAT IS A LIMIT, NOT A FEATURE: this map does not survive
-  // a container restart, and the Scavenger night's container had just been
-  // rebuilt. What DOES survive is the previous point's breakdown, in the
-  // history-items sidecar — so after a restart a name that was in the last
-  // recorded point still has its previous unit price, and only a name that was
-  // absent from it loses its reference and re-enters through the arrival bar.
-  // Persisting this map would buy the difference between those two cases for at
-  // most `maxHoldMs`, at the price of a second store in /config; it is written
-  // down in docs/bugs.md instead of built. Do not describe it as more than it
-  // is anywhere else either.
+  // Kept across restarts for as long as it would have lived in memory, but
+  // only where the history sidecar does not already carry the name with a
+  // price — see exportState for why that is the whole gap and not a shortcut,
+  // and importState for how the covered names come back. Aged with the hold
+  // window in both places: an opinion older than the longest hold is not
+  // evidence any more.
   const known = new Map()
+  const remember = (user, name, price, at) => known.set(`${user}|${name}`, { user, name, at, price })
   // The newest chaos-per-divine this guard has been handed. The arrival bar's
   // floor is denominated in divine and a single point can arrive without a rate
   // (poe.ninja unreachable at that minute); abstaining then means the bar is
@@ -282,6 +294,16 @@ export function createPriceGuard ({
   // a far better conversion than none. Only when NO rate has ever been seen —
   // the true cold start — does the bar still abstain.
   let lastRatio = 0
+  let lastRatioAt = 0
+  // The rate as exportState hands it to the memory file. apply() renews
+  // lastRatioAt at every point with a rate, so exporting it as is would change
+  // the file at every point. The exported time is renewed only when the rate
+  // changes or the exported one is half a hold window old; a restored rate is
+  // then at most that much older than it really was, and expires that much
+  // sooner — it is a fallback for a point that arrives without a rate.
+  let ratioMark = null
+  // exportState says it once per process when the bound cuts, not once a save.
+  let cutSaid = false
 
   function apply (user, prevMap, curMap, prevTotal, { cdRatio = 0, sourceOf = null } = {}) {
     const clean = { items: curMap, adjust: 0, notes: [] }
@@ -291,13 +313,28 @@ export function createPriceGuard ({
 
     const t = now()
     for (const [k, v] of known) if (t - v.at > maxHoldMs) known.delete(k)
+    // A RESTART IS A STRETCH NOTHING WAS RECORDED IN. A hold restored from the
+    // guard's file (importState) last saw its item before the process stopped;
+    // the time in between proves nothing either way, exactly like a point in
+    // which the item carried no price (see the sweep below). So the deadline
+    // moves out by that stretch, once, on this user's first point after the
+    // restart — before the reaper, which measures from `since` too.
+    for (const h of held.values()) {
+      if (h.user !== user || !h.restored) continue
+      h.since += t - h.seen
+      h.seen = t
+      delete h.restored
+    }
     // Holds of users that stopped reporting altogether would otherwise
     // accumulate forever. Twice the window, so an item that IS still there is
     // always released (and logged) by its own branch below first. `since` moves
     // with the blind points the sweep below discounts, so this cannot reap a
     // hold whose item is still being observed — for a user who keeps reporting
-    // it is the item that ends the hold, never the clock.
-    for (const [k, v] of held) if (t - v.since > 2 * maxHoldMs) held.delete(k)
+    // it is the item that ends the hold, never the clock. A restored hold whose
+    // user has not reported since the restart is measured from `seen`, the rule
+    // importState applies: its downtime has not been moved out yet, and another
+    // user's point must not reap it for that.
+    for (const [k, v] of held) if (t - (v.restored ? v.seen : v.since) > 2 * maxHoldMs) held.delete(k)
 
     // A HOLD IS A CLAIM ABOUT STANDING, NOT ABOUT THE WALL CLOCK. `since` alone
     // says how long ago the suspicion started, and that is not the promise the
@@ -311,16 +348,15 @@ export function createPriceGuard ({
     // also the unit it can honestly count in.
     //
     // AND A POINT THAT SAYS NOTHING ENDS NOTHING. An item that is in the
-    // snapshot but carries NO PRICE OF ITS OWN is a third observation, and this
-    // loop used to fold it into the second one: `cur` tells "gone" and "here,
-    // unpriced" apart and the code then collapsed both to "the hold is over".
-    // They are not the same. Absence is evidence — the item did not stand. A
-    // missing price is the absence of evidence: the valuator had nothing for
-    // that name this minute, and the guard learns neither that the suspicious
-    // price is real nor that it is not. Ending the hold on it restarted the
-    // window at every flicker of a price feed, so an arrival over the divine
-    // floor could stand in the series at zero for as long as the flicker lasted
-    // and write a fresh withholding line every time it restarted.
+    // snapshot but carries NO PRICE OF ITS OWN is a third observation, not the
+    // second one: `cur` tells "gone" and "here, unpriced" apart, and the two
+    // must not collapse into "the hold is over". Absence is evidence — the item
+    // did not stand. A missing price is the absence of evidence: the valuator
+    // had nothing for that name this minute, and the guard learns neither that
+    // the suspicious price is real nor that it is not. Ending the hold on it
+    // would restart the window at every flicker of a price feed, so an arrival
+    // over the divine floor could stand in the series at zero for as long as
+    // the flicker lasts and write a fresh withholding line at every restart.
     // So such a point simply DOES NOT COUNT: the deadline moves out by exactly
     // the blind interval — `since` is what `maxHoldMs` is measured from, and
     // `seen` is the last point that carried a price — which neither restarts
@@ -341,7 +377,7 @@ export function createPriceGuard ({
       // returns at the same spike is still measured against it instead of
       // falling through to the arrival bar. A withheld ARRIVAL (price 0) has no
       // opinion to hand over and hands over nothing.
-      if (h.price > 0) known.set(k, { at: t, price: h.price })
+      if (h.price > 0) remember(h.user, h.name, h.price, t)
       held.delete(k)
     }
 
@@ -351,7 +387,7 @@ export function createPriceGuard ({
     // abstains entirely rather than fall back to a share-only test that would
     // suppress ordinary play on a small account.
     const ratio = Number(cdRatio)
-    if (Number.isFinite(ratio) && ratio > 0) lastRatio = ratio
+    if (Number.isFinite(ratio) && ratio > 0) { lastRatio = ratio; lastRatioAt = t }
     const arrivalFloor = (lastRatio > 0 && arrivalMinDivine > 0)
       ? lastRatio * arrivalMinDivine
       : null
@@ -393,13 +429,13 @@ export function createPriceGuard ({
 
         if (!(p1 >= ref * factor) || !(gain >= total * share)) {
           if (hold) held.delete(key) // back to normal -> stop holding
-          known.set(key, { at: t, price: p1 })
+          remember(user, name, p1, t)
           continue
         }
 
         if (hold && t - hold.since >= maxHoldMs) {
           held.delete(key)
-          known.set(key, { at: t, price: p1 })
+          remember(user, name, p1, t)
           log('[networth] price hold released after %dh: "%s" stays at %sc/ea (was %sc/ea, source %s) — recording it as real',
             Math.round((t - hold.since) / 3600000), name, round1(p1), round1(ref), srcOf(name))
           continue
@@ -422,12 +458,12 @@ export function createPriceGuard ({
 
       if (!suspect) {
         if (hold) held.delete(key)
-        known.set(key, { at: t, price: p1 })
+        remember(user, name, p1, t)
         continue
       }
       if (hold && t - hold.since >= maxHoldMs) {
         held.delete(key)
-        known.set(key, { at: t, price: p1 })
+        remember(user, name, p1, t)
         // The note is what makes this visible. Nothing is corrected here, so
         // without it the caller sees an unchanged map and books the accepted
         // value as a revaluation of stock it never counted — a price move with
@@ -458,5 +494,150 @@ export function createPriceGuard ({
     return { items: out || curMap, adjust: round1(adjust), notes }
   }
 
-  return { apply, held, known }
+  /**
+   * exportState({ covered }) -> { ratio: [value, at] | null,
+   *   users: { [user]: { held: [[name, since, seen, price]], known: [[name, at, price]] } },
+   *   cut: <remembered prices left out by stateMaxNames> }
+   *
+   * covered: Map(user -> Map(name -> [qty, chaos])) — the breakdown history.mjs
+   *   keeps as the previous point (lastItems, mirrored by the sidecar), or
+   *   null when the sidecar was not written at that moment, because it is left
+   *   alone or its write failed (then every name is written). A
+   *   remembered price for a name that is in it with a unit price > 0 is left
+   *   out: after a restart apply() judges that name against the sidecar's
+   *   previous price (`p0`) first, and importState({ covered }) puts the same
+   *   price back into `known` for the case where the name is gone on the first
+   *   point afterwards. Names at 0 there (withheld arrivals, present-but-
+   *   unpriced) are NOT covered and are written.
+   *   THIS IS A COUPLING, stated once here: it holds because history.mjs runs
+   *   the guard only against the sidecar's breakdown and apply() takes `p0`
+   *   before `known`. Change either and the file lacks the covered names
+   *   (history-restart.test.mjs, "a name that left the stash …", catches it).
+   * Holds are always written in full; the bound only cuts remembered prices,
+   * newest kept. Rows are sorted by user, then name, so an unchanged memory
+   * serialises to the same bytes and the file is not rewritten. The rate's
+   * time moves in steps of half a hold window (see ratioMark), or it alone
+   * would change the export at every point.
+   */
+  function exportState ({ covered = null } = {}) {
+    const t = now()
+    const isCovered = (user, name) => {
+      const row = covered instanceof Map ? covered.get(user)?.get(name) : null
+      const p = row ? unit(row[1], row[0]) : null
+      return p != null && p > 0
+    }
+    const users = new Map()
+    const slot = user => {
+      let u = users.get(user)
+      if (!u) users.set(user, (u = { held: [], known: [] }))
+      return u
+    }
+    for (const h of held.values()) slot(h.user).held.push([h.name, h.since, h.seen, h.price])
+    let mem = []
+    for (const v of known.values()) {
+      if (t - v.at > maxHoldMs || isCovered(v.user, v.name)) continue
+      mem.push(v)
+    }
+    const cap = Math.max(0, Math.floor(Number(stateMaxNames) || 0))
+    let cut = 0
+    if (mem.length > cap) {
+      const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0)
+      mem.sort((a, b) => (b.at - a.at) || cmp(a.user, b.user) || cmp(a.name, b.name))
+      cut = mem.length - cap
+      // 0 is the operator saying "none", not a bound being hit: no line then.
+      if (!cutSaid && cap > 0) {
+        cutSaid = true
+        log('[networth-guard] kept the newest %d of %d remembered prices (POE_NETWORTH_GUARD_STATE_MAX_NAMES); the rest is forgotten at the next restart', cap, mem.length)
+      }
+      mem = mem.slice(0, cap)
+    }
+    for (const v of mem) slot(v.user).known.push([v.name, v.at, v.price])
+    const byName = (a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)
+    const out = {}
+    for (const user of [...users.keys()].sort()) {
+      const u = users.get(user)
+      out[user] = { held: u.held.sort(byName), known: u.known.sort(byName) }
+    }
+    if (lastRatio > 0 && (!ratioMark || ratioMark[0] !== lastRatio || lastRatioAt - ratioMark[1] >= maxHoldMs / 2)) {
+      ratioMark = [lastRatio, lastRatioAt]
+    }
+    return { ratio: lastRatio > 0 ? [...ratioMark] : null, users: out, cut }
+  }
+
+  /**
+   * importState(doc, { covered }) -> { held, known, expired, skipped, fromSidecar }
+   *
+   * Meant for a fresh guard before its first apply(); entries already in memory
+   * win. Applies the expiry apply() would apply now(): a remembered price older
+   * than maxHoldMs, a hold whose item was last SEEN more than 2 * maxHoldMs ago
+   * (seen, not since: the downtime is blind), a rate older than maxHoldMs. A row
+   * with a non-string/empty name, a non-finite number, a timestamp in the
+   * future, since > seen, a remembered price <= 0 or a held price < 0 is skipped.
+   * Every restored hold is marked `restored` (see the block at the top of apply).
+   *
+   * covered: Map(user -> { at, items: Map(name -> [qty, chaos]) }) — the
+   *   breakdown the history adopted from its sidecar, with the point it is
+   *   anchored on. exportState left those names out; an uninterrupted guard
+   *   would remember each of them at that point's unit price, so they are put
+   *   back here at exactly that (`fromSidecar`). Without this, a name that is
+   *   in the sidecar but gone on the first point after the restart would lose
+   *   its reference. Same expiry, same "memory wins", and not for a name that
+   *   is being held (the hold carries its own price).
+   */
+  function importState (doc, { covered = null } = {}) {
+    const t = now()
+    const r = { held: 0, known: 0, expired: 0, skipped: 0, fromSidecar: 0 }
+    const okName = n => typeof n === 'string' && n !== ''
+    const okNum = x => typeof x === 'number' && Number.isFinite(x)
+    const okTime = x => okNum(x) && x <= t
+    const users = doc && typeof doc === 'object' && doc.users && typeof doc.users === 'object' && !Array.isArray(doc.users)
+      ? doc.users
+      : {}
+    for (const [user, rec] of Object.entries(users)) {
+      const heldRows = Array.isArray(rec?.held) ? rec.held : []
+      const knownRows = Array.isArray(rec?.known) ? rec.known : []
+      if (!okName(user)) { r.skipped += heldRows.length + knownRows.length; continue }
+      for (const row of heldRows) {
+        const [name, since, seen, price] = Array.isArray(row) ? row : []
+        if (!okName(name) || !okTime(since) || !okTime(seen) || since > seen || !okNum(price) || price < 0) { r.skipped++; continue }
+        if (t - seen > 2 * maxHoldMs) { r.expired++; continue }
+        const key = `${user}|${name}`
+        if (held.has(key)) continue
+        held.set(key, { user, name, since, seen, price, restored: true })
+        r.held++
+      }
+      for (const row of knownRows) {
+        const [name, at, price] = Array.isArray(row) ? row : []
+        if (!okName(name) || !okTime(at) || !okNum(price) || price <= 0) { r.skipped++; continue }
+        if (t - at > maxHoldMs) { r.expired++; continue }
+        if (known.has(`${user}|${name}`)) continue
+        remember(user, name, price, at)
+        r.known++
+      }
+    }
+    const ratio = Array.isArray(doc?.ratio) ? doc.ratio : null
+    if (ratio && lastRatio === 0) {
+      const [value, at] = ratio
+      if (!okNum(value) || !(value > 0) || !okTime(at)) r.skipped++
+      else if (t - at > maxHoldMs) r.expired++
+      else { lastRatio = value; lastRatioAt = at; ratioMark = [value, at] }
+    }
+    if (covered instanceof Map) {
+      for (const [user, rec] of covered) {
+        const at = rec?.at
+        if (!okName(user) || !(rec?.items instanceof Map) || !okTime(at) || t - at > maxHoldMs) continue
+        for (const [name, v] of rec.items) {
+          const p = Array.isArray(v) ? unit(v[1], v[0]) : null
+          if (!(p > 0) || !okName(name)) continue
+          const key = `${user}|${name}`
+          if (known.has(key) || held.has(key)) continue
+          remember(user, name, p, at)
+          r.fromSidecar++
+        }
+      }
+    }
+    return r
+  }
+
+  return { apply, held, known, exportState, importState }
 }

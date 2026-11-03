@@ -13,10 +13,12 @@
 // officially documented; the midpoint derivation below is empirically verified
 // and pinned by faustus.test.mjs — see rateXperQuote.
 import { loadBaseNames } from './base-names.mjs'
-import { isTurnoverAttested, SELL_MIN_UNITS } from '../sell-side.mjs'
+import { isTurnoverAttested, SELL_MIN_UNITS, reachesFloor } from '../sell-side.mjs'
+import { AGENT_BASE } from '../version.mjs'
 
 const FAUSTUS_BASE = 'https://web.poecdn.com/api/currency-exchange'
-const FAUSTUS_UA = 'poe-price-tool/0.1'
+// Tool name and version (version.mjs), then the purpose.
+export const FAUSTUS_UA = `${AGENT_BASE} (personal LAN tool)`
 
 const CHAOS = 'Metadata/Items/Currency/CurrencyRerollRare'
 const DIVINE = 'Metadata/Items/Currency/CurrencyModValues'
@@ -185,7 +187,7 @@ function isNotReady (digest, id) {
 
 /**
  * createFaustusPricer({ league, deps }) ->
- *   { detailByName(): Promise<Map<name,{chaos,min?,max?}>>,
+ *   { detailByName(): Promise<Map<name,{chaos,min?,max?,sell?,at?,turnoverC?}>>,
  *     chaosByName(): Promise<Map<name,chaos>>, chaosForName(name): Promise<number|null> }
  *
  * deps (all injectable; defaults are the real implementation):
@@ -401,7 +403,7 @@ export function createFaustusPricer ({ league, deps = {} } = {}) {
             const deepRate = volumeRateXperQuote(deepM, x, CHAOS) ?? rateXperQuote(deepM, x, CHAOS)
             if (deepRate != null) {
               const disagree = Math.max(chaos, deepRate) / Math.min(chaos, deepRate)
-              if (disagree >= DEEP_HOUR_DISAGREE_RATIO) chaos = null
+              if (reachesFloor(disagree, DEEP_HOUR_DISAGREE_RATIO)) chaos = null
             }
           }
         }
@@ -481,12 +483,12 @@ export function createFaustusPricer ({ league, deps = {} } = {}) {
       // better evidenced than the chaos side — divine units >= 3x chaos units —
       // and is itself properly attested.
       //
-      // The comparison is relative on purpose. It used to be the absolute bar
-      // "chaos side traded fewer than 10 units", which never asked whether the
-      // divine side was the better-evidenced one, and that cost in both
-      // directions. Measured over 102 anchor hours (2026-07-29..08-03 digests,
-      // 72.9k priced lines with a poe.ninja reference, 2238 lines on which the
-      // variants disagree at all):
+      // The comparison is relative on purpose, not the absolute bar "chaos side
+      // traded fewer than 10 units", which never asks whether the divine side
+      // is the better-evidenced one, and that costs in both directions.
+      // Measured over 102 anchor hours (2026-07-29..08-03 digests, 72.9k priced
+      // lines with a poe.ninja reference, 2238 lines on which the variants
+      // disagree at all):
       //
       //   gate                       median  mean   >50%  >100%  fired
       //   no branch at all           22.3%   24.8%   135      0      0
@@ -494,12 +496,12 @@ export function createFaustusPricer ({ league, deps = {} } = {}) {
       //   relative, div >= 3x chaos  12.6%   15.3%     3      0   1750
       //
       // Better on every metric, and the two >100% lines it removes are real:
-      // Desecrated Virtue used to bridge to 524c and 495c against a real ~240c
-      // because its chaos market had only 6 units — while spanning a
-      // near-perfect 220.0..221.0. In those two hours the divine side carried 13
-      // and 12 units against those 6, i.e. 2.17x and 2.00x — better evidenced,
-      // but not 3x better, so the relative gate leaves that market alone and
-      // both hours land at 8% (item worst case 118% -> 40%).
+      // under the absolute gate Desecrated Virtue bridges to 524c and 495c
+      // against a real ~240c because its chaos market had only 6 units — while
+      // spanning a near-perfect 220.0..221.0. In those two hours the divine
+      // side carried 13 and 12 units against those 6, i.e. 2.17x and 2.00x —
+      // better evidenced, but not 3x better, so the relative gate leaves that
+      // market alone and both hours land at 8% (item worst case 118% -> 40%).
       // The absolute gate's wins survive unchanged: The Progeny of Lunaris
       // stays at an item median of 7.5% against 38.1% without the branch, The
       // Apothecary at 10.5% against 26.5%, and The Immortal improves further,
@@ -543,8 +545,8 @@ export function createFaustusPricer ({ league, deps = {} } = {}) {
       // still fails on turnover, so nothing it guarded came back.
       //
       // THE ENVELOPE HERE SPANS THE WHOLE UNION WINDOW, NOT ONE HOUR, and a
-      // degenerate one is ignored. It used to be the newest informative hour
-      // only, and that made it worthless on exactly this path: in 926 of 1402
+      // degenerate one is ignored. An envelope of the newest informative hour
+      // only is worthless on exactly this path: in 926 of 1402
       // firings min === max, i.e. the "range" was a single chaos trade, so the
       // accepted band [p/4, p*4] was a 16x hole. Worse, it was the very trade
       // the gate had just declared under-evidenced, vetoing its own replacement
@@ -553,7 +555,7 @@ export function createFaustusPricer ({ league, deps = {} } = {}) {
       // off (The Fiend 121c kept vs 1059c bridged vs 1107c real; Omen of Fortune
       // 500c vs ~2450c vs 3093c; also The Demon, Fire Of Unknown Origin).
       // Unioning the walked hours turns it into a real range where one exists:
-      // 1474 of the 1750 firings are now checked against a genuine multi-hour
+      // 1474 of the 1750 firings are checked against a genuine multi-hour
       // band, and in the remaining 276 even eight hours collapse to a single
       // point — there the check abstains instead of vetoing on one trade.
       // Measured on the disagreeing lines that is worth mean 15.1% -> 13.8% and
@@ -630,6 +632,16 @@ export function createFaustusPricer ({ league, deps = {} } = {}) {
       const priceMarket = bridged ? dm : cm
       const at = priceMarket ? hourOf.get(priceMarket) : undefined
       if (typeof at === 'number' && isFinite(at)) detail.at = at
+      // The chaos that changed hands on the quote side of the market hour the
+      // price came from — the evidence behind THIS number (docs/bugs.md B20:
+      // 50 chaos in one hour is all the direct path asks for). A bridged price
+      // counts its divine side at this run's C:D. Read by the Net-Worth marker
+      // (valuator.mjs thinMarket), never by the price itself.
+      const quote = bridged ? DIVINE : CHAOS
+      const vq = priceMarket?.volume_traded?.[quote]
+      const perQuote = bridged ? chaosPerDivine : 1
+      if (typeof vq === 'number' && isFinite(vq) && vq >= 0 &&
+          typeof perQuote === 'number' && isFinite(perQuote) && perQuote > 0) detail.turnoverC = vq * perQuote
       detailById.set(x, detail)
     }
     return detailById
@@ -669,10 +681,11 @@ export function createFaustusPricer ({ league, deps = {} } = {}) {
     // base-names.json was adopted). Takes effect on the next pricer call —
     // i.e. at the latest on the next hourly faustus-refresher tick.
     setBaseNames (bn) { if (bn && bn.byId) baseNames = bn },
-    // name -> { chaos, min?, max?, sell?, at? }. The full result; chaosByName()
-    // is the thin backwards-compatible projection of it. `sell` carries the
-    // per-market chaos/divine rates + volumes for the rail's sell-side
-    // comparison, `at` the unix hour the price was OBSERVED in (see
+    // name -> { chaos, min?, max?, sell?, at?, turnoverC? }. The full result;
+    // chaosByName() is the thin backwards-compatible projection of it. `sell`
+    // carries the per-market chaos/divine rates + volumes for the rail's
+    // sell-side comparison, `at` the unix hour the price was OBSERVED in,
+    // `turnoverC` the chaos turnover of that market hour (see
     // buildDetailById).
     async detailByName () { return buildDetailByName() },
     async chaosByName () {

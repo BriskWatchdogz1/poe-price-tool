@@ -7,10 +7,12 @@ import { mkdtemp, mkdir, readFile, writeFile, stat, readdir, rm } from 'node:fs/
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { createDataRefresher, LANG_FILES } from './data-refresher.mjs'
+import { AGENT_BASE } from './version.mjs'
 import { FAIL_KIND, failure } from './check-failure.mjs'
 import { UPSTREAM_BASE, FILES } from './apt-data-update.mjs'
 import { URLS as SEED_URLS } from './base-names-gen.mjs'
 import { buildIndexBins } from './apt-index.mjs'
+import { generatorVersion as realGeneratorVersion } from './lang-data-gen.mjs'
 
 // --- fixtures ---------------------------------------------------------------
 
@@ -401,7 +403,7 @@ test('base-names: an implausibly shrunken map is rejected, old map stays', async
 })
 
 // --- observability: one line per check + freshness state ---------------------
-// The point of the brief: silence must no longer be ambiguous. Every check
+// The point of the brief: silence must not be ambiguous. Every check
 // leaves EXACTLY one outcome line behind, and the timestamp of the last
 // successful check lives in state.json + status().
 
@@ -912,6 +914,11 @@ test('lang-data: with no localized set at all, one apt tick generates and adopts
   assert.equal(info.patch, '3.29.2.1')
   assert.equal(typeof info.enFingerprint, 'string')
   assert.ok(info.enFingerprint.length >= 32)
+  // Without an injected one, the version is the hash of the generator files
+  // this checkout carries — the same thing the image computes at runtime.
+  const realVersion = await realGeneratorVersion()
+  assert.match(realVersion, /^[0-9a-f]{16}$/)
+  assert.equal(info.generator, realVersion)
 
   const src = langSource(r)
   assert.equal(src.lastOutcome, 'updated')
@@ -919,6 +926,7 @@ test('lang-data: with no localized set at all, one apt tick generates and adopts
   const state = JSON.parse(await readFile(path.join(root, 'config/data-refresh/state.json'), 'utf8'))
   assert.deepEqual(state.apt.langs, ['en', 'de'])
   assert.equal(state.langData.patch, '3.29.2.1')
+  assert.equal(state.langData.generator, realVersion)
 })
 
 test('lang-data: a second tick does nothing — the comparison, not a flag, is what stops it', async t => {
@@ -1004,6 +1012,89 @@ test('lang-data: an English adoption without a patch change still triggers a reb
   assert.equal(info.patch, '3.29.2.1', 'the patch never changed')
   assert.notEqual(info.enFingerprint, firstFingerprint, '...but the skeleton did')
   assert.equal(await readFile(path.join(r.publicDir(), 'data/en/items.ndjson'), 'utf8'), grown)
+})
+
+// --- the generator version: a repaired derivation must not wait for a patch --
+// The version is a hash over the generator's own files, computed at runtime
+// (lang-data-gen.mjs generatorVersion). Injected here so a test can stand for
+// a release that changed them.
+async function langRefresherWithVersion (t, version) {
+  let clock = Date.parse('2026-08-08T00:00:00Z')
+  const base = await makeLangRefresher(t, {
+    routes: quietRoutes(),
+    overrides: { now: () => (clock += 60_000), generatorVersion: async () => version.current }
+  })
+  await mkdir(path.join(base.vendored.publicDir, 'data/de'), { recursive: true })
+  await writeFile(path.join(base.vendored.publicDir, 'data/de/client_strings.js'), clientStrings('hand-written-de'))
+  await base.r.init()
+  base.r.start({ onAptData: async () => {} })
+  return base
+}
+
+const buildInfoOf = async r => JSON.parse(await readFile(path.join(r.publicDir(), 'data/de/build-info.json'), 'utf8'))
+
+test('lang-data: a set from another generator version is rebuilt, and the run terminates', async t => {
+  const version = { current: 'aaaaaaaaaaaaaaaa' }
+  const { r, genCalls, logs } = await langRefresherWithVersion(t, version)
+  await r.tickApt()
+  assert.equal(genCalls.length, 1)
+  assert.equal((await buildInfoOf(r)).generator, 'aaaaaaaaaaaaaaaa')
+
+  // A release that changed the generator: same patch, same English snapshot.
+  version.current = 'bbbbbbbbbbbbbbbb'
+  await r.tickApt()
+  assert.equal(genCalls.length, 2, 'the repaired derivation does not wait for the next game patch')
+  assert.ok(logs.some(l => l.includes('generator version aaaaaaaaaaaaaaaa -> bbbbbbbbbbbbbbbb')), logs.join('\n'))
+  assert.equal((await buildInfoOf(r)).generator, 'bbbbbbbbbbbbbbbb')
+
+  await r.tickApt()
+  assert.equal(genCalls.length, 2, 'and once it is rebuilt, it is current')
+  assert.equal(langSource(r).lastOutcome, 'unchanged')
+})
+
+test('lang-data: a set whose build-info names no generator is rebuilt once', async t => {
+  const version = { current: 'aaaaaaaaaaaaaaaa' }
+  const { r, genCalls, logs } = await langRefresherWithVersion(t, version)
+  await r.tickApt()
+  assert.equal(genCalls.length, 1)
+  // Every set built before the field existed.
+  const p = path.join(r.publicDir(), 'data/de/build-info.json')
+  const info = JSON.parse(await readFile(p, 'utf8'))
+  delete info.generator
+  await writeFile(p, JSON.stringify(info))
+
+  await r.tickApt()
+  assert.equal(genCalls.length, 2)
+  assert.ok(logs.some(l => /generator version unknown -> aaaaaaaaaaaaaaaa/.test(l)), logs.join('\n'))
+  await r.tickApt()
+  assert.equal(genCalls.length, 2)
+})
+
+test('lang-data: an unknown generator version (a file missing) rebuilds once, then holds', async t => {
+  const version = { current: 'aaaaaaaaaaaaaaaa' }
+  const { r, genCalls, logs } = await langRefresherWithVersion(t, version)
+  await r.tickApt()
+  assert.equal(genCalls.length, 1)
+
+  version.current = null
+  await r.tickApt()
+  assert.equal(genCalls.length, 2, 'unknown is not equal to what the set was built by')
+  assert.ok(logs.some(l => l.includes('generator version aaaaaaaaaaaaaaaa -> unknown')), logs.join('\n'))
+  assert.equal((await buildInfoOf(r)).generator, null, 'recorded as unknown')
+
+  await r.tickApt()
+  assert.equal(genCalls.length, 2, 'unknown matches unknown: no rebuild on every tick')
+  assert.ok(logs.some(l => /lang-data check unchanged.*generator version unknown/.test(l)), logs.join('\n'))
+})
+
+test('lang-data: the injected generator version is the one recorded and compared', async t => {
+  const version = { current: '7777777777777777' }
+  const { r, genCalls, logs } = await langRefresherWithVersion(t, version)
+  await r.tickApt()
+  assert.equal((await buildInfoOf(r)).generator, '7777777777777777')
+  await r.tickApt()
+  assert.equal(genCalls.length, 1)
+  assert.ok(logs.some(l => /lang-data check unchanged.*generator version 7777777777777777/.test(l)), logs.join('\n'))
 })
 
 test('lang-data: a new patch alone triggers a rebuild', async t => {
@@ -1699,4 +1790,96 @@ test('checkNow on an install with no writable /config does nothing and says so',
   assert.equal(got.ran, false)
   assert.equal(got.reason, 'disabled')
   await rm(root, { recursive: true, force: true })
+})
+
+// ---------------------------------------------------------------------------
+// A state.json the refresher cannot use (docs/bugs.md B31). Missing is the
+// normal first start. Broken is moved aside with one warning, like the stores
+// in store-file.mjs; one that cannot be read or moved is never written over,
+// and the auto-update stays off until somebody fixes or removes it.
+// ---------------------------------------------------------------------------
+
+const STATE_NOW = Date.parse('2026-11-03T10:15:00Z')
+const STATE_STAMP = '2026-11-03T10-15-00-000Z'
+
+test('a missing state.json starts without a warning and is written', async t => {
+  const { r, root, warnings } = await makeRefresher(t, { overrides: { now: () => STATE_NOW } })
+  await r.init()
+  assert.equal(r.writable(), true)
+  assert.deepEqual(warnings, [])
+  const state = JSON.parse(await readFile(path.join(root, 'config/data-refresh/state.json'), 'utf8'))
+  assert.equal(state.since, STATE_NOW)
+  await rm(root, { recursive: true, force: true })
+})
+
+test('a broken state.json is moved aside with one warning, and the refresher starts empty', async t => {
+  for (const body of ['{"since": 1, "apt": {"version": "v-x"', '[1,2]', 'null', '"text"']) {
+    const { r, root, warnings } = await makeRefresher(t, { overrides: { now: () => STATE_NOW } })
+    const dir = path.join(root, 'config/data-refresh')
+    const stateFile = path.join(dir, 'state.json')
+    await mkdir(dir, { recursive: true })
+    await writeFile(stateFile, body)
+    await r.init()
+    const aside = `${stateFile}.broken-${STATE_STAMP}`
+    assert.equal(await readFile(aside, 'utf8'), body, `${body}: the content is kept to look at`)
+    const mine = warnings.filter(w => w.includes('state.json'))
+    assert.equal(mine.length, 1, `${body}: ${warnings.join(' | ')}`)
+    assert.match(mine[0], /^\[data-refresh\] .*not usable \(.*\) — moved to /)
+    assert.ok(mine[0].includes(aside), mine[0])
+    assert.ok(!mine[0].includes('v-x'), 'the content is never quoted')
+    assert.equal(r.writable(), true, body)
+    assert.equal(r.publicDataUrl(), undefined, 'the baked-in data is active')
+    const state = JSON.parse(await readFile(stateFile, 'utf8'))
+    assert.equal(state.since, STATE_NOW, `${body}: a fresh state is written`)
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('a state.json that cannot be read is not written over, and the auto-update stays off', async t => {
+  const body = JSON.stringify({ since: 1, checks: {} })
+  const readStateImpl = async () => { const e = new Error('permission denied'); e.code = 'EACCES'; throw e }
+  const calls = []
+  const { r, root, warnings } = await makeRefresher(t, { calls, overrides: { now: () => STATE_NOW, readStateImpl } })
+  const stateFile = path.join(root, 'config/data-refresh/state.json')
+  await mkdir(path.dirname(stateFile), { recursive: true })
+  await writeFile(stateFile, body)
+  await r.init()
+  const mine = warnings.filter(w => w.includes('state.json'))
+  assert.equal(mine.length, 1, warnings.join(' | '))
+  assert.match(mine[0], /could not read .*EACCES.*not writing over it/)
+  assert.equal(r.writable(), false)
+  assert.equal(r.status().enabled, false)
+  r.start({ onAptData: async () => {} })
+  const got = await r.checkNow()
+  assert.equal(got.reason, 'disabled')
+  assert.equal(calls.length, 0, 'no check runs')
+  assert.equal(await readFile(stateFile, 'utf8'), body)
+  r.stop()
+  await rm(root, { recursive: true, force: true })
+})
+
+test('a broken state.json that cannot be moved is left alone, and the auto-update stays off', async t => {
+  const renameImpl = async () => { const e = new Error('busy'); e.code = 'EBUSY'; throw e }
+  const { r, root, warnings } = await makeRefresher(t, { overrides: { now: () => STATE_NOW, stateRenameImpl: renameImpl } })
+  const stateFile = path.join(root, 'config/data-refresh/state.json')
+  await mkdir(path.dirname(stateFile), { recursive: true })
+  await writeFile(stateFile, 'not json')
+  await r.init()
+  const mine = warnings.filter(w => w.includes('state.json'))
+  assert.equal(mine.length, 1, warnings.join(' | '))
+  assert.match(mine[0], /could not be moved aside \(EBUSY\)/)
+  assert.equal(r.writable(), false)
+  assert.equal(await readFile(stateFile, 'utf8'), 'not json')
+  assert.deepEqual((await readdir(path.dirname(stateFile))).filter(f => f.startsWith('state.json')), ['state.json'])
+  await rm(root, { recursive: true, force: true })
+})
+
+test('every refresher download names the tool, its version and its purpose', async t => {
+  const calls = []
+  const { r } = await makeRefresher(t, { routes: aptRoutes('ua'), calls })
+  await r.init()
+  r.start({ onAptData: async () => {} })
+  await r.tickApt()
+  assert.equal(calls.length, FILES.length)
+  for (const c of calls) assert.equal(c.headers['User-Agent'], `${AGENT_BASE} (data refresher, personal LAN tool)`)
 })

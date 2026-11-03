@@ -13,12 +13,11 @@
 //     browser, X-User for the daemon.
 //
 // The missing German data set is BUILT HERE, it is not the state of the
-// working tree. It used to be: the file relied on renderer/public having no
-// data/de, which held right up until the language generator produced one — and
-// then two assertions flipped for a reason that had nothing to do with what
-// they were guarding. So the test lays out its own /config snapshot with
-// data/en and deliberately without data/de, which is the situation it means:
-// German configured, German not generated yet.
+// working tree: relying on renderer/public having no data/de breaks as soon as
+// the language generator produces one, and two assertions flip for a reason
+// that has nothing to do with what they guard. So the test lays out its own
+// /config snapshot with data/en and deliberately without data/de, which is the
+// situation it means: German configured, German not generated yet.
 //
 // Same background-schedule switches as server.test.mjs, plus
 // POE_PRICE_CHECK_DISABLED=1 for the foreground price check and
@@ -140,6 +139,9 @@ test('the German user is refused loudly instead of being parsed as English', asy
   assert.match(j.error, /no parser for language "de"/)
   // And nothing landed in their room — a wrong-language parse would have.
   assert.equal(mod.users.get('deuser').items.size, 0)
+  // The empty Price Check page says what became of it (PROTOCOL.md daemon-status).
+  assert.equal(mod.users.get('deuser').lastItemOutcome, 'no-parser')
+  assert.equal(typeof mod.users.get('deuser').lastItemAt, 'number')
 })
 
 test('the existing loud failures are unchanged', async () => {

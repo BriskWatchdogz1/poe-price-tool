@@ -32,8 +32,8 @@ test('generated index bins are byte-identical to the shipped ones', async () => 
 })
 
 // The same guard for a language that is NOT English. Two things are pinned
-// here: that the upstream script builds a localized set at all (its LANGUAGES
-// list used to be ['en'] and everything else was dead), and that both
+// here: that the upstream script builds a localized set at all (with a
+// LANGUAGES list of ['en'] everything else would be dead), and that both
 // generators agree once umlauts are in play — the index hashes FNV-1a over
 // UTF-8 bytes while the line offsets it stores are UTF-16 code units, and a
 // translated snapshot is the first thing that puts both under load at once.

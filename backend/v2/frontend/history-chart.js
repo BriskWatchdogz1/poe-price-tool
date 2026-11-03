@@ -10,9 +10,8 @@
  * (`cd`, history.mjs), and the page's promise is that the divine value of an
  * old point never moves again. That promise is a function of (chaos, rate) and
  * of nothing else — so it belongs in the module a test can call, not in the
- * renderer where the rate used to be read out of module state (the newest
- * point's), which is exactly how every historical figure on the page started
- * changing with every rate tick.
+ * renderer, where a rate read out of module state (the newest point's) would
+ * change every historical figure on the page with every rate tick.
  *
  * Coordinates are computed in a fixed viewBox; the SVG scales to the container.
  */
@@ -192,8 +191,8 @@ export function segmentDirections (values, tol = 0) {
 }
 
 /* Value-axis bounds. Deliberately NOT zero-based: a stash that moves between
- * 83 and 85 divine would otherwise be a flat line at the top of an empty box —
- * which is exactly how the old sparkline looked. A tenth of the span as padding
+ * 83 and 85 divine would otherwise be a flat line at the top of an empty box.
+ * A tenth of the span as padding
  * keeps the curve off both edges, and a completely flat series still gets a
  * band to sit in the middle of. */
 export function valueBounds (values) {

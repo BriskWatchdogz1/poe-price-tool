@@ -5,19 +5,40 @@
 // >=15min), no matter how many items are in the stash.
 // null = honest "not priceable" (name unknown, ninja down, no theme
 // match) -> lands in the unpriced bucket, NEVER as 0 in the sum.
+// A priced row also says whether the number is KNOWN to rest on a guess or
+// on thin evidence (`uncertain`, see UNCERTAIN below).
 import {
   fetchItemOverview as realFetchItemOverview,
   fetchExchangeOverview as realFetchExchangeOverview,
   fetchCurrencyOverview as realFetchCurrencyOverview,
-  round1
+  round1,
+  ninjaTypeFor,
+  NINJA_MAP_TTL_DEFAULT_MS
 } from '../ninja.mjs'
 import { VALUATION_ROUTES } from './kinds.mjs'
 import { isTooOld, maxAgeMs as defaultMaxAgeMs } from './faustus-age.mjs'
+import { SELL_MIN_QUOTE_TURNOVER_C, reachesFloor } from '../sell-side.mjs'
+import { CORPSE_MIN_LISTINGS } from './corpse-pricer.mjs'
+
+// Why a priced row may be doubted (docs/pricing-logic.md, "Uncertain
+// prices"). A code says the number rests on a guess or on thin evidence and
+// is decided where the valuation makes that guess — afterwards it cannot be
+// reconstructed. `null` on a row means no KNOWN reason for doubt, which is
+// not the same as a verified price. Marking changes no number: the price, the
+// totals and the history count an uncertain row exactly like any other.
+export const UNCERTAIN = Object.freeze({
+  THIN_MARKET: 'thin-market',         // little chaos changed hands behind the price (docs/bugs.md B20)
+  GEM_GUESSED: 'gem-guessed',         // no line for the gem's exact level/quality/corruption
+  VARIANT_GUESSED: 'variant-guessed', // several lines, nothing on the item decides
+  LINKS_GUESSED: 'links-guessed',     // no line for the item's own link count
+  FEW_LISTINGS: 'few-listings'        // a corpse price averaged from too few trade offers
+})
 
 // All exchange overview types that carry a stackable's price on poe.ninja
-// (item/overview 404s for most of these today). Merged ONCE per valuator into
-// a single tradeTag/name -> chaos map, so a stackable lookup is O(1) after ~14
-// cached requests instead of a per-item fallback storm.
+// (item/overview 404s for most of these today). Merged into one tradeTag/name
+// -> chaos map that lives at most POE_NINJA_MAP_TTL_MS (see exchangeMap()), so
+// a stackable lookup is O(1) after ~14 cached requests instead of a per-item
+// fallback storm.
 const EXCHANGE_STACKABLE_TYPES = [
   'Currency', 'Fragment', 'Scarab', 'Essence', 'Fossil', 'Resonator', 'Oil',
   'DeliriumOrb', 'Astrolabe', 'Omen', 'Tattoo', 'Runegraft', 'AllflameEmber', 'Artifact'
@@ -47,8 +68,8 @@ const confident = l => typeof l.count === 'number' && l.count >= MIN_CONFIDENCE
 // after the Faustus path (GGG digest) correctly rejects it — both sources
 // scrape the same thin trades.
 //
-// THE REGRESSION this comment used to argue for and no longer does: this
-// floor was raised from 0.5 to 10 units on the strength of the calibration
+// WHY THE UNIT FLOOR ALONE IS WRONG: this floor was raised from 0.5 to 10
+// units on the strength of the calibration
 // below (all cases, cheap and expensive, distributed on both sides of 10 —
 // "no reason for a value-dependent floor"). That was wrong. A flat item-count
 // floor is itself value-dependent in effect, because ITEM COUNT and PRICE are
@@ -86,8 +107,8 @@ const confident = l => typeof l.count === 'number' && l.count >= MIN_CONFIDENCE
 // fetched fresh via curl — DivinationCard, Currency, Fragment, Scarab,
 // Fossil, Oil, Essence, Tattoo, Runegraft, Omen — 916 priced lines total).
 // For the population that fails the 10-unit floor, turnover (in chaos) does
-// NOT show one clean gap the way the old flat-count calibration implied one
-// existed: sorted turnover climbs close to continuously from a few hundred
+// NOT show one clean gap the way a flat-count calibration implies one
+// exists: sorted turnover climbs close to continuously from a few hundred
 // chaos into the tens of thousands. What DOES separate cleanly is confirmed
 // bad vs. the rescue target: "The Trial", the case that originally motivated
 // this floor, topped out at 1359c off 906 turnover (0.67 units) — genuinely
@@ -102,8 +123,8 @@ const confident = l => typeof l.count === 'number' && l.count >= MIN_CONFIDENCE
 //     with the turnover floor added (7 rescued): Father's Love 8608c/41607
 //     turnover, The Miracle 3020c/11074, Lucky Bastion 1918c/15348, Pearls
 //     Before Swine 3691c/5537, Choking Guilt 1199c/4598, Brother's Gift
-//     957c/4306, Outfoxed 917.8c/4283 — every one of these was a named
-//     casualty of the old flat floor above. Most expensive line STILL
+//     957c/4306, Outfoxed 917.8c/4283 — every one of these is a named
+//     casualty of the flat unit floor alone. Most expensive line STILL
 //     rejected: The Sacrifice, 200c off 33.3 turnover (0.167 units) — a
 //     single trade's fraction, same shape as The Trial.
 //   - Tattoo: 3 of 53 fail the unit floor -> 2 still fail (1 rescued: Journey
@@ -149,15 +170,28 @@ const MIN_EXCHANGE_TURNOVER_UNITS = 1
 // clearing NEITHER the unit floor NOR the turnover floor. No usable volume
 // field -> fail OPEN: the floors exist to drop lines we can PROVE are thin, so
 // if poe.ninja ever stops shipping the field we keep pricing instead of
-// blanking every stackable. Never returns 0.
+// blanking every stackable. Never returns 0. A line priced that way is
+// marked `thin-market` by the callers below: nothing vouches for it.
 function exchangeLineValue (line) {
   const v = line && typeof line.primaryValue === 'number' ? line.primaryValue : null
   if (v == null || !(v > 0)) return null
   const vol = line.volumePrimaryValue
   if (typeof vol !== 'number' || !Number.isFinite(vol) || vol < 0) return v
+  // A division: reachesFloor lets a count the stated numbers put exactly on a
+  // floor reach it (200.1 / 20.01 is 10 units, computed 9.999999999999998).
+  // At the 1-unit floor the slack never acts, since a count of exactly 1
+  // needs both numbers equal and x / x is exactly 1; it is used there too so
+  // that every floor of this function reads the same.
   const units = vol / v
-  if (units >= MIN_EXCHANGE_UNITS) return v
-  return (vol >= MIN_EXCHANGE_TURNOVER_C && units >= MIN_EXCHANGE_TURNOVER_UNITS) ? v : null
+  if (reachesFloor(units, MIN_EXCHANGE_UNITS)) return v
+  return (vol >= MIN_EXCHANGE_TURNOVER_C && reachesFloor(units, MIN_EXCHANGE_TURNOVER_UNITS)) ? v : null
+}
+
+// The chaos turnover a poe.ninja exchange line states, or null when it has no
+// usable volume field (then exchangeLineValue failed open).
+function lineTurnover (line) {
+  const vol = line?.volumePrimaryValue
+  return (typeof vol === 'number' && Number.isFinite(vol) && vol >= 0) ? vol : null
 }
 
 // Max staleness for the Faustus store before its prices are treated as absent
@@ -307,6 +341,28 @@ export function createValuator ({ league, deps = {} }) {
   const faustusMaxAgeMs = (typeof d.faustusMaxAgeMs === 'number' && d.faustusMaxAgeMs > 0)
     ? d.faustusMaxAgeMs : defaultMaxAgeMs()
   const nowMs = typeof d.now === 'function' ? d.now : Date.now
+
+  // The two bars of the uncertainty marker (POE_NETWORTH_THIN_TURNOVER_C and
+  // POE_NETWORTH_CORPSE_MIN_LISTINGS, wired by server.mjs). 0 marks nothing.
+  // The thin-market default is the bar sell-side.mjs uses for "may this side
+  // set a price": below it sides were off by up to +384 %, from it upward by
+  // at most 78 % (see that file). Not calibrated against B20's cards; it only
+  // marks.
+  const thinTurnoverC = (typeof d.thinTurnoverC === 'number' && d.thinTurnoverC >= 0)
+    ? d.thinTurnoverC : SELL_MIN_QUOTE_TURNOVER_C
+  const corpseMinListings = (Number.isInteger(d.corpseMinListings) && d.corpseMinListings >= 0)
+    ? d.corpseMinListings : CORPSE_MIN_LISTINGS
+  // `thin-market` when fewer chaos than the bar changed hands behind a price.
+  // An unknown turnover counts as thin only where the price was let through
+  // WITHOUT the check (a poe.ninja line with no volume field, fail-open); on
+  // the Faustus path unknown means "store written before the field existed".
+  function thinMarket (turnoverC, unknownIsThin) {
+    if (!(thinTurnoverC > 0)) return null
+    if (typeof turnoverC !== 'number' || !Number.isFinite(turnoverC)) return unknownIsThin ? UNCERTAIN.THIN_MARKET : null
+    return turnoverC < thinTurnoverC ? UNCERTAIN.THIN_MARKET : null
+  }
+
+  // Every helper below answers null (unpriced) or { each, uncertain }.
   async function fromFaustus (name) {
     if (!faustusStore) return null
     if (typeof faustusStore.league === 'function' && faustusStore.league() !== league) return null
@@ -324,7 +380,10 @@ export function createValuator ({ league, deps = {} }) {
     // isTooOld says so — so a deploy does not blank a whole store.
     if (typeof faustusStore.getHour === 'function' &&
         isTooOld(faustusStore.getHour(name), { now: nowMs(), maxMs: faustusMaxAgeMs })) return null
-    return v
+    // The evidence: the chaos that changed hands in the hour the price came
+    // from (faustus.mjs detail.turnoverC). Unknown is not thin here.
+    const turnover = typeof faustusStore.getTurnover === 'function' ? faustusStore.getTurnover(name) : null
+    return { each: v, uncertain: thinMarket(turnover, false) }
   }
 
   // Corpse store (Task 5): background-filled name->chaos cache for itemised
@@ -332,11 +391,19 @@ export function createValuator ({ league, deps = {} }) {
   // Faustus — a valuator for a different league than the store holds must not
   // read stale cross-league corpse prices. getPrice already returns null for a
   // stale/absent/null-cached entry, so the route falls to honestly-unpriced.
+  // A price averaged from fewer listings than the bar is `few-listings`; an
+  // entry without a count (written before it existed) is not marked.
   const corpseStore = d.corpseStore || null
   async function fromCorpseStore (name) {
     if (!corpseStore) return null
     if (typeof corpseStore.league === 'function' && corpseStore.league() !== league) return null
-    return corpseStore.getPrice(name)
+    const each = corpseStore.getPrice(name)
+    if (each == null) return null
+    const n = typeof corpseStore.getListings === 'function' ? corpseStore.getListings(name) : null
+    return {
+      each,
+      uncertain: (corpseMinListings > 0 && Number.isInteger(n) && n < corpseMinListings) ? UNCERTAIN.FEW_LISTINGS : null
+    }
   }
 
   // Last stage of the fungible chain (after Faustus and fromExchangeMap):
@@ -352,47 +419,65 @@ export function createValuator ({ league, deps = {} }) {
   // reaches here (routed as `{each: 1, source: 'chaos'}`), so rejecting exactly
   // 1.0 costs nothing real and turns a wildly wrong number into an honest
   // "unpriced" on the rare path where Faustus AND the exchange both missed.
+  // Deliberately not marked: listing-based, but no guess is made here.
   async function fromNinjaCurrencyOverview (type, name) {
     const data = await d.fetchCurrencyOverview(league, type)
     if (!data || !(data.byName instanceof Map)) return null
     const v = data.byName.get(name)
     if (typeof v !== 'number') return null
-    return v === 1 ? null : v
+    return v === 1 ? null : { each: v, uncertain: null }
   }
 
-  // Lazily built, then cached for the valuator's lifetime.
-  let exchangeMapPromise = null
+  // The merged exchange map is a VIEW on the ninja.mjs caches. It lives at
+  // most mapTtlMs (POE_NINJA_MAP_TTL_MS), and it is never kept when it is
+  // empty (a league with no trade yet) or when a type did not load — before
+  // B29 the first build was kept for the life of the process, so one failed
+  // type at boot stayed missing until a restart. A map that is not kept is
+  // rebuilt on the next valuation, but ninja.mjs asks a key at most once per
+  // NINJA_MIN_MS (15 minutes, after an answer and after a failure alike): an
+  // empty or incomplete map costs up to 14 requests per 15 minutes (56 an
+  // hour) while valuations run, not one round per valuation. Concurrent
+  // valuations share one build. Each entry keeps the line's chaos turnover
+  // (`volumePrimaryValue`, null when the line has none) for the marker.
+  const mapTtlMs = (typeof d.exchangeMapTtlMs === 'number' && d.exchangeMapTtlMs > 0)
+    ? d.exchangeMapTtlMs : NINJA_MAP_TTL_DEFAULT_MS
+  let mapEntry = null // { builtAt, pending, keep, promise }
   function exchangeMap () {
-    if (!exchangeMapPromise) {
-      exchangeMapPromise = (async () => {
-        const byTag = new Map()
-        const byName = new Map()
-        for (const type of EXCHANGE_STACKABLE_TYPES) {
-          const data = await d.fetchExchangeOverview(league, type)
-          if (!data) continue
-          for (const [name, id] of data.nameToId) {
-            const line = id != null ? data.lineById.get(id) : null
-            // Same volume floor as the div-card path: the merged map is fed from
-            // the very same exchange endpoint, so a single-trade artifact would
-            // otherwise land on a stackable too (measured: essences at 1-2 items,
-            // and in thin leagues tattoos/runegrafts at 4-figure chaos).
-            const v = exchangeLineValue(line)
-            if (v == null) continue
-            if (id != null && !byTag.has(id)) byTag.set(id, v)
-            if (!byName.has(name)) byName.set(name, v)
-          }
+    const t = nowMs()
+    if (mapEntry && (mapEntry.pending || (mapEntry.keep && t - mapEntry.builtAt < mapTtlMs))) return mapEntry.promise
+    const entry = { builtAt: t, pending: true, keep: false, promise: null }
+    entry.promise = (async () => {
+      const byTag = new Map()
+      const byName = new Map()
+      let missing = 0
+      for (const type of EXCHANGE_STACKABLE_TYPES) {
+        const data = await d.fetchExchangeOverview(league, type)
+        if (!data) { missing++; continue }
+        for (const [name, id] of data.nameToId) {
+          const line = id != null ? data.lineById.get(id) : null
+          // Same volume floor as the div-card path: the merged map is fed from
+          // the very same exchange endpoint, so a single-trade artifact would
+          // otherwise land on a stackable too (measured: essences at 1-2 items,
+          // and in thin leagues tattoos/runegrafts at 4-figure chaos).
+          const v = exchangeLineValue(line)
+          if (v == null) continue
+          const e = { v, turnover: lineTurnover(line) }
+          if (id != null && !byTag.has(id)) byTag.set(id, e)
+          if (!byName.has(name)) byName.set(name, e)
         }
-        return { byTag, byName }
-      })()
-    }
-    return exchangeMapPromise
+      }
+      entry.keep = missing === 0 && (byTag.size + byName.size) > 0
+      return { byTag, byName }
+    })().finally(() => { entry.pending = false })
+    mapEntry = entry
+    return entry.promise
   }
 
   async function fromExchangeMap (tradeTag, name) {
     const m = await exchangeMap()
-    let v = tradeTag != null ? m.byTag.get(tradeTag) : undefined
-    if (v == null) v = m.byName.get(name)
-    return typeof v === 'number' ? v : null
+    let e = tradeTag != null ? m.byTag.get(tradeTag) : undefined
+    if (e == null) e = m.byName.get(name)
+    return (e && typeof e.v === 'number') ? { each: e.v, uncertain: thinMarket(e.turnover, true) } : null
   }
 
   // Single exchange `type` (not part of the merged stackable map) — the exchange
@@ -410,9 +495,10 @@ export function createValuator ({ league, deps = {} }) {
     if (line) {
       // Present but below the volume floor -> honestly unpriced (null), NOT
       // absentValue: we know the name, we just don't trust this line's price.
-      return exchangeLineValue(line)
+      const v = exchangeLineValue(line)
+      return v == null ? null : { each: v, uncertain: thinMarket(lineTurnover(line), true) }
     }
-    return absentValue
+    return absentValue == null ? null : { each: absentValue, uncertain: null }
   }
 
   async function fromItemOverview (type, name, baseType = null, links = 0, mods = null) {
@@ -426,20 +512,24 @@ export function createValuator ({ league, deps = {} }) {
     if (baseType && cands.some(l => l.baseType === baseType)) cands = cands.filter(l => l.baseType === baseType)
     // LINK variant: poe.ninja carries the same unique as its own line per link
     // count (…-5l, …-6l and the base line without `links`) — 114 of the 326
-    // weapon names have several. The FIRST one used to win, and that was the
-    // most expensive: an unlinked Nuro's Harp (market: 1c, 1025 listings) was
-    // valued at the 6L price of 103.6c. Only 5L/6L get their own lines.
+    // weapon names have several. The FIRST one is the most expensive: taking
+    // it valued an unlinked Nuro's Harp (market: 1c, 1025 listings) at the 6L
+    // price of 103.6c. Only 5L/6L get their own lines.
     const linksOf = l => Number(l.links) || 0
     const want = Number(links) >= 5 ? Number(links) : 0
     const exact = cands.filter(l => linksOf(l) === want)
     const base = cands.filter(l => linksOf(l) === 0)
     const pool = exact.length ? exact : (base.length ? base : cands)
+    // No line for the item's own link count: a 6L without a 6L line takes the
+    // base price (too low), an unlinked item with only 5L/6L lines a linked
+    // one (too high) -> `links-guessed`.
+    const linksGuessed = !exact.length
+    let variantGuessed = false
     // Several lines left == poe.ninja `variant`s of the same name (measured on
     // the live league: after the baseType and links filters above, EVERY pool
     // with more than one line is a variant pool — so a unique without variants,
-    // the normal case, never reaches the code below and is valued exactly as
-    // before). Callers that pass no mods (Beast/Incubator/Vial/Invitation) keep
-    // the old most-liquid tiebreak untouched.
+    // the normal case, never reaches the code below). Callers that pass no mods
+    // (Beast/Incubator/Vial/Invitation) keep the most-liquid tiebreak.
     let pick = null
     if (pool.length > 1 && mods != null) {
       // The item's own mods decide. When they cannot (see pickVariant), take the
@@ -449,20 +539,34 @@ export function createValuator ({ league, deps = {} }) {
       // conservative floor fromGem() already uses for an unmatched gem, and it
       // keeps the item visible with a defensible number instead of dropping a
       // genuinely tradeable item into `unpriced`.
+      // The cheapest line is a floor, not a match -> `variant-guessed`.
       const priced = pool.filter(l => typeof l.chaosValue === 'number')
-      pick = pickVariant(pool, mods) ||
-        (priced.length ? priced.reduce((a, b) => (b.chaosValue < a.chaosValue ? b : a)) : null)
+      pick = pickVariant(pool, mods)
+      if (!pick) {
+        pick = priced.length ? priced.reduce((a, b) => (b.chaosValue < a.chaosValue ? b : a)) : null
+        variantGuessed = pick != null
+      }
     }
     // No mods handed in (or a single candidate): unchanged behaviour — the
-    // LIQUIDEST line, which describes the market best when nothing separates them.
-    if (!pick) pick = pool.reduce((best, l) => ((l.count || 0) > (best.count || 0) ? l : best), pool[0])
-    return typeof pick.chaosValue === 'number' ? pick.chaosValue : null
+    // LIQUIDEST line, which describes the market best when nothing separates
+    // them. With more than one line that is still a guess -> `variant-guessed`.
+    if (!pick) {
+      pick = pool.reduce((best, l) => ((l.count || 0) > (best.count || 0) ? l : best), pool[0])
+      if (pool.length > 1) variantGuessed = true
+    }
+    if (typeof pick.chaosValue !== 'number') return null
+    return {
+      each: pick.chaosValue,
+      uncertain: linksGuessed ? UNCERTAIN.LINKS_GUESSED : (variantGuessed ? UNCERTAIN.VARIANT_GUESSED : null)
+    }
   }
 
   // Gem pricing with variant matching. SkillGem lines carry gemLevel /
   // gemQuality (null == 0) / corrupted / variant + count. Prefer the exact
   // (level, quality, corrupted) variant; else the nearest by a level/quality/
-  // corrupt distance; else the cheapest as a conservative floor. The confident()
+  // corrupt distance; else the cheapest as a conservative floor. Only the exact
+  // line is certain; the nearest and the cheapest are `gem-guessed` (a level 3
+  // price for a level 4 gem can be far off either way). The confident()
   // gate is essential here: without it the exact match happily locks onto a
   // low-count phantom (e.g. the 369k-chaos level-20/0q Bear Trap).
   async function fromGem (desc) {
@@ -478,7 +582,7 @@ export function createValuator ({ league, deps = {} }) {
       (l.gemLevel ?? null) === lvl &&
       (l.gemQuality ?? 0) === q &&
       (l.corrupted === true) === corr)
-    if (exact) return exact.chaosValue
+    if (exact) return { each: exact.chaosValue, uncertain: null }
 
     if (lvl != null) {
       let best = null; let bestScore = Infinity
@@ -490,11 +594,11 @@ export function createValuator ({ league, deps = {} }) {
           best = l; bestScore = score
         }
       }
-      if (best) return best.chaosValue
+      if (best) return { each: best.chaosValue, uncertain: UNCERTAIN.GEM_GUESSED }
     }
 
     // Cheapest floor.
-    return cands.reduce((a, b) => (b.chaosValue < a.chaosValue ? b : a)).chaosValue
+    return { each: cands.reduce((a, b) => (b.chaosValue < a.chaosValue ? b : a)).chaosValue, uncertain: UNCERTAIN.GEM_GUESSED }
   }
 
   // Helper bundle handed to every declarative route in kinds.mjs. Adding a new
@@ -510,14 +614,40 @@ export function createValuator ({ league, deps = {} }) {
     fromGem,
   }
 
+  // The route's answer, unrounded: { each, source, uncertain } or null.
+  async function valueEach (desc) {
+    const route = VALUATION_ROUTES[desc.kind]
+    if (!route) return null // skip / unknown kind -> honestly unpriced
+    const res = await route(desc, api)
+    const each = res?.each
+    if (each == null) return null
+    return { each, source: res.source, uncertain: res.uncertain ?? null }
+  }
+
   return {
     async value (desc) {
-      const route = VALUATION_ROUTES[desc.kind]
-      if (!route) return null // skip / unknown kind -> honestly unpriced
-      const res = await route(desc, api)
-      const each = res?.each
-      if (each == null) return null
-      return { chaosEach: round1(each), chaosTotal: round1(each * desc.stack), source: res.source }
+      const r = await valueEach(desc)
+      if (!r) return null
+      // `each` is the same price unrounded: the "Listed below market" block
+      // (listing-audit.mjs) compares with it, as a whisper does.
+      return { chaosEach: round1(r.each), chaosTotal: round1(r.each * desc.stack), each: r.each, source: r.source, uncertain: r.uncertain }
+    },
+    // The same price before rounding, for a caller that multiplies or compares
+    // it: a buyer whisper for 1000 Transmutations at 0.149 c each must not be
+    // judged on 0.1 c (whisper-price.mjs). Round only for display.
+    valueEach,
+    // The poe.ninja lines a unique NAME on a BASE can mean, after the same
+    // confident() gate fromItemOverview uses — and nothing else: no link or
+    // variant choice, because a caller without the item's links and mods (a
+    // buyer whisper, whisper-price.mjs) must not have one made for it. One
+    // line is a price; more is 'several variants'. No base: every line of
+    // that name.
+    async uniqueCandidates ({ name, baseType = null, category = null }) {
+      const type = ninjaTypeFor({ category })
+      if (!type) return []
+      const lines = await d.fetchItemOverview(league, type)
+      if (!Array.isArray(lines)) return []
+      return lines.filter(l => l.name === name && confident(l) && (!baseType || l.baseType === baseType) && typeof l.chaosValue === 'number')
     }
   }
 }

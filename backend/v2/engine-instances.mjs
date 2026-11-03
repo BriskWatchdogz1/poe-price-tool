@@ -1,44 +1,33 @@
 // One process, two languages: the engine bundle loaded TWICE, and only one of
-// the two copies allowed anywhere near the network.
-//
-// Why a second instance at all: the bundled parser keeps its item/stat database
-// in module-level closures that `initData(lang)` reassigns (assets/data). There
-// is exactly one set of them per module graph, so a single instance can serve
-// exactly one language. `import(BUNDLE + '?lang=de')` is a different specifier,
-// so Node builds a second graph with its own closures, its own `_ready` and its
-// own RATE_LIMIT_RULES.
-//
-// Two conditions come with that, and neither is style:
+// the two copies allowed anywhere near the network. The bundled parser keeps
+// its item/stat database in module-level closures that `initData(lang)`
+// reassigns (assets/data), so one instance serves exactly one language.
+// `import(BUNDLE + '?lang=de')` is a different specifier, so Node builds a
+// second graph with its own closures, its own `_ready` and its own
+// RATE_LIMIT_RULES. Two conditions come with that, and neither is style:
 //
 //  1. BOTH languages live in the SAME versioned snapshot dir. `ready()` writes
 //     `globalThis.__aptEnv.BASE_URL` PROCESS-WIDE (engine.mts) and every load
 //     path reads it at fetch time, so two instances pointed at different roots
-//     would read each other's data. On top of that the localized load path
-//     still reads `data/en/client_strings.js` from the same root
-//     (CLIENT_STRINGS_REF, assets/data/index.ts) — data/de sits NEXT TO
-//     data/en, never instead of it. The data-refresher builds its snapshots
-//     that way (carryLangTree).
-//  2. `ready()` and `reload()` run STRICTLY SERIALLY across instances. Because
-//     `__aptEnv` is shared, a `Promise.all` over two loads is a race, not a
-//     speed-up. Everything below awaits one instance before touching the next.
+//     would read each other's data; and the localized load path still reads
+//     `data/en/client_strings.js` from the same root (CLIENT_STRINGS_REF,
+//     assets/data/index.ts). data/de sits NEXT TO data/en, never instead of it;
+//     the data-refresher builds its snapshots that way (carryLangTree).
+//  2. `ready()` and `reload()` run STRICTLY SERIALLY across instances: with
+//     `__aptEnv` shared, a `Promise.all` over two loads is a race.
 //
-// And the reason the non-primary instance is a WRAPPER rather than a
-// convention: its rate-limit state is its own. RATE_LIMIT_RULES plus the
-// header-learning `adjustRateLimits` live per module graph, so the second
-// instance starts out with the virgin default (1 request / 5s) and knows
-// nothing about the windows the primary has learned — while the server's
-// serial queue and its ban gate only guard calls made through the primary. One
-// accidental `searchPreset` on the second instance is the ban path this project
-// has already paid for once. So the second instance is handed out as a frozen
-// object with EXACTLY ONE key, `parseItem`. `searchPreset`, `bulkPriceItem` and
-// `searchRaw` are not reachable on it, not merely discouraged — and
-// `engine-instances.test.mjs` pins the key set so a function added later fails
-// the build instead of quietly widening the surface.
-//
-// parseItem itself is verified network-free: the bundle's only http(s) callers
-// are Host.proxy in search/fetch/exchange; data loading goes through the
-// file:// adapter (see bilingual-parse.test.mjs, which puts a fetch spy around
-// a complete parse).
+// THE NON-PRIMARY INSTANCE IS A WRAPPER, not a convention: its rate-limit state
+// (RATE_LIMIT_RULES plus the header-learning `adjustRateLimits`, per module
+// graph) starts at the virgin default (1 request / 5s) and knows nothing the
+// primary has learned, while the server's serial queue and its ban gate only
+// guard calls through the primary. One accidental `searchPreset` there is the
+// ban path this project has already paid for once. So it is a frozen object
+// with EXACTLY ONE key, `parseItem`; `searchPreset`, `bulkPriceItem` and
+// `searchRaw` are not reachable on it, and `engine-instances.test.mjs` pins the
+// key set so a function added later fails the build. parseItem itself is
+// verified network-free: the bundle's only http(s) callers are Host.proxy in
+// search/fetch/exchange, and data loading goes through the file:// adapter
+// (bilingual-parse.test.mjs puts a fetch spy around a complete parse).
 
 export const PRIMARY_LANG = 'en'
 

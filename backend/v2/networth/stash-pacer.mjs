@@ -1,118 +1,40 @@
 // backend/v2/networth/stash-pacer.mjs
 // How long to wait between two stash requests — DERIVED from the limits GGG
-// publishes in every stash response, instead of guessed at as a constant.
+// publishes in every stash response, instead of guessed at as a constant. It
+// sends nothing, retries nothing and asks GGG nothing: it reads rules off
+// responses that arrived anyway and returns a number of milliseconds.
 //
-// WHAT WAS MEASURED. Since the stash path started logging the rule set it is
-// answered with (stash-client.mjs `noteRateLimitRules`), the limits are no
-// longer a matter of opinion. Two rule sets come back, one per endpoint group:
+// THE RULES are the ones stash-client.mjs `noteRateLimitRules` logs, one set
+// per endpoint group; the measured sets (and the stricter `Ip`-only form an
+// unauthenticated request gets) are listed at the rule table in
+// createStashPacer. There are `Ip` rules: the budget hangs off the address, not
+// only the session. Why a flat 1500ms is too fast for them (89% of `Ip
+// 45/60s`; the map stash's 31 requests in 46s past `Account 30/300s`) is
+// measured in docs/admin.md, "The pace between two stash requests".
 //
-//   Account 30/60s ban 60s,  Account 100/1800s ban 600s,
-//   Ip      45/60s ban 120s, Ip      180/1800s ban 600s
-//   Account 15/10s ban 60s,  Account 30/300s  ban 300s
+// THE PACE. Every rule states a mean rate: `hits` per `windowSec` is one
+// request every `windowSec/hits` seconds, held over the window plus its bucket
+// (bucketSecFor). The strictest rule wins, a SHARE of it is all this tool
+// claims, and the base spacing (baseMs, 1500ms) is the floor, so the
+// derivation can only lengthen the wait, whatever the headers or shares say:
 //
-// …AND A THIRD ONE ARRIVED LATER, which is why the rule table has a way out of
-// it now. On 13.08. at 02:15 UTC the same account on the same address was
-// answered `Ip 30/60s ban 120s, Ip 90/1800s ban 600s, Ip 180/7200s ban 3600s`
-// — stricter across the board, with a two-hour window nothing had published
-// before — and at 11:28 UTC the set of 14:12 was back. That third set is the
-// SAME policy answering an unauthenticated request, not a penalty; see the note
-// on the rule table in createStashPacer for the evidence and for what its
-// permanence cost while the table only ever grew.
+//     spacing = max( baseMs, max over rules of
+//                    (windowSec + bucketSec)*1000 / (hits*share) )
 //
-// AND THE NUMBERS ARE NOT AIMED AT THIS DEPLOYMENT. The authenticated set above
-// is digit for digit the one a third party measured on 18.07.2026 from another
-// account, another address and another continent: it is what GGG ships to
-// everybody. Nothing in this file is a reaction to a punishment, and there is
-// none to react to — GGG's penalties are binary (a timed lock, a withdrawn
-// credential, a Cloudflare block), never a quietly smaller set of numbers.
+// The published number is where GGG bans, not a target. `Ip` gets HALF: the
+// address is shared with everything else leaving it (the household's browser on
+// pathofexile.com, this app's OWN trade path, not counted here). `Account` gets
+// three quarters, the rest left for the operator's own logged-in browsing. An
+// unknown rule name is treated as `Ip`: a scope never seen is not one to assume
+// as its own. On the measured set the binding rule is `Account 100/1800s`
+// (24.8s a request) ahead of `Ip 180/1800s` (20.7s).
 //
-// Read as "hits allowed / window / how long the ban lasts if you exceed it".
-// Two things in there decide this whole module:
-//
-//   1. THERE ARE `Ip` RULES. The budget hangs off the address, not only off the
-//      session — which is the same thing the one incident this repository has
-//      an operator's account of said: a ban applied to the whole address and
-//      ended by taking a new one, not by sitting out an account penalty.
-//   2. THE CONSTANT WAS AT 89% OF ONE OF THEM. The base pace inside a step was
-//      1500ms, i.e. 40 requests a minute, against `Ip 45/60s`. The existing
-//      brake in delayFor() only opens at 80% of a window — and it is REACTIVE:
-//      it reads a state counter off a response, so the requests it reacts to
-//      are already out. Nothing was ahead of the limit; something was behind it.
-//
-// AND THE LONG WINDOWS ARE THE ONES THAT WERE NEVER COUNTED. `Ip 180/1800s` is
-// 6 requests a MINUTE averaged over half an hour, and `Account 100/1800s` is
-// 3.3 a minute. The ordinary cadence (one step every 30s = 60 requests per
-// 1800s) fits inside both. A folder tab does not: it spends 1+N requests inside
-// ONE step, and the map stash was measured at 30 sub-tabs = 31 requests in 46s
-// at the old pace.
-//
-// That burst was already past a published limit, with no assumption needed to
-// see it: a folder tab is walked on the second endpoint, whose own rules are
-// `Account 15/10s` and `Account 30/300s`, and 31 requests inside 46s is past
-// 30/300s on its own — before the unique stash's 19 on the next turn are
-// counted. Against the FIRST endpoint's windows the same burst only counts if
-// the two rule sets are less separate than they look: on an 18-tab account the
-// round-robin reaches both folder tabs about three times per half hour, ~214
-// requests per 1800s, of which only ~52 go to that endpoint. So its `Account
-// 100/1800s` is safe under the strict reading, and `Ip 180/1800s` is exceeded
-// under the conservative one. Nothing in the headers decides between them, and
-// the ban this deployment actually saw reached the whole address.
-//
-// SO THE PACE IS DERIVED, NOT DECLARED. Every rule states a mean rate the tool
-// may not exceed: `hits` per `windowSec` is one request every
-// `windowSec/hits` seconds. The strictest rule wins, a SHARE of it is all this
-// tool claims (see below), and the old constant stays underneath as the floor:
-//
-//     spacing = max( baseMs, max over rules of  windowSec*1000 / (hits*share) )
-//
-// The floor is what makes this change unable to send MORE in any constellation,
-// whatever the headers say and whatever the shares are set to: the derivation
-// can only ever lengthen the wait the client already took.
-//
-// WHY A SHARE AND NOT THE WHOLE LIMIT. The published number is the point at
-// which GGG bans, not a target to run at. Two shares, because the two rule
-// names do not mean the same thing:
-//
-//   `Ip`      — shared with everything else leaving this address: the household's
-//               own browser on pathofexile.com, and this app's OWN trade path,
-//               which spends the same address and is not counted here. The tool
-//               cannot see any of that, so it claims HALF and leaves the rest to
-//               traffic it has no way to measure.
-//   `Account` — spent by this session. The operator's own logged-in browsing is
-//               the only other plausible consumer, so three quarters, with the
-//               remainder left for it.
-//
-// An unknown rule name is treated as `Ip`: a scope this code has never seen is
-// exactly the one it must not assume it has to itself.
-//
-// Note that "Ip is taken more strictly" is about the SHARE, not about which rule
-// ends up binding. On the measured set the binding rule is `Account 100/1800s`
-// (18s/request at 0.75 = 24s) ahead of `Ip 180/1800s` (10s/request at 0.5 =
-// 20s), because GGG's account rule is the tighter rate to begin with. All of
-// them are honoured at once; that is what taking the maximum means.
-//
-// WHY THE STATE LIVES HERE, AT MODULE LEVEL, AND NOT IN THE CLIENT. The server
-// builds a fresh stash client every tick (server.mjs: "the 30s interval IS the
-// pacing, so the client's per-request backoff state isn't needed across ticks").
-// That reasoning holds for a step of one request and breaks for a folder tab:
-// 31 requests inside one step are not paced by a 30s tick, and the 1800s window
-// they land in outlives any number of ticks. The pacer is therefore process-wide
-// and shared by every client — the same shape `seenRuleSets` in stash-client.mjs
-// already has, and for a stronger reason: an `Ip` budget belongs to the process
-// (to the address), not to a client instance, and it is shared across USERS too,
-// which a per-client pacer could not express. Making it a constructor argument
-// server.mjs has to pass would mean a forgotten argument silently removes the
-// protection; a shared default cannot be forgotten.
-//
-// It is safe to have one because the refresher is strictly sequential — one step
-// at a time, one request at a time, `busy`-guarded. Nothing here parallelises
-// anything, and on that single stream a minimum spacing IS a maximum rate:
-// at 24s the whole process cannot exceed 75 requests per 1800s, whatever a
-// folder tab does inside one step.
-//
-// WHAT THIS MODULE DOES NOT DO: send anything, retry anything, or ask GGG
-// anything. It reads rules off responses that arrived anyway, and returns a
-// number of milliseconds to the caller.
+// THE STATE IS MODULE-LEVEL, process-wide and shared by every client and USER,
+// like `seenRuleSets` in stash-client.mjs: an `Ip` budget belongs to the
+// address, server.mjs builds a fresh stash client every tick, and an 1800s
+// window outlives any number of ticks. One pacer is safe because the refresher
+// is strictly sequential (`busy`-guarded): on one stream a minimum spacing IS a
+// maximum rate.
 
 import { envNum } from '../numeric-settings.mjs'
 
@@ -215,8 +137,8 @@ export function minSpacingMs (rules, {
  *
  * The policy is what makes the table two-way rather than one-way — see the
  * WHY THE POLICY IS PART OF THE KEY note in createStashPacer. A response with
- * no policy header keys under the empty string, which is exactly the pre-policy
- * key, and is treated as pure union (added to, never replaced).
+ * no policy header keys under the empty string and is treated as pure union
+ * (added to, never replaced).
  */
 function ruleKey (policy, r) { return `${policy ?? ''}\0${r.rule}:${r.windowSec}` }
 
@@ -244,7 +166,7 @@ export function createStashPacer ({
   // here, so every rule known is honoured for every request.
   //
   // WHY THE POLICY IS PART OF THE KEY. Keyed on `rule:window` alone the table
-  // had no way out at all, and the production log says what that costs. Over
+  // has no way out at all, and the production log says what that costs. Over
   // two days one account on one address was answered with three different sets:
   //
   //   12.08. 14:12 UTC  Account 30/60s ban 60s,  Account 100/1800s ban 600s,
@@ -254,12 +176,12 @@ export function createStashPacer ({
   //                     Ip 180/7200s ban 3600s
   //   13.08. 11:28 UTC  the 14:12 set again
   //
-  // The 02:15 set derives an 80s spacing. Because nothing was ever removed, the
-  // tool was still holding to 80s at 11:28 — hours after GGG had gone back to
-  // publishing the set that asks for 24s, and it would have kept doing so until
-  // the process was restarted. Strictly one-way: any single strict answer,
-  // whatever produced it, was permanent. An address change (nightly on plenty of
-  // domestic lines, and it resets the `Ip` counters) did not help either.
+  // The 02:15 set derives an 80s spacing. With nothing ever removed, the tool
+  // still held to 80s at 11:28 — hours after GGG had gone back to publishing
+  // the set that asks for 24s — and would have until a restart (docs/bugs.md
+  // B16). Strictly one-way: any single strict answer, whatever produced it,
+  // is permanent, and an address change (nightly on plenty of domestic lines,
+  // and it resets the `Ip` counters) does not help.
   //
   // WHAT THE 02:15 SET ACTUALLY IS, because it decides how to read all of this:
   // NOT a penalty. It is the SAME policy answering an UNAUTHENTICATED request.
@@ -277,8 +199,8 @@ export function createStashPacer ({
   // session, and stash-client.mjs says so out loud when the `Account` rules
   // disappear from a policy that had them (`noteSessionScope`). The pacing side
   // is still right to honour the Ip-only limits while they are what GGG
-  // published: that request really was measured against them. What was wrong was
-  // never letting go of them afterwards, which is what this key fixes.
+  // published: that request really was measured against them. What it must not
+  // do is hold on to them afterwards, which is what this key prevents.
   //
   // The policy is the field that says which of these are the SAME budget being
   // restated and which are different budgets standing side by side, and that is
@@ -292,8 +214,8 @@ export function createStashPacer ({
   // FASTER is only ever GGG's decision, never a lapse of memory — that is the
   // whole difference between this and expiry.
   //
-  // A response with NO policy header keeps the old behaviour exactly: it is
-  // added to the union and never replaces anything. A header that is not there
+  // A response with NO policy header is added to the union and never replaces
+  // anything. A header that is not there
   // must not be able to make two endpoints look like one budget and take the
   // 1800s window away from a folder-tab walk.
   const rules = new Map()
@@ -303,8 +225,8 @@ export function createStashPacer ({
   // Earliest time the next request may go out because of a REACTIVE brake —
   // delayFor()'s answer to a state counter that is near or at its limit. The
   // client sleeps that value inside its own step already; keeping it here is
-  // what makes it survive into the next tick's fresh client, where it used to be
-  // discarded along with the rest of the header state.
+  // what makes it survive into the next tick's fresh client, which starts
+  // without the previous client's header state.
   let notBefore = 0
 
   /**

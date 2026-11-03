@@ -316,7 +316,7 @@ fi
 # heartbeat until the build is over. With that setup a build longer than the
 # tool's window (20 min by default) makes the admin area say "not set up" in
 # the middle of the update; raise POE_UPDATE_HEARTBEAT_MAX_AGE_MS past your
-# worst build, or use cron. docs/admin.md says the same next to the unit.
+# worst build, or use cron. docs/runbooks.md says the same next to the unit.
 # ---------------------------------------------------------------------------
 {
   printf 'at=%s\n' "$(now)"

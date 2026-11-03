@@ -108,7 +108,7 @@ const L = 'Standard'
 test('stackable via exchange map (name fallback): stack multiplies', async () => {
   const v = createValuator({ league: L, deps: fakeDeps() })
   const r = await v.value({ kind: 'stackable', name: 'Divine Orb', tradeTag: 'divine', stack: 3 })
-  assert.deepEqual(r, { chaosEach: 215.4, chaosTotal: 646.2, source: 'exchange' })
+  assert.deepEqual(r, { chaosEach: 215.4, chaosTotal: 646.2, each: 215.4, source: 'exchange', uncertain: 'thin-market' })
 })
 
 test('regression: the exchange beats the stash currency-overview (cheap currency)', async () => {
@@ -164,23 +164,66 @@ test('Chaos Orb: special case chaosEach=1 (it has no exchange line of its own)',
   const deps = fakeDeps()
   const v = createValuator({ league: L, deps })
   const r = await v.value({ kind: 'stackable', name: 'Chaos Orb', tradeTag: 'chaos', stack: 273 })
-  assert.deepEqual(r, { chaosEach: 1, chaosTotal: 273, source: 'chaos' })
+  assert.deepEqual(r, { chaosEach: 1, chaosTotal: 273, each: 1, source: 'chaos', uncertain: null })
   assert.equal(deps.calls.length, 0) // no fetch needed
 })
 
-test('exchange map is built only ONCE per valuator (14 requests, then cached)', async () => {
+test('exchange map is built once per TTL (14 requests, then cached until exchangeMapTtlMs)', async () => {
   const deps = fakeDeps()
+  let t = 1_000_000
+  deps.now = () => t
+  deps.exchangeMapTtlMs = 3600000
   const v = createValuator({ league: L, deps })
+  const exchangeCalls = () => deps.calls.filter(c => c[0] === 'exchange').length
   await v.value({ kind: 'stackable', name: 'Divine Orb', tradeTag: 'divine', stack: 1 })
   await v.value({ kind: 'stackable', name: 'Titanic Scarab', tradeTag: 'titanic-scarab', stack: 1 })
-  const exchangeCalls = deps.calls.filter(c => c[0] === 'exchange').length
-  assert.equal(exchangeCalls, 14) // the 14 stackable exchange types, exactly once
+  assert.equal(exchangeCalls(), 14) // the 14 stackable exchange types, exactly once
+  t += 3600001
+  await v.value({ kind: 'stackable', name: 'Divine Orb', tradeTag: 'divine', stack: 1 })
+  assert.equal(exchangeCalls(), 28, 'past the TTL the map is read again (B29: it used to live as long as the process)')
+})
+
+test('an empty exchange map is not kept: the next valuation builds it again', async () => {
+  const deps = fakeDeps()
+  const inner = deps.fetchExchangeOverview
+  let open = false
+  // A league that has no trade yet: every type answers empty until it opens.
+  deps.fetchExchangeOverview = async (league, type) =>
+    (open ? inner(league, type) : { nameToId: new Map(), lineById: new Map() })
+  const v = createValuator({ league: L, deps })
+  assert.equal(await v.value({ kind: 'stackable', name: 'Divine Orb', tradeTag: 'divine', stack: 1 }), null)
+  open = true
+  const r = await v.value({ kind: 'stackable', name: 'Divine Orb', tradeTag: 'divine', stack: 1 })
+  assert.equal(r.chaosEach, 215.4)
+})
+
+test('a map with a type that did not load (null) is rebuilt on the next call', async () => {
+  const deps = fakeDeps()
+  const inner = deps.fetchExchangeOverview
+  let scarabFailed = false
+  deps.fetchExchangeOverview = async (league, type) => {
+    if (type === 'Scarab' && !scarabFailed) { scarabFailed = true; deps.calls.push(['exchange', league, type]); return null }
+    return inner(league, type)
+  }
+  const v = createValuator({ league: L, deps })
+  assert.equal(await v.value({ kind: 'stackable', name: 'Titanic Scarab', tradeTag: 'titanic-scarab', stack: 1 }), null)
+  const r = await v.value({ kind: 'stackable', name: 'Titanic Scarab', tradeTag: 'titanic-scarab', stack: 1 })
+  assert.ok(deps.calls.filter(c => c[0] === 'exchange').length > 14)
+  assert.equal(r.chaosEach, 2.5)
+})
+
+test('concurrent valuations share one build', async () => {
+  const deps = fakeDeps()
+  const v = createValuator({ league: L, deps })
+  await Promise.all(Array.from({ length: 5 }, () =>
+    v.value({ kind: 'stackable', name: 'Divine Orb', tradeTag: 'divine', stack: 1 })))
+  assert.equal(deps.calls.filter(c => c[0] === 'exchange').length, 14)
 })
 
 test('divcard via Exchange DivinationCard', async () => {
   const v = createValuator({ league: L, deps: fakeDeps() })
   const r = await v.value({ kind: 'divcard', name: 'The Doctor', stack: 2 })
-  assert.deepEqual(r, { chaosEach: 900, chaosTotal: 1800, source: 'exchange:DivinationCard' })
+  assert.deepEqual(r, { chaosEach: 900, chaosTotal: 1800, each: 900, source: 'exchange:DivinationCard', uncertain: 'thin-market' })
 })
 
 test('divcard missing from the (loaded) exchange -> null (Task 4: forced 0 is gone)', async () => {
@@ -195,7 +238,7 @@ test('divcard: the Faustus value wins over the card exchange', async () => {
   deps.faustusStore = fakeFaustusStore({ 'The Doctor': 1234 })
   const v = createValuator({ league: L, deps })
   const r = await v.value({ kind: 'divcard', name: 'The Doctor', stack: 2 })
-  assert.deepEqual(r, { chaosEach: 1234, chaosTotal: 2468, source: 'faustus' })
+  assert.deepEqual(r, { chaosEach: 1234, chaosTotal: 2468, each: 1234, source: 'faustus', uncertain: null })
 })
 
 // F1: a stale faustus store (isFresh=false) must NOT serve frozen prices any
@@ -232,7 +275,7 @@ test('F1: a fresh faustus store (isFresh=true) wins as usual', async () => {
   deps.faustusStore = fakeFaustusStore({ 'The Doctor': 1234 }, L, { fresh: true })
   const v = createValuator({ league: L, deps })
   const r = await v.value({ kind: 'divcard', name: 'The Doctor', stack: 2 })
-  assert.deepEqual(r, { chaosEach: 1234, chaosTotal: 2468, source: 'faustus' })
+  assert.deepEqual(r, { chaosEach: 1234, chaosTotal: 2468, each: 1234, source: 'faustus', uncertain: null })
 })
 
 test('divcard when the exchange is down -> null (never 0, so a real card is not zeroed)', async () => {
@@ -248,7 +291,7 @@ test('divcard when the exchange is down -> null (never 0, so a real card is not 
 test('unique: baseType tiebreak + junk filter (fake single-listing line discarded)', async () => {
   const v = createValuator({ league: L, deps: fakeDeps() })
   const r = await v.value({ kind: 'unique', name: 'Abyssus', baseType: 'Ezomyte Burgonet', category: 'Helmet', stack: 1 })
-  assert.deepEqual(r, { chaosEach: 42.7, chaosTotal: 42.7, source: 'item:UniqueArmour' })
+  assert.deepEqual(r, { chaosEach: 42.7, chaosTotal: 42.7, each: 42.7, source: 'item:UniqueArmour', uncertain: null })
 })
 
 test('unique without a category (base not in items.ndjson) -> null', async () => {
@@ -259,7 +302,7 @@ test('unique without a category (base not in items.ndjson) -> null', async () =>
 test('unique map: category Map -> UniqueMap overview, the baseType tiebreak does no harm', async () => {
   const v = createValuator({ league: L, deps: fakeDeps() })
   const r = await v.value({ kind: 'unique', name: 'Maelström of Chaos', baseType: 'Torture Chamber Map', category: 'Map', links: 0, stack: 1 })
-  assert.deepEqual(r, { chaosEach: 1, chaosTotal: 1, source: 'item:UniqueMap' })
+  assert.deepEqual(r, { chaosEach: 1, chaosTotal: 1, each: 1, source: 'item:UniqueMap', uncertain: null })
 })
 
 test('unique map: the map tier in the base line picks the tier\'s line, not the liquidest', async () => {
@@ -267,9 +310,24 @@ test('unique map: the map tier in the base line picks the tier\'s line, not the 
   // taken into account". This is that claim, as a test.
   const v = createValuator({ league: L, deps: fakeDeps() })
   const t15 = await v.value({ kind: 'unique', name: 'Cortex', baseType: 'Map (Tier 15)', category: 'Map', links: 0, mods: [], stack: 1 })
-  assert.deepEqual(t15, { chaosEach: 30, chaosTotal: 30, source: 'item:UniqueMap' })
+  assert.deepEqual(t15, { chaosEach: 30, chaosTotal: 30, each: 30, source: 'item:UniqueMap', uncertain: null })
   const t16 = await v.value({ kind: 'unique', name: 'Cortex', baseType: 'Map (Tier 16)', category: 'Map', links: 0, mods: [], stack: 1 })
-  assert.deepEqual(t16, { chaosEach: 300, chaosTotal: 300, source: 'item:UniqueMap' })
+  assert.deepEqual(t16, { chaosEach: 300, chaosTotal: 300, each: 300, source: 'item:UniqueMap', uncertain: null })
+})
+
+// docs/pricing-logic.md ("Deliberately not marked") says what happens when the
+// map tier (or base) matches NO line: with one line left the price stays
+// unmarked, with several the variant rule marks it. Both halves, as a test.
+test('unique map: a tier without a line of its own is a guess when several lines remain, unmarked when one does', async () => {
+  const v = createValuator({ league: L, deps: fakeDeps() })
+  // Cortex has T15 and T16 lines, no T14: nothing on the item decides.
+  for (const mods of [[], null]) {
+    const t14 = await v.value({ kind: 'unique', name: 'Cortex', baseType: 'Map (Tier 14)', category: 'Map', links: 0, mods, stack: 1 })
+    assert.equal(t14.uncertain, 'variant-guessed', `mods ${JSON.stringify(mods)}: two tiers, neither is the item's`)
+  }
+  // Maelström of Chaos has a single (T8) line: it is taken, unmarked.
+  const one = await v.value({ kind: 'unique', name: 'Maelström of Chaos', baseType: 'Map (Tier 3)', category: 'Map', links: 0, mods: [], stack: 1 })
+  assert.deepEqual(one, { chaosEach: 1, chaosTotal: 1, each: 1, source: 'item:UniqueMap', uncertain: null })
 })
 
 test('map stash end to end: raw GGG item -> normalize -> priced (not unpriced)', async () => {
@@ -290,7 +348,7 @@ test('map stash end to end: raw GGG item -> normalize -> priced (not unpriced)',
   assert.equal(desc.category, 'Map')
   const v = createValuator({ league: L, deps: fakeDeps() })
   const r = await v.value(desc)
-  assert.deepEqual(r, { chaosEach: 30, chaosTotal: 30, source: 'item:UniqueMap' })
+  assert.deepEqual(r, { chaosEach: 30, chaosTotal: 30, each: 30, source: 'item:UniqueMap', uncertain: null })
 })
 
 test('map stash end to end: an UNIDENTIFIED unique map stays unpriced (never guessed)', async () => {
@@ -317,7 +375,7 @@ test('unidentified unique: no poe.ninja call, result null (never 0)', async () =
 test('gem: exact variant (level/quality/corrupted) + junk filter', async () => {
   const v = createValuator({ league: L, deps: fakeDeps() })
   const r = await v.value({ kind: 'gem', name: 'Enlighten Support', level: 4, quality: 0, corrupted: true, stack: 1 })
-  assert.deepEqual(r, { chaosEach: 16758, chaosTotal: 16758, source: 'item:SkillGem' })
+  assert.deepEqual(r, { chaosEach: 16758, chaosTotal: 16758, each: 16758, source: 'item:SkillGem', uncertain: null })
 })
 
 test('gem: no exact variant -> next best, same corrupted status preferred', async () => {
@@ -326,6 +384,7 @@ test('gem: no exact variant -> next best, same corrupted status preferred', asyn
   // penalised heavily for the corrupted mismatch -> level 3 uncorrupted (2394) wins.
   const r = await v.value({ kind: 'gem', name: 'Enlighten Support', level: 5, quality: 0, corrupted: false, stack: 1 })
   assert.equal(r.chaosEach, 2394)
+  assert.equal(r.uncertain, 'gem-guessed', 'a level 3 price for a level 5 gem is a guess and says so')
 })
 
 test('gem: the exact variant exists only as a low-count phantom -> dropped, not 369k (Bear Trap case)', async () => {
@@ -335,6 +394,7 @@ test('gem: the exact variant exists only as a low-count phantom -> dropped, not 
   // the next best confident line (20/20, 16.7) wins. Never 369553.
   const r = await v.value({ kind: 'gem', name: 'Bear Trap', level: 20, quality: 0, corrupted: false, stack: 1 })
   assert.equal(r.chaosEach, 16.7)
+  assert.equal(r.uncertain, 'gem-guessed')
 })
 
 test('gem: unknown name -> null (unpriced)', async () => {
@@ -351,7 +411,7 @@ test('cluster without a theme match -> null (unpriced, not 0)', async () => {
 test('beast via item Beast', async () => {
   const v = createValuator({ league: L, deps: fakeDeps() })
   const r = await v.value({ kind: 'beast', name: 'Black Mórrigan', stack: 1 })
-  assert.deepEqual(r, { chaosEach: 77, chaosTotal: 77, source: 'item:Beast' })
+  assert.deepEqual(r, { chaosEach: 77, chaosTotal: 77, each: 77, source: 'item:Beast', uncertain: null })
 })
 
 test('skip -> null', async () => {
@@ -373,7 +433,7 @@ test('corpse: Imperfect -> 0 (no store access, no fetch)', async () => {
   deps.corpseStore = { getPrice: () => { touched = true; return 999 }, league: () => L }
   const v = createValuator({ league: L, deps })
   const r = await v.value({ kind: 'corpse', name: 'Imperfect Forest Tiger', tradeTag: null, stack: 3 })
-  assert.deepEqual(r, { chaosEach: 0, chaosTotal: 0, source: 'corpse:imperfect' })
+  assert.deepEqual(r, { chaosEach: 0, chaosTotal: 0, each: 0, source: 'corpse:imperfect', uncertain: null })
   assert.equal(touched, false)
 })
 
@@ -382,7 +442,7 @@ test('corpse: a fresh store hit wins (each = getPrice, * stack)', async () => {
   deps.corpseStore = { getPrice: name => (name === 'Forest Tiger' ? 12 : null), league: () => L }
   const v = createValuator({ league: L, deps })
   const r = await v.value({ kind: 'corpse', name: 'Forest Tiger', tradeTag: null, stack: 4 })
-  assert.deepEqual(r, { chaosEach: 12, chaosTotal: 48, source: 'corpse:trade' })
+  assert.deepEqual(r, { chaosEach: 12, chaosTotal: 48, each: 12, source: 'corpse:trade', uncertain: null })
 })
 
 test('corpse: store for a DIFFERENT league -> null (no cross-league price)', async () => {
@@ -403,7 +463,7 @@ test('fungible: a Faustus hit beats currency-overview and exchange', async () =>
   deps.faustusStore = fakeFaustusStore({ 'Orb of Fusing': 200 })
   const v = createValuator({ league: L, deps })
   const r = await v.value({ kind: 'stackable', name: 'Orb of Fusing', tradeTag: 'fusing', stack: 2 })
-  assert.deepEqual(r, { chaosEach: 200, chaosTotal: 400, source: 'faustus' })
+  assert.deepEqual(r, { chaosEach: 200, chaosTotal: 400, each: 200, source: 'faustus', uncertain: null })
 })
 
 test('fungible: Faustus AND exchange both miss -> ninja currency-overview (Currency) wins', async () => {
@@ -416,7 +476,7 @@ test('fungible: Faustus AND exchange both miss -> ninja currency-overview (Curre
     type === 'Currency' ? { byName: new Map([['Exalted Orb', 205]]) } : { byName: new Map() }
   const v = createValuator({ league: L, deps })
   const r = await v.value({ kind: 'stackable', name: 'Exalted Orb', tradeTag: 'exalted', stack: 1 })
-  assert.deepEqual(r, { chaosEach: 205, chaosTotal: 205, source: 'ninja:currency' })
+  assert.deepEqual(r, { chaosEach: 205, chaosTotal: 205, each: 205, source: 'ninja:currency', uncertain: null })
 })
 
 test('fungible: miss in Currency -> the Fragment currency-overview wins', async () => {
@@ -425,7 +485,7 @@ test('fungible: miss in Currency -> the Fragment currency-overview wins', async 
     type === 'Fragment' ? { byName: new Map([['Sacrifice at Dusk', 7]]) } : { byName: new Map() }
   const v = createValuator({ league: L, deps })
   const r = await v.value({ kind: 'stackable', name: 'Sacrifice at Dusk', tradeTag: null, stack: 3 })
-  assert.deepEqual(r, { chaosEach: 7, chaosTotal: 21, source: 'ninja:fragment' })
+  assert.deepEqual(r, { chaosEach: 7, chaosTotal: 21, each: 7, source: 'ninja:fragment', uncertain: null })
 })
 
 test('fungible: all currency-overviews empty -> the exchange map (Essence) wins', async () => {
@@ -433,7 +493,7 @@ test('fungible: all currency-overviews empty -> the exchange map (Essence) wins'
   const deps = fakeDeps()
   const v = createValuator({ league: L, deps })
   const r = await v.value({ kind: 'stackable', name: 'Deafening Essence of Fear', tradeTag: 'deafening-essence-of-fear', stack: 1 })
-  assert.deepEqual(r, { chaosEach: 44.3, chaosTotal: 44.3, source: 'exchange' })
+  assert.deepEqual(r, { chaosEach: 44.3, chaosTotal: 44.3, each: 44.34, source: 'exchange', uncertain: 'thin-market' })
 })
 
 test('fungible: no hit at any stage -> null (honestly unpriced, never 0)', async () => {
@@ -449,13 +509,13 @@ test('fungible: a faustus store from another league is NOT read (cross-league gu
   deps.faustusStore = fakeFaustusStore({ 'Divine Orb': 999 }, 'Hardcore')
   const v = createValuator({ league: L, deps })
   const r = await v.value({ kind: 'stackable', name: 'Divine Orb', tradeTag: 'divine', stack: 1 })
-  assert.deepEqual(r, { chaosEach: 215.4, chaosTotal: 215.4, source: 'exchange' })
+  assert.deepEqual(r, { chaosEach: 215.4, chaosTotal: 215.4, each: 215.4, source: 'exchange', uncertain: 'thin-market' })
 })
 
 test('invitation via item Invitation (coverage audit)', async () => {
   const v = createValuator({ league: L, deps: fakeDeps() })
   const r = await v.value({ kind: 'invitation', name: 'Screaming Invitation', stack: 1 })
-  assert.deepEqual(r, { chaosEach: 33, chaosTotal: 33, source: 'item:Invitation' })
+  assert.deepEqual(r, { chaosEach: 33, chaosTotal: 33, each: 33, source: 'item:Invitation', uncertain: null })
 })
 
 test('extensible kind system: a new valuation route via ONE entry', async () => {
@@ -464,7 +524,7 @@ test('extensible kind system: a new valuation route via ONE entry', async () => 
   try {
     const v = createValuator({ league: L, deps: fakeDeps() })
     const r = await v.value({ kind: 'sample', name: 'Widget', stack: 4 })
-    assert.deepEqual(r, { chaosEach: 5, chaosTotal: 20, source: 'sample' })
+    assert.deepEqual(r, { chaosEach: 5, chaosTotal: 20, each: 5, source: 'sample', uncertain: null })
   } finally {
     delete VALUATION_ROUTES.sample
   }
@@ -494,14 +554,17 @@ test('unique: an unlinked item gets the base price, not the 6L price', async () 
   const v = linkValuator()
   const r = await v.value({ kind: 'unique', name: "Nuro's Harp", baseType: 'Harbinger Bow', category: 'Bow', links: 0, stack: 1 })
   assert.equal(r.chaosEach, 1)
+  assert.equal(r.uncertain, null, 'the base line IS the line for an unlinked item')
 })
 
 test('unique: a 6L gets the 6L price, a 5L the 5L price', async () => {
   const v = linkValuator()
   const six = await v.value({ kind: 'unique', name: "Nuro's Harp", baseType: 'Harbinger Bow', category: 'Bow', links: 6, stack: 1 })
   assert.equal(six.chaosEach, 103.6)
+  assert.equal(six.uncertain, null)
   const five = await v.value({ kind: 'unique', name: "Nuro's Harp", baseType: 'Harbinger Bow', category: 'Bow', links: 5, stack: 1 })
   assert.equal(five.chaosEach, 1.6)
+  assert.equal(five.uncertain, null)
 })
 
 test('unique: 4L counts as unlinked (ninja only splits out 5L and 6L)', async () => {
@@ -527,6 +590,7 @@ test('without mods: several lines remain -> the most liquid one wins, not the fi
   })
   const r = await v.value({ kind: 'unique', name: 'X', baseType: 'B', category: 'Bow', links: 0, stack: 1 })
   assert.equal(r.chaosEach, 12)
+  assert.equal(r.uncertain, 'variant-guessed', 'two lines and nothing to choose by: the most traded one is still a guess')
 })
 
 // Divine Orb is the display unit: its price MUST come from the same source as
@@ -718,6 +782,44 @@ test('a line with clearly sufficient volume (well above 10 units) stays priced',
   assert.equal(r.chaosEach, 100)
 })
 
+// B36: the unit count is a division, and 200.1 / 20.01 is 9.999999999999998
+// in floating point, although those numbers state exactly 10 units. A count
+// that misses the floor only by that arithmetic error reaches it. A count the
+// numbers themselves put under the floor (9.99 units: 199.9 / 20.01) stays
+// under it: no tolerance for the rounding of poe.ninja's numbers.
+test('exactly 10 units by the stated numbers are a price, though the division gives 9.999999999999998', async () => {
+  assert.ok(200.1 / 20.01 < 10) // the arithmetic error this test is about
+  const v = exchangeOnlyValuator({
+    Fossil: {
+      nameToId: new Map([['Ten Fossil', 'ten-fossil'], ['Under Fossil', 'under-fossil']]),
+      lineById: new Map([
+        ['ten-fossil', { id: 'ten-fossil', primaryValue: 20.01, volumePrimaryValue: 200.1 }],
+        ['under-fossil', { id: 'under-fossil', primaryValue: 20.01, volumePrimaryValue: 199.9 }]
+      ])
+    }
+  })
+  const stack = name => v.value({ kind: 'stackable', name, tradeTag: null, stack: 1 })
+  assert.equal((await stack('Ten Fossil'))?.each, 20.01) // chaosEach is rounded to 20
+  assert.equal(await stack('Under Fossil'), null, '9.99 units and 199.9c of turnover clear neither floor')
+})
+
+// The slack absorbs arithmetic error and nothing larger. A count a
+// hundred-millionth of the floor short by the stated numbers (99.999999 / 10
+// = 9.9999999 units, 1e-8 of the floor) is a real miss, not a division
+// artefact, and stays rejected. This pins FLOAT_SLACK in sell-side.mjs under
+// 1e-8: any slack at or above it lets the line through. The turnover (about
+// 100c) is far below the rescue, so only the unit floor decides.
+test('a count a hundred-millionth of the floor short by the stated numbers stays rejected', async () => {
+  assert.ok(10 - 99.999999 / 10 > 9e-8) // the miss is real, many orders above float error
+  const v = exchangeOnlyValuator({
+    Fossil: {
+      nameToId: new Map([['Near Fossil', 'near-fossil']]),
+      lineById: new Map([['near-fossil', { id: 'near-fossil', primaryValue: 10, volumePrimaryValue: 99.999999 }]])
+    }
+  })
+  assert.equal(await v.value({ kind: 'stackable', name: 'Near Fossil', tradeTag: null, stack: 1 }), null)
+})
+
 test('missing volume field -> fail open, no crash, no 0', async () => {
   for (const vol of [undefined, null, 'lots', NaN]) {
     const v = exchangeOnlyValuator({
@@ -728,6 +830,8 @@ test('missing volume field -> fail open, no crash, no 0', async () => {
     })
     const r = await v.value({ kind: 'divcard', name: 'The Doctor', stack: 1 })
     assert.equal(r?.chaosEach, 900, `volumePrimaryValue=${String(vol)}`)
+    // Fail-open stays, but it is named: nothing vouches for this line.
+    assert.equal(r?.uncertain, 'thin-market', `volumePrimaryValue=${String(vol)}`)
   }
 })
 
@@ -869,6 +973,7 @@ test('unique variant: Foulborn Soul Tether hits the 2c line, not the 886c line',
     mods: FOULBORN_ITEM_MODS
   })
   assert.equal(r.chaosEach, 2)
+  assert.equal(r.uncertain, null, 'the mods decided the line: no guess')
 })
 
 test('unique variant: the same base with "Instant Leech" hits the expensive line', async () => {
@@ -905,6 +1010,7 @@ test('unique without variants: valued unchanged, with or without mods', async ()
   // Even mods that match NO line must not tip over the normal case.
   const withAlienMods = await overviewValuator(SINGLE).value({ ...desc, mods: ['Allocates Whatever'] })
   assert.equal(withoutMods.chaosEach, 42.7)
+  assert.equal(withoutMods.uncertain, null)
   assert.deepEqual(withMods, withoutMods)
   assert.deepEqual(withAlienMods, withoutMods)
 })
@@ -929,6 +1035,7 @@ test('unique variant: ambiguous -> cheapest candidate line, never the most expen
     mods: ['Adds 5 Small Passive Skills which grant nothing']
   })
   assert.equal(r.chaosEach, 1)
+  assert.equal(r.uncertain, 'variant-guessed', 'the cheapest line is a floor, not a match')
 })
 
 test('unique variant: an empty mod list does not guess -> cheapest line, not the most expensive', async () => {
@@ -943,6 +1050,7 @@ test('unique variant: an empty mod list does not guess -> cheapest line, not the
     mods: []
   })
   assert.equal(r.chaosEach, 2)
+  assert.equal(r.uncertain, 'variant-guessed')
 })
 
 test('unique variant: missing variant/mod fields do not throw', async () => {
@@ -990,7 +1098,7 @@ test('an observation inside the gate wins exactly as before', async () => {
   deps.faustusMaxAgeMs = 6 * HOUR_MS
   deps.faustusStore = agedFaustusStore('The Doctor', 1234, 5, now)
   const r = await createValuator({ league: L, deps }).value({ kind: 'divcard', name: 'The Doctor', stack: 2 })
-  assert.deepEqual(r, { chaosEach: 1234, chaosTotal: 2468, source: 'faustus' })
+  assert.deepEqual(r, { chaosEach: 1234, chaosTotal: 2468, each: 1234, source: 'faustus', uncertain: null })
 })
 
 test('an UNKNOWN observation hour is not "old" — an older store keeps working after a deploy', async () => {
@@ -1003,12 +1111,12 @@ test('an UNKNOWN observation hour is not "old" — an older store keeps working 
   deps.faustusMaxAgeMs = 6 * HOUR_MS
   deps.faustusStore = fakeFaustusStore({ 'The Doctor': 1234 }) // no getHour at all
   const r = await createValuator({ league: L, deps }).value({ kind: 'divcard', name: 'The Doctor', stack: 2 })
-  assert.deepEqual(r, { chaosEach: 1234, chaosTotal: 2468, source: 'faustus' })
+  assert.deepEqual(r, { chaosEach: 1234, chaosTotal: 2468, each: 1234, source: 'faustus', uncertain: null })
 
   const withHours = { ...fakeFaustusStore({ 'The Doctor': 1234 }), getHour: () => null }
   deps.faustusStore = withHours
   const r2 = await createValuator({ league: L, deps }).value({ kind: 'divcard', name: 'The Doctor', stack: 2 })
-  assert.deepEqual(r2, { chaosEach: 1234, chaosTotal: 2468, source: 'faustus' })
+  assert.deepEqual(r2, { chaosEach: 1234, chaosTotal: 2468, each: 1234, source: 'faustus', uncertain: null })
 })
 
 test('the gate applies to stackables too — it is not a divination-card rule', async () => {
@@ -1065,6 +1173,7 @@ test('B20: a cheap card clears the poe.ninja unit floor on 55 chaos of turnover'
   const r = await v.value({ kind: 'divcard', name: 'Imperial Legacy', stack: 14 })
   assert.equal(r?.chaosEach, 4.6, 'the piece floor cannot see how little a cheap item is worth')
   assert.equal(r?.chaosTotal, 64.4, 'the 14 pieces the report showed as 64c')
+  assert.equal(r?.uncertain, 'thin-market', 'the price stays, and the table says how little stands behind it')
 })
 
 test('B20: 150 chaos of turnover is enough for a 15c line, and says nothing about a bid', async () => {
@@ -1077,4 +1186,189 @@ test('B20: 150 chaos of turnover is enough for a 15c line, and says nothing abou
   const r = await v.value({ kind: 'divcard', name: 'The Fathomless Depths', stack: 2 })
   assert.equal(r?.chaosEach, 15)
   assert.equal(r?.chaosTotal, 30, 'the 2 pieces the report showed as 30c')
+  assert.equal(r?.uncertain, 'thin-market')
+})
+
+// ---------------------------------------------------------------------------
+// The uncertainty marker (docs/pricing-logic.md, "Uncertain prices"). Every
+// priced row says whether the valuation KNOWS its number to be a guess or
+// thinly evidenced. It never changes a price: each test pins the number too.
+// ---------------------------------------------------------------------------
+function turnoverFaustusStore (prices, turnover) {
+  const s = fakeFaustusStore(prices)
+  s.getTurnover = name => (name in turnover ? turnover[name] : null)
+  return s
+}
+
+test('B20 marker: a Faustus price whose hour moved less than the thin-market bar is uncertain', async () => {
+  const deps = fakeDeps()
+  deps.faustusStore = turnoverFaustusStore({ 'Imperial Legacy': 4.6 }, { 'Imperial Legacy': 55 })
+  const r = await createValuator({ league: L, deps }).value({ kind: 'divcard', name: 'Imperial Legacy', stack: 14 })
+  assert.deepEqual(r, { chaosEach: 4.6, chaosTotal: 64.4, each: 4.6, source: 'faustus', uncertain: 'thin-market' })
+})
+
+test('a Faustus price backed by enough turnover carries no doubt', async () => {
+  const deps = fakeDeps()
+  deps.faustusStore = turnoverFaustusStore({ 'Imperial Legacy': 4.6 }, { 'Imperial Legacy': 12000 })
+  const r = await createValuator({ league: L, deps }).value({ kind: 'divcard', name: 'Imperial Legacy', stack: 14 })
+  assert.equal(r.uncertain, null)
+  assert.equal(r.chaosEach, 4.6)
+})
+
+test('the thin-market bar is the sell-side bar: 4999 chaos is thin, 5000 is not', async () => {
+  for (const [turnover, want] of [[4999, 'thin-market'], [5000, null]]) {
+    const deps = fakeDeps()
+    deps.faustusStore = turnoverFaustusStore({ 'Orb of Fusing': 0.5 }, { 'Orb of Fusing': turnover })
+    const r = await createValuator({ league: L, deps }).value({ kind: 'stackable', name: 'Orb of Fusing', tradeTag: 'fusing', stack: 1 })
+    assert.equal(r.uncertain, want, `turnover ${turnover}`)
+  }
+})
+
+test('a Faustus store written before turnover existed marks nothing', async () => {
+  // No getTurnover at all (older store / stub) ...
+  const a = fakeDeps()
+  a.faustusStore = fakeFaustusStore({ 'Imperial Legacy': 4.6 })
+  const ra = await createValuator({ league: L, deps: a }).value({ kind: 'divcard', name: 'Imperial Legacy', stack: 1 })
+  assert.equal(ra.uncertain, null)
+  // ... and a store that has it but knows nothing for this name.
+  const b = fakeDeps()
+  b.faustusStore = turnoverFaustusStore({ 'Imperial Legacy': 4.6 }, {})
+  const rb = await createValuator({ league: L, deps: b }).value({ kind: 'divcard', name: 'Imperial Legacy', stack: 1 })
+  assert.equal(rb.uncertain, null, 'unknown is not thin on the Faustus path')
+  assert.equal(rb.chaosEach, 4.6)
+})
+
+test('a poe.ninja exchange line without a volume field is priced and marked thin-market', async () => {
+  const deps = fakeDeps()
+  const r = await createValuator({ league: L, deps }).value({ kind: 'stackable', name: 'Deafening Essence of Fear', tradeTag: 'deafening-essence-of-fear', stack: 1 })
+  assert.equal(r.chaosEach, 44.3)
+  assert.equal(r.uncertain, 'thin-market')
+})
+
+test('a poe.ninja exchange line with enough turnover carries no doubt, in the merged map and on the card path', async () => {
+  const v = exchangeOnlyValuator({
+    Essence: {
+      nameToId: new Map([['Deafening Essence of Fear', 'deafening-essence-of-fear']]),
+      lineById: new Map([['deafening-essence-of-fear', { id: 'deafening-essence-of-fear', primaryValue: 44.34, volumePrimaryValue: 9000 }]])
+    },
+    DivinationCard: {
+      nameToId: new Map([['The Doctor', 'the-doctor']]),
+      lineById: new Map([['the-doctor', { id: 'the-doctor', primaryValue: 900, volumePrimaryValue: 90000 }]])
+    }
+  })
+  const e = await v.value({ kind: 'stackable', name: 'Deafening Essence of Fear', tradeTag: 'deafening-essence-of-fear', stack: 1 })
+  assert.equal(e.uncertain, null)
+  const c = await v.value({ kind: 'divcard', name: 'The Doctor', stack: 1 })
+  assert.equal(c.uncertain, null)
+})
+
+test('a thin-market bar of 0 marks nothing', async () => {
+  const deps = fakeDeps()
+  deps.thinTurnoverC = 0
+  deps.faustusStore = turnoverFaustusStore({ 'Imperial Legacy': 4.6 }, { 'Imperial Legacy': 55 })
+  const v = createValuator({ league: L, deps })
+  const r = await v.value({ kind: 'divcard', name: 'Imperial Legacy', stack: 14 })
+  assert.deepEqual(r, { chaosEach: 4.6, chaosTotal: 64.4, each: 4.6, source: 'faustus', uncertain: null })
+  // Not even a poe.ninja line without a volume field.
+  const e = await v.value({ kind: 'stackable', name: 'Deafening Essence of Fear', tradeTag: 'deafening-essence-of-fear', stack: 1 })
+  assert.equal(e.uncertain, null)
+})
+
+test('a higher thin-market bar marks more, at the same price', async () => {
+  const deps = fakeDeps()
+  deps.thinTurnoverC = 20000
+  deps.faustusStore = turnoverFaustusStore({ 'Imperial Legacy': 4.6 }, { 'Imperial Legacy': 12000 })
+  const r = await createValuator({ league: L, deps }).value({ kind: 'divcard', name: 'Imperial Legacy', stack: 1 })
+  assert.equal(r.uncertain, 'thin-market')
+  assert.equal(r.chaosEach, 4.6)
+})
+
+test('gem: no level on the item -> the cheapest line, marked gem-guessed', async () => {
+  const v = createValuator({ league: L, deps: fakeDeps() })
+  const r = await v.value({ kind: 'gem', name: 'Enlighten Support', level: null, quality: 0, corrupted: false, stack: 1 })
+  assert.equal(r.chaosEach, 1197)
+  assert.equal(r.uncertain, 'gem-guessed')
+})
+
+test('unique: a 6L with no 6L line is marked links-guessed, and so is an unlinked item that only has linked lines', async () => {
+  const only = lines => createValuator({
+    league: 'L',
+    deps: {
+      fetchItemOverview: async () => lines,
+      fetchExchangeOverview: async () => null,
+      fetchCurrencyOverview: async () => null
+    }
+  })
+  // Only the base line: a 6L gets the base price (too low) and says so.
+  const six = await only([LINKED[2]]).value({ kind: 'unique', name: "Nuro's Harp", baseType: 'Harbinger Bow', category: 'Bow', links: 6, stack: 1 })
+  assert.equal(six.chaosEach, 1)
+  assert.equal(six.uncertain, 'links-guessed')
+  // Only linked lines: an unlinked bow gets a linked price (too high) and says so.
+  const zero = await only([LINKED[0], LINKED[1]]).value({ kind: 'unique', name: "Nuro's Harp", baseType: 'Harbinger Bow', category: 'Bow', links: 0, stack: 1 })
+  assert.equal(zero.uncertain, 'links-guessed')
+})
+
+test('corpse: a price from one listing is marked few-listings; enough listings, an old entry and Imperfect are not', async () => {
+  const run = async (listings, extra = {}) => {
+    const deps = fakeDeps()
+    deps.corpseStore = { getPrice: () => 120, getListings: () => listings, league: () => L }
+    Object.assign(deps, extra)
+    return createValuator({ league: L, deps }).value({ kind: 'corpse', name: 'Forest Tiger', tradeTag: null, stack: 1 })
+  }
+  assert.deepEqual(await run(1), { chaosEach: 120, chaosTotal: 120, each: 120, source: 'corpse:trade', uncertain: 'few-listings' })
+  assert.equal((await run(5)).uncertain, null)
+  assert.equal((await run(2)).uncertain, null, 'the default bar of 2 marks exactly a single offer')
+  assert.equal((await run(null)).uncertain, null, 'an entry written before the count existed is not marked')
+  assert.equal((await run(1, { corpseMinListings: 0 })).uncertain, null, 'a bar of 0 never marks')
+  assert.equal((await run(4, { corpseMinListings: 5 })).uncertain, 'few-listings')
+  // A store without getListings at all (older stub).
+  const deps = fakeDeps()
+  deps.corpseStore = { getPrice: () => 120, league: () => L }
+  assert.equal((await createValuator({ league: L, deps }).value({ kind: 'corpse', name: 'Forest Tiger', tradeTag: null, stack: 1 })).uncertain, null)
+  // Imperfect: a stated 0, never a guess — even next to a one-offer store.
+  const deps2 = fakeDeps()
+  deps2.corpseStore = { getPrice: () => 120, getListings: () => 1, league: () => L }
+  const r = await createValuator({ league: L, deps: deps2 }).value({ kind: 'corpse', name: 'Imperfect Forest Tiger', tradeTag: null, stack: 1 })
+  assert.deepEqual(r, { chaosEach: 0, chaosTotal: 0, each: 0, source: 'corpse:imperfect', uncertain: null })
+})
+
+test('the stash currency overview, the last resort of the chain, is deliberately not marked', async () => {
+  const deps = fakeDeps()
+  deps.fetchCurrencyOverview = async (league, type) =>
+    type === 'Currency' ? { byName: new Map([['Exalted Orb', 205]]) } : { byName: new Map() }
+  const r = await createValuator({ league: L, deps }).value({ kind: 'stackable', name: 'Exalted Orb', tradeTag: 'exalted', stack: 1 })
+  assert.equal(r.source, 'ninja:currency')
+  assert.equal(r.uncertain, null)
+})
+
+// Buyer whispers (whisper-price.mjs) name a unique and its base, never its
+// links or mods. uniqueCandidates hands back every line that name on that base
+// can mean, after the same confidence gate, and chooses nothing: one line is a
+// price, more is 'several variants'.
+test('uniqueCandidates applies the confidence gate and the base, and chooses nothing', async () => {
+  const calls = []
+  const v = createValuator({
+    league: L,
+    deps: {
+      fetchItemOverview: async (league, type) => {
+        calls.push([league, type])
+        if (type !== 'UniqueArmour') return []
+        return [
+          { name: 'Abyssus', baseType: 'Ezomyte Burgonet', chaosValue: 42.7, count: 60 },
+          { name: 'Abyssus', baseType: 'Ezomyte Burgonet', chaosValue: 400, links: 6, count: 12 },
+          { name: 'Abyssus', baseType: 'Other Base', chaosValue: 999, count: 30 },
+          { name: 'Abyssus', baseType: 'Ezomyte Burgonet', chaosValue: 9999999, count: 2 }, // phantom
+          { name: 'Abyssus', baseType: 'Ezomyte Burgonet', chaosValue: null, count: 50 }, // no price
+          { name: 'Other', baseType: 'Ezomyte Burgonet', chaosValue: 5, count: 50 }
+        ]
+      }
+    }
+  })
+  const both = await v.uniqueCandidates({ name: 'Abyssus', baseType: 'Ezomyte Burgonet', category: 'Helmet' })
+  assert.deepEqual(both.map(l => l.chaosValue).sort((a, b) => a - b), [42.7, 400], 'base line and 6L line, phantom and other base gone')
+  assert.deepEqual(calls, [[L, 'UniqueArmour']])
+  const anyBase = await v.uniqueCandidates({ name: 'Abyssus', baseType: null, category: 'Helmet' })
+  assert.equal(anyBase.length, 3, 'without a base every confident line of that name')
+  assert.deepEqual(await v.uniqueCandidates({ name: 'Abyssus', baseType: 'Ezomyte Burgonet', category: null }), [], 'no category, no overview, no line')
+  assert.deepEqual(await v.uniqueCandidates({ name: 'Nobody', baseType: 'Ezomyte Burgonet', category: 'Helmet' }), [])
 })

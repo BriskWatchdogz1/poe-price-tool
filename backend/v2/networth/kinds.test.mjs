@@ -3,7 +3,7 @@
 // corpse icon detection — both pure, with no items.ndjson load involved.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { CLASSIFIERS, classify, isCorpseEntry, itemModTexts } from './kinds.mjs'
+import { CLASSIFIERS, classify, isCorpseEntry, itemModTexts, SINGLE_ITEM_KINDS } from './kinds.mjs'
 
 // Minimal ctx: only the fields the rule under test actually reads.
 const ctx = over => ({
@@ -118,4 +118,27 @@ test('classify: a tier-decorated map base line falls back to the undecorated joi
   // A decoration whose stem is unknown resolves to nothing, never to a guess.
   const none = { categoryOfBase: () => null }
   assert.equal(classify(ctx({ frame: 3, name: 'X', typeLine: 'Nonexistent (Tier 3)', index: none })).category, null)
+})
+
+// whisper-price.mjs reads SINGLE_ITEM_KINDS to tell 'one item' from 'a stack
+// of unknown size'; the list must say exactly which rules pin stack to 1.
+test('SINGLE_ITEM_KINDS names exactly the kinds whose rule pins stack to 1', () => {
+  const samples = {
+    divcard: ctx({ frame: 6, typeLine: 'The Doctor' }),
+    gem: ctx({ frame: 4, typeLine: 'Summon Ice Golem', ggg: { properties: [] } }),
+    unique: ctx({ frame: 3, name: 'Tabula Rasa', typeLine: 'Simple Robe', ggg: { sockets: [] } }),
+    beast: ctx({ entry: { namespace: 'CAPTURED_BEAST', refName: 'Farric Wolf Alpha' } }),
+    incubator: ctx({ entry: { namespace: 'ITEM', refName: 'Gemcutter\'s Incubator' } }),
+    vial: ctx({ entry: { namespace: 'ITEM', refName: 'Vial of Fate' } }),
+    invitation: ctx({ typeLine: 'Screaming Invitation', index: { categoryOfBase: b => (b === 'Screaming Invitation' ? 'Invitation' : null) } }),
+    corpse: ctx({ typeLine: 'Blasphemer', entry: { namespace: 'ITEM', refName: 'Blasphemer', icon: 'x/GeofriCorpse.png' } }),
+    stackable: ctx({ entry: { namespace: 'ITEM', refName: 'Orb of Alchemy', tradeTag: 'alch' } }),
+    skip: ctx({ frame: 2, name: 'Doom Grip', typeLine: 'Titan Gauntlets' })
+  }
+  assert.deepEqual(Object.keys(samples).sort(), CLASSIFIERS.map(r => r.kind).sort(), 'a sample for every rule')
+  for (const [kind, c] of Object.entries(samples)) {
+    const d = classify({ ...c, stack: 7 })
+    assert.equal(d.kind, kind)
+    assert.equal(d.stack === 1, SINGLE_ITEM_KINDS.has(kind), `${kind}: stack ${d.stack}`)
+  }
 })

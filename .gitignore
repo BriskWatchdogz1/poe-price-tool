@@ -72,3 +72,8 @@ docs/vendor-reference/
 *.swp
 *~
 Thumbs.db
+
+# Raw market snapshots (poe.ninja overviews, Faustus digests): local only.
+# The cut fixtures beside them (backend/v2/fixtures/<date>/, made by
+# backend/v2/fixtures/cut.mjs) are tracked.
+backend/v2/fixtures/raw/

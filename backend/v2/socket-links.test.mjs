@@ -109,9 +109,9 @@ test('buildItemAdded: disabled/missing filters produce NO facts (no rare noise)'
   assert.deepEqual(card.facts, [])
 })
 
-// Listings come in MIXED currencies. It used to be the CHEAPEST listing that
-// decided the currency and all the others were dropped -> "1c, 1div, 1div,
-// 2div" turned into the headline "1 c", pricing the item ~88x too low.
+// Listings come in MIXED currencies. If the CHEAPEST listing decided the
+// currency and all the others were dropped, "1c, 1div, 1div, 2div" would turn
+// into the headline "1 c", pricing the item ~88x too low.
 const listing = (amount, cur) => ({ priceAmount: amount, priceCurrency: cur, ign: 'x', relativeDate: '1 hour ago' })
 
 test('price: mixed currencies are put on one scale (the cluster jewel case)', () => {

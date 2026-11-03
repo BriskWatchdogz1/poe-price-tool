@@ -285,8 +285,22 @@
       <h2 data-i18n="rel.title">Releases</h2>
       <p class="relline" id="relInstalled"></p>
       <p class="relline" id="relLatest"></p>
+      <p class="relline" id="relDaemon" hidden></p>
       <p class="relline" id="relLastCheck"></p>
       <p class="relpointer" id="relPointer"></p>
+    </section>
+
+    <!-- ---- Sources: where prices come from and how old each one is ----
+         For everybody, no password, like the Releases block: the reasons are
+         filtered on the server and nothing in it is a secret. The status line
+         on every page sends people HERE when a price source goes stale. -->
+    <section class="sect" id="srcBlock">
+      <h2 data-i18n="src.title">Sources</h2>
+      <p class="lead" data-i18n="src.lead">Where prices come from and when each source last answered. A source past its threshold is called stale here and in the status line on every page.</p>
+      <table class="srctable">
+        <thead><tr><th data-i18n="src.colSource">Source</th><th data-i18n="src.colLastSuccess">Last success</th><th data-i18n="src.colState">State</th></tr></thead>
+        <tbody id="srcRows"></tbody>
+      </table>
     </section>
 
     <!-- ---- Admin area (design doc, section 6) ----

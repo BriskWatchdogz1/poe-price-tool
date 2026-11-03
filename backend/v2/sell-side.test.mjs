@@ -104,6 +104,17 @@ test(`takeover: chaos edge right at CHAOS_TAKEOVER_PCT (${CHAOS_TAKEOVER_PCT}%) 
   assert.ok(approx(r.edgePct, CHAOS_TAKEOVER_PCT, 1e-6))
 })
 
+// B36 in docs/bugs.md, the same arithmetic at the takeover bar: 1.89c against
+// 0.01 divine at 180 c/div (1.8c) is exactly 5% by the numbers and
+// 4.999999999999982% as computed.
+test('an edge of exactly CHAOS_TAKEOVER_PCT by the numbers takes over, though the division gives a hair under it', () => {
+  assert.equal(CHAOS_TAKEOVER_PCT, 5)
+  assert.ok((1.89 / (0.01 * 180) - 1) * 100 < 5) // the arithmetic error this test is about
+  const r = compareSellSides({ chaos: { perItem: 1.89, ...fat }, divine: { perItem: 0.01, ...fatDiv } }, 180)
+  assert.equal(r.better, 'chaos')
+  assert.ok(approx(r.edgePct, 5, 1e-6))
+})
+
 test('just under the takeover bar (no previous verdict) -> still divine, deadband', () => {
   const viaDivine = 100
   const viaChaos = viaDivine * (1 + (CHAOS_TAKEOVER_PCT - 0.5) / 100)

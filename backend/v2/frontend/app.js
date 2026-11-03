@@ -15,10 +15,17 @@ const ref       = document.getElementById('ref')
 const ratebanner= document.getElementById('ratebanner')
 const rbmsg     = document.getElementById('rbmsg')
 const rbwait    = document.getElementById('rbwait')
+const emptyHint = document.getElementById('emptyHint')
+const whisperBox   = document.getElementById('whispers')
+const whisperList  = document.getElementById('whisperList')
+const whisperCount = document.getElementById('whisperCount')
 
 // ---- State -----------------------------------------------------------------
 const items = new Map()          // id -> item data (last-known state)
 const pending = new Set()        // ids the user searched, awaiting price-result
+let daemonStatus = null          // last `daemon-status` + receivedAt (empty page's second sentence)
+let daemonTimer = null
+let whispers = []                // buyer whispers of this session, newest first (`whispers` / `whisper`)
 
 // ---- Helpers ---------------------------------------------------------------
 const esc = s => String(s == null ? '' : s)
@@ -443,7 +450,7 @@ function cardHtml (item) {
   const subParts = [item.baseType, rarityLabel(r), item.itemClass].filter(Boolean).map(esc)
   let sub = subParts.join(' · ')
   if (item.corrupted) sub += ` · <span class="corrupt">${esc(T('pc.card.corrupted'))}</span>`
-  // Every rarity renders as the same compact grid card (uniques used to get a
+  // Every rarity renders as the same compact grid card (uniques too, no
   // full-width `.wide` span). The poe.ninja price + sparkline lives in the
   // `.ninja` block below and is unaffected — uniques keep their trend line.
   return `<article class="card appearing tp-${esc(r)}" data-id="${esc(item.id)}">
@@ -544,6 +551,41 @@ function refreshCounts () {
   const n = grid.querySelectorAll('.card:not(.dismissing)').length
   badge.textContent = T('pc.active', { n })
   empty.style.display = n ? 'none' : 'block'
+}
+
+// The empty page's second sentence: did anything ever arrive from this
+// player's hotkey daemon (`daemon-status`, PROTOCOL.md)? Re-aged every minute
+// like the data line, so "2 minutes ago" does not stand still.
+function renderDaemonHint () {
+  if (emptyHint) emptyHint.textContent = Shell.daemonHintText(daemonStatus, Date.now())
+}
+function applyDaemonStatus (msg) {
+  daemonStatus = msg ? { ...msg, receivedAt: Date.now() } : null
+  renderDaemonHint()
+  // A part of the daemon that does not work on the game PC: the status line.
+  Shell.applyDaemonStatus(msg)
+  if (!daemonTimer) daemonTimer = setInterval(renderDaemonHint, 60 * 1000)
+}
+
+// ---- Buyer whispers (this session) -----------------------------------------
+// `whispers` (on connect) replaces the list, `whisper` replaces one entry by
+// its key or puts it in front. The rows are built by whispers.js, which
+// escapes every field: all of them come from another player's whisper. The
+// block opens by itself when the first entry arrives.
+function renderWhispers () {
+  if (!whisperList) return
+  const wasEmpty = whisperList.childElementCount === 0
+  whisperList.innerHTML = Whispers.listHtml(whispers)
+  if (whisperCount) whisperCount.textContent = String(whispers.length)
+  if (whisperBox && wasEmpty && whispers.length) whisperBox.open = true
+}
+function applyWhispers (msg) {
+  whispers = Array.isArray(msg && msg.entries) ? msg.entries.slice() : []
+  renderWhispers()
+}
+function applyWhisper (msg) {
+  whispers = Whispers.upsert(whispers, msg && msg.entry)
+  renderWhispers()
 }
 
 // ---- Rate-limit banner -----------------------------------------------------
@@ -1094,7 +1136,12 @@ function connect () {
       case 'league-state': Shell.applyLeagueState(msg); break
       case 'data-status':  Shell.applyDataStatus(msg); break  // M2 data freshness
       case 'release-status': Shell.applyReleaseStatus(msg); break // newer release -> status line
+      case 'networth-session': Shell.applySessionStatus(msg); break // running farm session -> status line
+      case 'source-status': Shell.applySourceStatus(msg); break // price sources' age -> status line, C:D tile
       case 'networth-sync-status': Shell.applySyncStatus(msg); break // expired POESESSID -> status line
+      case 'daemon-status': applyDaemonStatus(msg); break // empty page: last item from the hotkey daemon
+      case 'whispers':     applyWhispers(msg); break // buyer whispers of this session, on connect
+      case 'whisper':      applyWhisper(msg); break  // one buyer whisper, new or updated by key
       case 'need-identity': // cookie didn't arrive -> show gate (server-side rejected)
         if (Array.isArray(msg.users) && msg.users.length) USERS = msg.users
         if (whoami) whoami.hidden = true
@@ -1122,6 +1169,8 @@ I18n.onChange(() => {
     if (item && item.selection) applyStoredSelection(fresh, item.selection)
   }
   refreshCounts()
+  renderDaemonHint()
+  renderWhispers()
   renderRateBanner()
   if (lastReference) applyReference(lastReference)
   if (conn.classList.contains('live')) setConn('live', T('conn.live'))

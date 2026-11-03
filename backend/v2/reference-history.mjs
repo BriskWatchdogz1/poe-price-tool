@@ -1,36 +1,40 @@
-// Reference rail history — our OWN price series behind the rail's sparklines.
-//
-// WHY NOT poe.ninja's `sparkline`: that array is not consistently oriented.
-// Measured against poe.ninja's own charts (Allflame, 24.-28.07.2026) the
-// `divine` row moves with the CHAOS value (+150%, API totalChange +133.7%)
-// while `vivid-lifeforce` moves with the value expressed in DIVINE (-42.1%,
-// while its chaos value went UP by 44.7%). Two rows, two reference units, and
-// the response does not say which is which — so any colour rule on top of it is
-// guesswork. The rail therefore draws its own series, in exactly the unit that
-// stands next to the line.
+// Reference rail history — our OWN price series behind the rail's sparklines,
+// in exactly the unit that stands next to the line. Not poe.ninja's
+// `sparkline`: it is not consistently oriented. Measured against poe.ninja's
+// own charts (Allflame, 24.-28.07.2026) the `divine` row moves with the CHAOS
+// value (+150%, API totalChange +133.7%) while `vivid-lifeforce` moves with the
+// value in DIVINE (-42.1%, while its chaos value went UP by 44.7%), and the
+// response does not say which is which.
 //
 // Line shape (/config/reference-history.ndjson), NDJSON, append-only:
 //   {"lg":"<league>","at":<epoch ms>,"cd":<chaos per divine>,
-//    "v":{"<row key>":<chaos per ONE unit>}}
+//    "v":{"<row key>":<chaos per ONE unit>},"ob":{"<feed>":<epoch ms>}}
+//
+//   ob (optional) says when the answer behind each FEED in the point was
+//   fetched: the poe.ninja exchange answer (Mirror), the poe.ninja item
+//   overview (beasts), the Faustus store (Sulphur, lifeforce). During an outage
+//   a fetcher serves its last good answer, which must not become a NEW point —
+//   a flat line that looks like a quiet market (docs/bugs.md B29). So an append
+//   names its feeds ({ at, keys }); a feed whose `at` is not newer than the
+//   last one recorded for it loses its keys from this point, and the other
+//   feeds are written as usual (one feed down must not freeze the rows whose
+//   source still runs). Keys that belong to no feed are always written. A
+//   numeric `ob` (the first form, exchange feed only) is read as
+//   {"exchange": ob}.
 //
 //   v holds the CANONICAL chaos value per unit, never the formatted display
-//   number. The rail switches units (lifeforce/Sulphur flip between "N / c"
-//   and "N / div" following the sell-side recommendation — see perPieceDisplay
-//   in server.mjs; beasts between "N c" and "N div" at 1 divine). Storing the
-//   display number would put a jump into the series at every such flip that
-//   was never a market move. From chaos value + the `cd` of that moment,
-//   TODAY's display number can be recomputed for EVERY old point, so the
-//   drawn line stays internally consistent.
+//   number: the rail switches units (lifeforce/Sulphur between "N / c" and
+//   "N / div" following the sell-side recommendation, perPieceDisplay in
+//   server.mjs; beasts between "N c" and "N div" at 1 divine), and a stored
+//   display number would jump at every flip. From chaos value + that moment's
+//   `cd`, TODAY's display number is recomputed for EVERY old point.
+//   cd is stored per point as in networth/history.mjs: re-deriving an old
+//   divine value with today's ratio would fake movement.
 //
-//   cd is stored per point for the same reason it is in networth/history.mjs:
-//   re-deriving an old divine value with today's ratio would fake movement.
-//
-// Rows come and go (the beast top 5 is re-picked on every refresh). A point
-// simply has no entry for a row that wasn't there — series() skips those
-// points instead of drawing a zero.
-//
-// ROBUSTNESS: mirrors networth/history.mjs — a missing, empty, truncated or
-// corrupt file NEVER throws. This is a rebuildable convenience series.
+// Rows come and go (the beast top 5 is re-picked on every refresh); series()
+// skips points without an entry for a row instead of drawing a zero.
+// ROBUSTNESS: as networth/history.mjs, a missing, empty, truncated or corrupt
+// file NEVER throws. This is a rebuildable convenience series.
 import { readFile, appendFile, writeFile, rename, unlink } from 'node:fs/promises'
 
 export const DEFAULT_MIN_INTERVAL_MS = 10 * 60 * 1000        // the rail itself is cached >=15min
@@ -59,6 +63,13 @@ export function displayValue (chaos, cd, unit) {
     case 'perDiv': return ratio > 0 ? ratio / v : null
     default: return null
   }
+}
+
+// The per-feed answer times of a point; the first, numeric form named the
+// exchange feed only.
+function obOf (p) {
+  if (typeof p.ob === 'number') return { exchange: p.ob }
+  return p.ob && typeof p.ob === 'object' ? p.ob : {}
 }
 
 let tmpCounter = 0
@@ -109,11 +120,24 @@ export function createReferenceHistory (filePath, {
       return null
     },
 
+    // When the answer of `feed` behind the newest point that carries that
+    // feed was fetched. Points without it are skipped: a point written while
+    // the feed had nothing (or only stale data) says nothing about it.
+    lastObservedAt (league, feed = 'exchange') {
+      for (let i = points.length - 1; i >= 0; i--) {
+        if (points[i].lg !== league) continue
+        const t = obOf(points[i])[feed]
+        if (typeof t === 'number') return t
+      }
+      return null
+    },
+
     // Appends ONE point holding EVERY rail row of this refresh, unless the last
-    // point for this league is younger than minIntervalMs. Returns true when a
-    // point was actually recorded. Never throws (a disk hiccup costs the durable
-    // write, not the rail).
-    async append (league, { cdRatio, values } = {}) {
+    // point for this league is younger than minIntervalMs. `feeds` maps a feed
+    // name to { at, keys }: the time of the answer behind those keys (see `ob`
+    // above). Returns true when a point was actually recorded. Never throws (a
+    // disk hiccup costs the durable write, not the rail).
+    async append (league, { cdRatio, values, feeds } = {}) {
       if (!league || !values || typeof values !== 'object') return false
       const at = now()
       const last = hist.lastAt(league)
@@ -124,10 +148,21 @@ export function createReferenceHistory (filePath, {
         const n = Number(chaos)
         if (Number.isFinite(n) && n > 0) v[key] = n
       }
+      // The same answer of a feed is not a new point for ITS rows (see `ob`).
+      const ob = {}
+      for (const [feed, f] of Object.entries(feeds || {})) {
+        if (!f || typeof f.at !== 'number' || !Array.isArray(f.keys)) continue
+        const lastOb = hist.lastObservedAt(league, feed)
+        if (lastOb != null && f.at <= lastOb) {
+          for (const k of f.keys) delete v[k]
+        } else if (f.keys.some(k => k in v)) {
+          ob[feed] = f.at
+        }
+      }
       if (!Object.keys(v).length) return false
 
       const ratio = Number(cdRatio)
-      const point = { lg: league, at, cd: ratio > 0 ? ratio : 0, v }
+      const point = { lg: league, at, cd: ratio > 0 ? ratio : 0, v, ...(Object.keys(ob).length ? { ob } : {}) }
       points.push(point)
 
       if (!hist.writable) { hist.prune(); return true }

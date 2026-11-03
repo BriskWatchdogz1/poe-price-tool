@@ -8,6 +8,12 @@
  * The chart's only click targets are the event dots. That is the whole point of
  * this page: the previous version put a hit target on every recorded minute of
  * a three-pixel sparkline, and most of them had nothing to say.
+ *
+ * Farm and game sessions live here too (GET /networth-sessions): the farm
+ * session's Start/End/Discard buttons, the running game session's Discard, a
+ * card for one session and the list, each farm session under the game
+ * evening it was started in. The server computes every figure and every
+ * state, this page only formats them.
  */
 import {
   chartGeometry, markerAt, CHART,
@@ -63,11 +69,10 @@ let selected = -1
 // ---- formatting -------------------------------------------------------------
 // The numbers themselves are formatted in history-chart.js, because every one
 // of them is a function of a chaos amount and THE RATE THAT AMOUNT WAS RECORDED
-// AT — never of a rate held in this module. There used to be one such variable
-// here, filled from the newest point of the series, and it was applied to every
-// figure on the page: axis, tooltips, event rows, event sums, the window net
-// and the header. A historical event cannot change by definition, and all of
-// them changed with every rate tick.
+// AT — never of a rate held in this module. One such variable, filled from the
+// newest point of the series, would re-value every figure on the page (axis,
+// tooltips, event rows, event sums, the window net and the header) with every
+// rate tick, and a historical event cannot change by definition.
 //
 // The rate of an event: its own, and only if it has none the nearest recorded
 // one. `lastPoints` is the window the chart is drawn from, so the borrowed rate
@@ -261,6 +266,273 @@ function renderCoverage (series) {
     : ''
 }
 
+// ---- farm and game sessions ---------------------------------------------------
+// The answer to "is what I am doing right now worth it". Every number comes
+// from the server (networth/sessions.mjs); loot is shown at the starting C:D
+// rate because it is computed in starting prices. A farm session is started
+// and ended by the player (the toolbar buttons, the daemon's session key); a
+// game session follows the game (session-control.mjs) and can only be
+// discarded here.
+const sessBtn = $('sessBtn')
+const sessBtnLbl = $('sessBtnLbl')
+const sessDiscard = $('sessDiscard')
+const sessMsg = $('sessMsg')
+const sessCard = $('sessCard')
+const sessTable = $('sessTable')
+const sessRows = $('sessRows')
+const sessNone = $('sessNone')
+const sessNote = $('sessNote')
+
+let sess = null      // last GET /networth-sessions answer
+let sessSel = null   // id of a session picked in the table, or null
+
+const SESS_ERR = {
+  'no-baseline': 'hi.sessErrNoBaseline',
+  'already-running': 'hi.sessErrRunning',
+  'not-running': 'hi.sessErrNotRunning',
+  'sync-off': 'hi.sessErrSyncOff'
+}
+// A refused discard of the game session names the game session.
+const SESS_ERR_GAME = { 'not-running': 'hi.sessErrGameNotRunning' }
+const SESS_STATE = {
+  starting: 'hi.sessStarting',
+  running: 'hi.sessStateRunning',
+  preliminary: 'hi.sessPreliminary',
+  final: 'hi.sessFinal',
+  unfinished: 'hi.sessUnfinished'
+}
+const kindTxt = s => T(s && s.kind === 'game' ? 'shell.sessKindGame' : 'shell.sessKindFarm')
+// The state as the list says it; a baseline taken from the copy at the start
+// instead of a full read after it is said there too.
+const stateTxt = s => (SESS_STATE[s.state] ? T(SESS_STATE[s.state]) : '') +
+  (s.baseline === 'at-press' ? ` · ${T('hi.sessAtPressShort')}` : '')
+
+const durTxt = ms => T('hi.sessDurVal', { dur: window.Shell.fmtSessionDuration(ms) })
+const sessAmt = (chaos, div) => (div != null ? fmtDivine(div, { sign: true }) : fmtChaos(chaos, { sign: true }))
+const signCls = v => (Number(v) < 0 ? 'loss' : 'gain')
+const sessWhen = at => `${day(at)} ${clock(at)}`
+const perHourShort = b => (b.lootPerHourDiv != null
+  ? fmtDivine(b.lootPerHourDiv, { sign: true })
+  : b.lootPerHour != null ? fmtChaos(b.lootPerHour, { sign: true }) : '—')
+
+async function loadSessions () {
+  try {
+    const r = await fetch('/networth-sessions')
+    if (!r.ok) return
+    sess = await r.json()
+    renderSessions()
+  } catch { /* keep the last answer */ }
+}
+
+function showSessMsg (text) {
+  sessMsg.textContent = text || ''
+  sessMsg.hidden = !text
+}
+
+function renderSessionButton () {
+  if (!sess) { sessBtn.hidden = true; sessDiscard.hidden = true; return }
+  const running = !!sess.running
+  sessBtn.hidden = false
+  sessBtn.dataset.act = running ? 'end' : 'start'
+  sessBtn.classList.toggle('end', running)
+  sessBtnLbl.textContent = running ? T('hi.sessEnd') : T('hi.sessStart')
+  sessBtn.disabled = !sess.available && !running
+  sessBtn.title = sessBtn.disabled ? T('hi.sessErrSyncOff') : running ? '' : T('hi.sessStartTitle')
+  sessDiscard.hidden = !running
+  sessDiscard.title = T('hi.sessDiscardTitle')
+}
+
+// act: 'start' | 'end' | 'discard' (the farm session), or 'discard' with
+// kind 'game' (the running game session).
+async function sessionAction (act, kind = 'farm') {
+  let r
+  try {
+    r = await fetch('/networth-session/' + act + (kind === 'game' ? '?kind=game' : ''), { method: 'POST' })
+  } catch {
+    showSessMsg(T('hi.sessErrFailed', { status: '—' }))
+    return
+  }
+  if (r.ok) {
+    showSessMsg('')
+    sessSel = null
+  } else {
+    const j = await r.json().catch(() => ({}))
+    const key = (kind === 'game' && SESS_ERR_GAME[j.error]) || SESS_ERR[j.error]
+    showSessMsg(key
+      ? T(key, j.error === 'no-baseline' ? { min: Math.round((j.maxAgeMs || 0) / 60000) } : undefined)
+      : T('hi.sessErrFailed', { status: r.status }))
+  }
+  loadSessions()
+}
+
+sessBtn.addEventListener('click', () => {
+  if (sessBtn.disabled) return
+  sessionAction(sessBtn.dataset.act === 'end' ? 'end' : 'start')
+})
+sessDiscard.addEventListener('click', () => {
+  // A discarded session is gone for good: ask first.
+  if (!window.confirm(T('hi.sessDiscardConfirm'))) return
+  sessionAction('discard')
+})
+// The card's own button: the running game session's Discard.
+sessCard.addEventListener('click', e => {
+  const b = e.target.closest('button[data-act]')
+  if (!b || b.dataset.act !== 'discard-game') return
+  if (!window.confirm(T('hi.sessDiscardGameConfirm'))) return
+  sessionAction('discard', 'game')
+})
+
+function sessRowsHtml (rows, cd0) {
+  if (!rows || !rows.length) return `<div class="evrow"><span class="n">${esc(T('hi.sessNone'))}</span></div>`
+  return rows.map(([name, dq, chaos]) =>
+    `<div class="evrow"><span class="n">${esc(INAME(name))}</span>` +
+    `<span class="q">${esc(dq > 0 ? `+${dq}` : String(dq))}</span>` +
+    `<span class="v ${signCls(chaos)}">${esc(money(chaos, cd0, { sign: true }))}</span></div>`).join('')
+}
+
+// Every session the answer holds, once: the running ones, the ended ones
+// waiting for their round and the closed ones.
+function allSessions () {
+  if (!sess) return []
+  const seen = new Set()
+  return [sess.running, sess.game, ...(sess.pending || []), ...(sess.done || [])]
+    .filter(x => x && !seen.has(x.id) && seen.add(x.id))
+}
+
+function renderSessionCard () {
+  if (!sess) { sessCard.hidden = true; return }
+  const picked = sessSel ? allSessions().find(x => x.id === sessSel) : null
+  const pending = sess.pending || []
+  // Unpicked, the card follows what the player is waiting for: the running
+  // farm session, then the newest ended one still waiting for its final
+  // balance, and only then the game evening; a finished one only when picked.
+  const s = picked || sess.running || pending[pending.length - 1] || sess.game || null
+  if (!s) { sessCard.hidden = true; sessCard.innerHTML = ''; return }
+  sessCard.hidden = false
+  const kind = kindTxt(s)
+  const title = s.state === 'starting'
+    ? T('hi.sessStartedAt', { kind, time: clock(s.startedAt) })
+    : s.state === 'running'
+      ? T('hi.sessRunning', { kind, time: clock(s.startedAt) })
+      : T('hi.sessRange', { kind, from: sessWhen(s.startedAt), to: clock(s.endedAt) })
+  const badge = SESS_STATE[s.state] ? `<span class="sessstate ${esc(s.state)}">${esc(T(SESS_STATE[s.state]))}</span>` : ''
+  const b = s.balance
+  const stashChanged = !!(s.stashChanged || (b && b.stashChanged))
+  const cell = (label, value, cls = '') => `<div><span>${esc(T(label))}</span><b class="${cls}">${esc(value)}</b></div>`
+  let grid = cell('hi.sessDuration', durTxt(s.durationMs))
+  if (b) {
+    const perHour = b.lootPerHour != null
+      ? T('hi.sessPerHourVal', {
+          chaos: fmtChaos(b.lootPerHour, { sign: true }),
+          div: b.lootPerHourDiv != null ? fmtDivine(b.lootPerHourDiv, { sign: true }) : '—'
+        })
+      : (stashChanged ? '—' : T('hi.sessPerHourShort', { min: Math.round((sess.rateMinMs || 0) / 60000) }))
+    grid += cell('hi.sessTotal', sessAmt(b.total, b.totalDiv), signCls(b.total)) +
+      cell('hi.sessLoot', sessAmt(b.loot, b.lootDiv), signCls(b.loot)) +
+      cell('hi.sessMarket', sessAmt(b.market, b.marketDiv), signCls(b.market)) +
+      cell('hi.sessPerHour', perHour, b.lootPerHour != null ? signCls(b.lootPerHour) : '')
+  } else {
+    for (const k of ['hi.sessTotal', 'hi.sessLoot', 'hi.sessMarket', 'hi.sessPerHour']) grid += cell(k, '—')
+  }
+  const lists = b
+    ? `<div class="sesslists"><div><h3>${esc(T('hi.sessGains'))}</h3>${sessRowsHtml(b.gains, b.cd0)}</div>` +
+      `<div><h3>${esc(T('hi.sessLosses'))}</h3>${sessRowsHtml(b.losses, b.cd0)}</div></div>`
+    : ''
+  const warn = []
+  const about = Number.isFinite(s.about) && s.about > 0 ? s.about : null
+  if (s.state === 'starting') {
+    warn.push(about != null ? T('hi.sessBaselineAbout', { min: about }) : T('hi.sessBaselineNext'))
+    if (s.round) warn.push(T('hi.sessRoundStart', s.round))
+  }
+  if (s.state === 'preliminary') {
+    warn.push(s.round ? T('hi.sessRound', s.round) : T('hi.sessRoundUnknown'))
+    if (about != null) warn.push(T('hi.sessFinalAbout', { min: about }))
+    // A farm session ends with the game still open: what is still in the
+    // inventory can be stashed in time. A game session ended with the game.
+    if (s.kind !== 'game') warn.push(T('hi.sessStashLoot'))
+  }
+  if (s.baseline === 'at-press') warn.push(T('hi.sessAtPressNote'))
+  if (s.state === 'unfinished') warn.push(T(b ? 'hi.sessUnfinishedNote' : 'hi.sessUnfinishedNoFigures'))
+  if (stashChanged) warn.push(T('hi.sessStashChanged'))
+  if (b && Array.isArray(b.withheld) && b.withheld.length) {
+    warn.push(T('hi.sessWithheld', { names: b.withheld.map(INAME).join(', '), h: Math.round((sess.guardHoldMs || 0) / 3600000) }))
+  }
+  if (b && b.unpricedIn > 0) warn.push(T('hi.sessUnpricedIn', { n: b.unpricedIn }))
+  if (sess.persisted === false) warn.push(T('hi.sessNotPersisted'))
+  // A game session has no Start or End (it follows the game); while it runs,
+  // its card carries its Discard.
+  const act = s.kind === 'game' && sess.game && sess.game.id === s.id
+    ? `<button type="button" class="sessbtn ghost" data-act="discard-game" title="${esc(T('hi.sessDiscardGameTitle'))}">${esc(T('hi.sessDiscardGame'))}</button>`
+    : ''
+  sessCard.innerHTML =
+    `<div class="sesstop"><b>${esc(title)}</b>${badge}${act}</div>` +
+    `<div class="sessgrid">${grid}</div>` + lists +
+    warn.map(w => `<p class="sesswarn">${esc(w)}</p>`).join('') +
+    `<p class="sessnote">${esc(T('hi.sessNoteStash'))}</p>` +
+    `<p class="sessnote">${esc(T('hi.sessNoteTrade'))}</p>` +
+    '<details class="unitinfo"><summary><span class="ico" aria-hidden="true">i</span>' +
+    `<span>${esc(T('hi.sessHowBtn'))}</span><span class="caret" aria-hidden="true">▾</span></summary>` +
+    `<p>${esc(T('hi.sessNoteSplit'))}</p><p>${esc(T('hi.sessNoteRound'))}</p></details>`
+}
+
+// The list's order: newest first, each game evening followed by the farm
+// sessions started in it (newest first, drawn indented). A farm session whose
+// evening is not in the answer (discarded: the server drops the parent;
+// older than the list holds) stands on its own. Pure, for the tests.
+function sessionTree (list) {
+  const byStart = (a, b) => b.startedAt - a.startedAt
+  const games = new Set(list.filter(x => x.kind === 'game').map(x => x.id))
+  const under = x => x.kind !== 'game' && x.parent != null && games.has(x.parent)
+  const out = []
+  for (const top of list.filter(x => !under(x)).sort(byStart)) {
+    out.push({ s: top, child: false })
+    if (top.kind !== 'game') continue
+    for (const c of list.filter(x => under(x) && x.parent === top.id).sort(byStart)) out.push({ s: c, child: true })
+  }
+  return out
+}
+
+function renderSessionTable () {
+  if (!sess) return
+  const rows = sessionTree(allSessions())
+  sessNote.textContent = (sess.done || []).length ? T('hi.sessListNote', { n: sess.done.length }) : ''
+  if (!rows.length) {
+    sessTable.hidden = true
+    sessRows.innerHTML = ''
+    sessNone.textContent = T('hi.sessListEmpty')
+    sessNone.hidden = false
+    return
+  }
+  sessNone.hidden = true
+  sessTable.hidden = false
+  sessRows.innerHTML = rows.map(({ s: x, child }) => {
+    const b = x.balance
+    const td = (v, cls = '') => `<td class="${cls}">${esc(v)}</td>`
+    const cls = [child ? 'child' : '', x.kind === 'game' ? 'game' : '', x.id === sessSel ? 'sel' : ''].filter(Boolean).join(' ')
+    return `<tr data-id="${esc(x.id)}" class="${cls}">` +
+      td(kindTxt(x), 'kind') + td(sessWhen(x.startedAt)) + td(durTxt(x.durationMs)) +
+      (b
+        ? td(sessAmt(b.loot, b.lootDiv), signCls(b.loot)) + td(sessAmt(b.market, b.marketDiv), signCls(b.market)) +
+          td(sessAmt(b.total, b.totalDiv), signCls(b.total)) + td(perHourShort(b))
+        : td('—') + td('—') + td('—') + td('—')) +
+      td(stateTxt(x), 'state') + '</tr>'
+  }).join('')
+}
+
+sessRows.addEventListener('click', e => {
+  const row = e.target.closest('tr[data-id]')
+  if (!row) return
+  sessSel = sessSel === row.dataset.id ? null : row.dataset.id
+  renderSessionCard()
+  renderSessionTable()
+})
+
+function renderSessions () {
+  renderSessionButton()
+  renderSessionCard()
+  renderSessionTable()
+}
+
 // ---- data -------------------------------------------------------------------
 let lastPoints = []
 let lastSeries = null   // last /networth-trend payload, so a redraw needs no refetch
@@ -272,7 +544,7 @@ async function load () {
       fetch(`/networth-events?range=${encodeURIComponent(range)}&minDiv=${encodeURIComponent(minDiv)}`).then(r => r.json())
     ])
     // The points carry their own rates (third column). Nothing is lifted out of
-    // the newest one into module state any more.
+    // the newest one into module state.
     if (tr && Array.isArray(tr.points)) lastPoints = tr.points
     events = (ev && Array.isArray(ev.events)) ? ev.events : []
     // A selection cannot survive a reload of a different window.
@@ -285,6 +557,9 @@ async function load () {
   } catch {
     setConn(false)
   }
+  // Outside the try on purpose: a failing session view must not cost the curve,
+  // and a failing curve must not cost the session view.
+  loadSessions()
 }
 
 // Same pill states as the other pages ('conn live' / 'conn down' in styles.css).
@@ -389,7 +664,10 @@ function connect () {
       case 'league-state': window.Shell.applyLeagueState(msg); break
       case 'data-status': window.Shell.applyDataStatus(msg); break
       case 'release-status': window.Shell.applyReleaseStatus(msg); break
+      case 'source-status': window.Shell.applySourceStatus(msg); break
       case 'networth-sync-status': window.Shell.applySyncStatus(msg); break
+      // The running farm session: the status line, and this page's own view.
+      case 'networth-session': window.Shell.applySessionStatus(msg); loadSessions(); break
       // A finished stash sync is the one broadcast worth reacting to: it is
       // exactly when a new point (and possibly a new event) exists.
       case 'networth-result': load(); break
@@ -399,12 +677,13 @@ function connect () {
 
 window.Shell.initLeague(obj => sendSafe(obj))
 
-// The chart labels, the event list and the rail summary are all built from the
-// string table — a language change has to redraw all three.
+// The chart labels, the event list, the rail summary and the session view are
+// all built from the string table — a language change has to redraw them all.
 I18n.onChange(() => {
   renderChart(lastPoints)
   renderEvents()
   if (lastSeries) renderCoverage(lastSeries)
+  renderSessions()
 })
 
 setInterval(load, POLL_MS)

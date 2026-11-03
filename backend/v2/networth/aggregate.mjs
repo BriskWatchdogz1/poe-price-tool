@@ -14,17 +14,17 @@ const TOPITEMS_MAX = 100 // sell-list display cap
 // that holds the priced rows AND the unpriced names (history.mjs, foldItems):
 // a name in that map is proof the item is still there, so losing a price comes
 // out as a price move instead of as stock leaving. A name the cap ranks out of
-// `snapshot.unpriced` was missing from that proof, and the recorder fell back to
-// the old reading — "in neither list, therefore gone" — for precisely the thinly
-// traded items that drift in and out of being priced (docs/bugs.md B2).
+// `snapshot.unpriced` would be missing from that proof and read as "in neither
+// list, therefore gone" — for precisely the thinly traded items that drift in
+// and out of being priced (docs/bugs.md B2).
 //
-// So the cap now applies where the list is READ BY A HUMAN, and not where it is
+// So the cap applies where the list is READ BY A HUMAN, and not where it is
 // read by the server:
 //   `unpricedMax` — every caller whose result is stored rather than shown passes
 //                   Infinity (scan.mjs writes the per-tab store), so the store
 //                   holds every unpriced name of its tab. Bounded by the tab's
 //                   own slots; the priced `items[]` next to it is uncapped for
-//                   the same reason and has been all along.
+//                   the same reason.
 //   `unpricedStock()` — the account-wide fold the recorder reads, off the stored
 //                   tabs directly. It never travels to the browser, so the
 //                   snapshot that does keeps its cap and its size.
@@ -59,11 +59,11 @@ export function unpricedStock (tabs) {
 //   ENTRIES = GGG stash entries (one slot, whatever it holds). counts.*
 //   PIECES  = the sum of their stack sizes.                    row `count`/`qty`
 //   ROWS    = grouped display lines (kind|name|price|tab).     tabs[].items
-// The unpriced summary used to print the first over a list of the second and
-// call both "items": a five-stack made the headline too small, and a row the
-// name cap cut out of the list made it too big. Every number this module hands
-// out now says which of the three it is, and `counts.unpricedPieces` exists so
-// the page never has to guess a piece total from a capped list.
+// Printing the first over a list of the second and calling both "items" is
+// wrong both ways: a five-stack makes the headline too small, and a row the
+// name cap cut out of the list makes it too big. Every number this module hands
+// out says which of the three it is, and `counts.unpricedPieces` exists so the
+// page never has to guess a piece total from a capped list.
 
 // A descriptor's stack size AS A PIECE COUNT, clamped exactly the way
 // normalize.mjs clamps GGG's `stackSize`: anything that is not a finite number
@@ -117,8 +117,10 @@ function aggregateFromTabs ({ tabs, cdRatio, league, accountName, now, unpricedM
         tabIndex: row.tabIndex, tabName: row.tab,
         // `source` (which feed produced this price) is carried on the stored
         // row and passed straight back through, so the round trip through the
-        // per-tab store does not erase the provenance of a number.
-        value: { chaosEach: row.chaosEach, chaosTotal: row.chaosTotal, source: row.source ?? null }
+        // per-tab store does not erase the provenance of a number. `uncertain`
+        // likewise must not lose its doubt on the way (a row stored before
+        // the field existed reads null until its tab is synced again).
+        value: { chaosEach: row.chaosEach, chaosTotal: row.chaosTotal, source: row.source ?? null, uncertain: row.uncertain ?? null }
       })
     }
   }
@@ -126,8 +128,8 @@ function aggregateFromTabs ({ tabs, cdRatio, league, accountName, now, unpricedM
 
   // snap.tabs must list EVERY scanned tab, not only the ones that happened to
   // hold priced items. aggregateFromEntries can only see priced rows, so an
-  // empty or all-unpriced tab used to vanish entirely — at league start that is
-  // most of them, and the UI then reported "5/5 tabs" to someone with
+  // empty or all-unpriced tab would vanish entirely — at league start that is
+  // most of them, and the UI would report "5/5 tabs" to someone with
   // seventeen. Merge the stored tab list back in with zeroed totals: priced
   // tabs keep their order (by value), the rest follow in stash order.
   //
@@ -150,14 +152,14 @@ function aggregateFromTabs ({ tabs, cdRatio, league, accountName, now, unpricedM
   // through the store can reconstruct: thirty Divine Orbs that arrived as three
   // stash entries come back as ONE row. The tooltip promises GGG item counts
   // ("N priced · M unpriced · K skipped"), so it needs the stored entry count,
-  // not the row count it used to print beside two entry counts.
+  // not a row count beside two entry counts.
   //
-  // `skipped` per tab, same reasoning, for a question the page could not answer
-  // at all until now: a tab reading "0c · 0 items" means either that nothing
+  // `skipped` per tab, same reasoning, for a question the page cannot answer
+  // otherwise: a tab reading "0c · 0 items" means either that nothing
   // arrived from GGG or that everything arrived and the classifier dropped it
-  // (rare/magic gear and non-unique maps are `skip`). The store held that
-  // difference all along, the snapshot did not carry it, and that is why the
-  // empty map stash (B7) could not be judged from the screen at all.
+  // (rare/magic gear and non-unique maps are `skip`). The store holds that
+  // difference; without it in the snapshot the empty map stash (B7) cannot be
+  // judged from the screen at all.
   const storedByIndex = new Map(tabs.map(t => [t.index, t]))
   const decorate = (t) => {
     const stored = storedByIndex.get(t.index)
@@ -283,13 +285,22 @@ function aggregateFromEntries ({ entries, cdRatio, league, accountName, now = ne
     // afterwards — the exact dead end the Scavenger incident ran into (see
     // price-guard.mjs). Rows are grouped by kind|name|price|tab, and one route
     // values a whole tab, so every entry folded into a row shares its source.
+    //
+    // `uncertain` rides along the same way (docs/pricing-logic.md, "Uncertain
+    // prices"). Unlike the source it can differ between entries of one row —
+    // two copies of a unique, one whose mods decided the variant and one whose
+    // did not — and the row is uncertain as soon as ONE folded entry is:
+    // too cautious is better than silently certain. It moves no number.
     const ikey = `${e.desc.kind}|${e.desc.name}|${round1(e.value.chaosEach)}|${e.tabIndex}`
     const it = byItem.get(ikey)
-    if (it) { it.qty += stack; it.chaosTotal += e.value.chaosTotal } else {
+    if (it) {
+      it.qty += stack; it.chaosTotal += e.value.chaosTotal
+      if (it.uncertain == null && e.value.uncertain) it.uncertain = e.value.uncertain
+    } else {
       byItem.set(ikey, {
         name: e.desc.name, kind: e.desc.kind, tab: e.tabName, tabIndex: e.tabIndex,
         qty: stack, chaosEach: e.value.chaosEach, chaosTotal: e.value.chaosTotal,
-        source: e.value.source ?? null
+        source: e.value.source ?? null, uncertain: e.value.uncertain ?? null
       })
     }
   }

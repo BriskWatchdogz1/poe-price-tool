@@ -1,121 +1,73 @@
 // Every numeric setting server.mjs reads out of the environment, in ONE table:
-// its default, its allowed range, and — the question the old
-// `Number(env) || DEFAULT` idiom could not even ask — whether an explicitly set
-// ZERO is a legal setting for it. env-number.mjs is the reader; this file is
-// the answer sheet, and docs/admin.md says the same thing in operator language.
-//
-// WHY A TABLE AND NOT EIGHTEEN CLEVER LINES. The idiom was in the config block
-// eighteen times, and each copy carried its default, its clamp and its silence
-// at the read site. A default that lives next to the code that uses it drifts
-// away from the documentation the first time somebody tunes it, and a clamp
-// written as `Math.max(1, …)` is an overwrite nobody is told about. Here the
-// default and the range are stated once, the reader enforces them, and a value
-// that cannot be honoured is reported instead of quietly replaced.
-//
-// SEVEN MORE CAME LATER, and they are the reason to say "not a new read site"
-// out loud. They sat further down server.mjs behind a helper of their own,
-// `positiveEnvInt = (raw, fallback) => Math.max(1, Number(raw) || fallback)` —
-// the same defect in another spelling, and it survived the first pass precisely
-// because it did not look like the idiom being hunted. Five of the seven had a
-// real meaning for zero that the helper was swallowing, and one of them,
-// POE_MAX_REQUEUE_ON_RECONNECT, was handing back ten Trade-API searches to
-// somebody asking for none (docs/bugs.md B13).
+// its default, its allowed range, and whether an explicitly set ZERO is a legal
+// setting for it (which `Number(env) || DEFAULT` cannot even ask).
+// env-number.mjs is the reader; this file is the answer sheet, and
+// docs/admin.md says the same thing in operator language. The default and the
+// range are stated once, the reader enforces them, and a value that cannot be
+// honoured is reported instead of quietly replaced. A new numeric setting gets
+// a row here, not a new read site (a `Math.max(1, Number(raw) || fallback)`
+// helper swallowed zero for POE_MAX_REQUEUE_ON_RECONNECT and handed back ten
+// Trade-API searches to somebody asking for none, docs/bugs.md B13).
 //
 // ZERO IS DECIDED PER SETTING, and the two answers are not interchangeable:
+//   honoured — zero says something the operator needs to be able to say:
+//     `POE_CORPSE_BUDGET_PER_HOUR=0` is "ask the Trade API for nothing" (the
+//     `||` idiom turned it into 25 queries an hour).
+//   refused — zero is meaningless or dangerous: a `*_INTERVAL` or
+//     `*_REFRESH_MS` of zero is a loop with no pause, against GGG or poe.ninja;
+//     `POE_NETWORTH_COOLDOWN_MS=0` throws away the backoff a 429 bought; a TTL
+//     of zero makes a cache that never holds anything and re-queries forever.
+//     Each has a real off switch (`*_DISABLED=1`, `POE_NETWORTH_AUTOSYNC=0`),
+//     which the refusal names.
+// AN EXISTING INSTALLATION CANNOT BREAK ON THIS: an out-of-range compose value
+// gets one loud [config] line naming the variable, the reason and the default,
+// and the DEFAULT is used (env-number.mjs). Nothing throws or refuses to start.
 //
-//   honoured — zero says something the operator needs to be able to say.
-//     `POE_CORPSE_BUDGET_PER_HOUR=0` is "ask the Trade API for nothing", and it
-//     is the case that started all of this: it used to hand back 25 queries an
-//     hour, silently, to somebody switching a background pricer off.
-//
-//   refused — zero is either meaningless or actively dangerous. A `*_INTERVAL`
-//     or `*_REFRESH_MS` of zero is a loop with no pause in it, against GGG or
-//     poe.ninja; `POE_NETWORTH_COOLDOWN_MS=0` throws away the backoff a 429
-//     bought us; a TTL of zero makes a cache that never holds anything and
-//     re-queries forever. Every one of those has a real off switch already
-//     (`*_DISABLED=1`, `POE_NETWORTH_AUTOSYNC=0`), which the refusal names.
-//
-// The two settings whose defaults belong to another module import them, rather
-// than repeating the number here: a second copy of a default is a second thing
-// to keep in step. Two further readers live with their own module for the same
-// reason and use the same reader — `guardOptionsFromEnv` (networth/price-guard)
-// and `slowStepMsFromEnv` (networth/refresher); both honour zero, and both are
+// The two settings whose defaults belong to another module import them rather
+// than repeating the number. Two further readers live with their own module
+// and use the same reader — `guardOptionsFromEnv` (networth/price-guard) and
+// `slowStepMsFromEnv` (networth/refresher); both honour zero and are
 // documented where they are defined.
 //
-// THE REQUEST-VOLUME SETTINGS HAVE FLOORS, AND THE FLOORS ARE ARGUED, NOT FELT.
-// Eight settings decide how often this tool asks somebody else's server, and
-// since they became a form behind a password (config-overrides.mjs) their range
-// is what stands between a curious click and a ban. They used to have none
-// worth the name: an interval of ONE MILLISECOND passed, and so did a cooldown
-// of one millisecond after GGG had answered 429.
-//
-// What raised the stakes is not a measurement in this repository but a reported
-// observation, and it is written down as one: a GGG ban on this deployment
-// applied to the whole ADDRESS, not to an account, and it ended by taking a new
-// address rather than by sitting out the ~12h it would otherwise have cost.
-// That removes the comfortable assumption that each path has a budget of its
-// own — the trade API already publishes its limits under the rule name `Ip`
-// (see trade-audit.mjs), and everything else leaving this address may well be
-// counted next to it.
-//
-// So each of the eight carries a `min` (or, for the one budget, a `max`) that
-// can be pointed at a line of code:
-//   POE_CD_REFRESH_MS        NINJA_MIN_MS — server.mjs already lifts anything
-//                            smaller to it, so a lower value did nothing at all.
-//   POE_FAUSTUS_REFRESH_MS   the digests are hourly (faustus.mjs) — a shorter
-//                            interval re-fetches files that cannot have changed.
-//   POE_CORPSE_TTL_MS        the budget window is one rolling hour
-//                            (corpse-pricer.mjs WINDOW_MS): below it the cache
-//                            expires faster than the budget can refill.
-//   POE_CORPSE_BUDGET_PER_HOUR  one hour / the interval floor = 30 queries, the
-//                            most the pacing can deliver. Higher is a number
-//                            that cannot be spent.
-//   POE_CORPSE_INTERVAL_MS   the pricer's own documented pace (one name per
-//                            2min), on the trade API this repo has two bans on.
-//   POE_NETWORTH_SYNC_INTERVAL_MS  the 30s the whole one-tab-per-tick design is
-//                            argued at (~2,880 steps/day, refresher.mjs).
-//   POE_NETWORTH_COOLDOWN_MS the documented wait after a 429; shortening it is
-//                            the direction that turns a rate limit into a ban.
-//   POE_DATA_REFRESH_MS      one hour: the sources change on a patch cadence
-//                            (weeks) and the catalogue call spends the shared
-//                            trade budget.
+// THE REQUEST-VOLUME SETTINGS HAVE FLOORS, ARGUED, NOT FELT. Nine settings
+// decide how often this tool asks somebody else's server, and as a form behind
+// a password (config-overrides.mjs) their range is what stands between a
+// curious click and a ban. A reported observation raises the stakes: a GGG ban
+// on this deployment applied to the whole ADDRESS, not to an account, and ended
+// by taking a new address rather than sitting out the ~12h. The trade API
+// publishes its limits under the rule name `Ip` (see trade-audit.mjs), and
+// everything else leaving this address may be counted next to it. Each of the
+// nine carries a `min` (for POE_CORPSE_BUDGET_PER_HOUR a `max`, 30 queries)
+// that its row's comment ties to a line of code: POE_CD_REFRESH_MS,
+// POE_NINJA_MAP_TTL_MS, POE_FAUSTUS_REFRESH_MS, POE_CORPSE_TTL_MS,
+// POE_CORPSE_BUDGET_PER_HOUR, POE_CORPSE_INTERVAL_MS,
+// POE_NETWORTH_SYNC_INTERVAL_MS, POE_NETWORTH_COOLDOWN_MS, POE_DATA_REFRESH_MS.
 // The last four are JUDGEMENTS bounded by the conservative side, not
-// measurements — nothing here shows that 20s or a five-minute cooldown is
-// unsafe, only that nothing argues they are safe. They are floors, so the
-// direction they refuse is always the one that sends MORE.
+// measurements: nothing shows that 20s or a five-minute cooldown is unsafe,
+// only that nothing argues they are safe. As floors they always refuse the
+// direction that sends MORE.
 //
-// TWO OF THEM ARE NOT PERIODS BUT SHARES, and they are the first rows in this
-// table that come from a MEASUREMENT rather than a judgement.
-// POE_STASH_IP_BUDGET_SHARE and POE_STASH_ACCOUNT_BUDGET_SHARE say how much of
-// a limit GGG publishes in its own response headers the stash path will spend;
-// networth/stash-pacer.mjs derives the pace between two stash requests from
-// that instead of from a constant. Their dangerous direction is UP, so they
-// carry a `max` and no `min` — and they are deliberately NOT on the settings
-// page: they are the two dials that decide how close this tool runs to a ban,
-// and the derivation is floored at the old constant so that no value here can
-// make it faster than it already was.
+// THREE STASH ROWS COME FROM A MEASUREMENT, and are deliberately NOT on the
+// settings page: they decide how close this tool runs to a ban.
+// POE_STASH_IP_BUDGET_SHARE and POE_STASH_ACCOUNT_BUDGET_SHARE are the share of
+// a limit GGG publishes in its response headers that the stash path spends
+// (networth/stash-pacer.mjs derives the pace from it); their dangerous
+// direction is UP, so they carry a `max` and no `min`, and the derivation is
+// floored at the base spacing (baseMs, 1500ms), so no value here can make it
+// faster than that.
+// POE_STASH_RULE_TTL_MS is how long a published rule keeps counting after it
+// was last published; forgetting a rule that still counts is the same mistake
+// as claiming too much of it, so it carries a floor, and refused values fall
+// back UP.
 //
-// A THIRD ROW BELONGS TO THE SAME DERIVATION AND POINTS THE OTHER WAY.
-// POE_STASH_RULE_TTL_MS is how long a rule GGG published keeps counting after
-// it was last published. The shares decide how much of a limit is spent; this
-// decides how long a limit is believed — and forgetting one that still counts
-// is the same mistake as claiming too much of it, so it carries a floor rather
-// than a ceiling and its refused values fall back UP. Off the settings page for
-// the same reason as the other two.
-//
-// AN EXISTING INSTALLATION CANNOT BREAK ON THIS. A compose value that is now
-// out of range takes the same path every other unusable value takes: one loud
-// [config] line naming the variable, the reason and the default, and the
-// DEFAULT is used (env-number.mjs). Nothing throws, nothing refuses to start.
-//
-// THREE MORE FOLLOWED: POE_STASH_TIMEOUT_MS, POE_LANG_SKEW_WARN_RATIO and PORT.
-// The first two were `Number(env) || 30000` and a hand-rolled finite check
-// (an empty value read as 0). PORT was the odd one out on purpose: `PORT=0`
-// is not an edge case but the normal path in the test suite (bind a random
-// port, never the real 8788), which is why it used an explicit "is it set?"
-// check instead of `||`. In the table it says the same thing as a row: zero is
-// honoured, and a value that is not a port number is reported rather than
-// handed to listen().
+// Further rows: four came with the source status (docs/bugs.md B29) — how old a
+// price source may get before the status line names it, how long an old
+// poe.ninja answer is still served, how long the net-worth exchange map lives,
+// how often a failing poe.ninja key is logged again. POE_STASH_TIMEOUT_MS
+// (default 30000) and POE_LANG_SKEW_WARN_RATIO are rows too, and so is PORT:
+// `PORT=0` is the normal path in the test suite (bind a random port, never the
+// real 8788), so zero is honoured, and a value that is not a port number is
+// reported rather than handed to listen().
 
 import {
   DEFAULT_INTERVAL_MS as DATA_REFRESH_DEFAULT_MS, DEFAULT_STALE_TICKS,
@@ -125,9 +77,25 @@ import { HEARTBEAT_MAX_AGE_MS_DEFAULT } from './host-update.mjs'
 import { REASON_MAX_CHARS_DEFAULT } from './check-failure.mjs'
 // poe.ninja's own courtesy limit, and the number server.mjs already lifts
 // POE_CD_REFRESH_MS to. Imported rather than restated for the usual reason.
-import { NINJA_MIN_MS } from './ninja.mjs'
+import {
+  NINJA_MIN_MS, NINJA_MAX_AGE_DEFAULT_MS, NINJA_MAP_TTL_DEFAULT_MS, NINJA_FAIL_LOG_DEFAULT_MS
+} from './ninja.mjs'
 import { DEFAULT_MAX_COVERAGE_LOSS_RATIO } from './lang-derive.mjs'
 import { DEFAULT_WARN_RATIO as SKEW_DEFAULT_WARN_RATIO } from './lang-skew.mjs'
+// sessions.mjs reads no environment at import, so this stays a plain table.
+import {
+  SESSION_BASELINE_MAX_AGE_MS_DEFAULT, SESSION_RATE_MIN_MS_DEFAULT, SESSION_TOP_N_DEFAULT,
+  SESSION_LIST_MAX_DEFAULT, SESSIONS_KEEP_DEFAULT, SESSION_FINALIZE_MAX_MS_DEFAULT
+} from './networth/sessions.mjs'
+// The two bars of the Net-Worth uncertainty marker belong to the modules that
+// argue them. Neither module reads the environment or imports anything, so
+// there is no cycle and config-overrides stays env-free.
+import { SELL_MIN_QUOTE_TURNOVER_C } from './sell-side.mjs'
+import { CORPSE_MIN_LISTINGS } from './networth/corpse-pricer.mjs'
+// Sync follows the game: the idle share belongs to the refresher that argues it
+// (WHO GETS THE TICK); it reads no environment at import.
+import { DEFAULT_IDLE_EVERY } from './networth/refresher.mjs'
+import { GAME_GAP_MS_DEFAULT } from './networth/session-control.mjs'
 import { createEnvNumbers } from './env-number.mjs'
 
 const HOUR_MS = 60 * 60 * 1000
@@ -237,9 +205,7 @@ export const NUMERIC_SETTINGS = [
     // Zero ticks against GGG's stash API without pause — the burst the whole
     // one-tab-per-tick design exists to avoid.
     //
-    // The floor is the default, and this row used to say the opposite: "no
-    // `min` here, narrowing it would be a behaviour change dressed up as a bug
-    // fix". It is a behaviour change, and it is not dressed up as anything —
+    // The floor is the default, and that is a deliberate behaviour limit:
     // 30s is the ONLY pace this design has ever been argued at (refresher.mjs:
     // ~2,880 steps a day in total), a step can be 1+N requests on a folder tab,
     // and the stash budget may be counted against the same address as the trade
@@ -250,6 +216,33 @@ export const NUMERIC_SETTINGS = [
     zero: false,
     min: NETWORTH_SYNC_DEFAULT_MS,
     hint: 'Use POE_NETWORTH_AUTOSYNC=0 to switch the background refresher off.'
+  },
+  {
+    name: 'POE_NETWORTH_IDLE_EVERY',
+    fallback: DEFAULT_IDLE_EVERY,
+    // Sync follows the game (networth/refresher.mjs, WHO GETS THE TICK). Only
+    // ever lowers the load: it decides which tick a user whose daemon reports
+    // the game not running gets, never adds one. A value above max is refused
+    // and lands on the default 10, which is more reads than were asked for
+    // (one of the four such refusals, env-number.mjs). 1 is refused: every tick
+    // would go to the idle users and the players would get none. Zero likewise
+    // (with zero: true the reader would still refuse it below min). Resting
+    // completely is POE_NETWORTH_IDLE_REST=1, a switch outside this table.
+    zero: false,
+    min: 2,
+    max: 1000,
+    integer: true,
+    hint: 'Use POE_NETWORTH_IDLE_REST=1 to give users whose game is not running no tick at all.'
+  },
+  {
+    name: 'POE_SYNC_AFTER_GAME_MAX_MS',
+    fallback: HOUR_MS,
+    // How long a player whose game just stopped keeps the playing pace at
+    // most, until each of their tabs was read once since (daemon-presence.mjs
+    // makeHoldAfterGame). Moves turns between users, never adds one. ZERO
+    // HONOURED: a stopped game yields at once.
+    zero: true,
+    integer: true
   },
   {
     name: 'POE_STASH_IP_BUDGET_SHARE',
@@ -264,16 +257,17 @@ export const NUMERIC_SETTINGS = [
     // address: the household's own browser on pathofexile.com, and this app's
     // trade path, which is not counted against the stash rules but is counted
     // against the address. None of it is visible from here. The measured rule
-    // set is `Ip 45/60s ban 120s, Ip 180/1800s ban 600s`; the constant the tool
-    // used before this dial existed ran at 89% of the first one.
+    // set is `Ip 45/60s ban 120s, Ip 180/1800s ban 600s`; the base spacing
+    // alone (1500ms) runs at 89% of the first one.
     //
     // Zero would mean "spend nothing", i.e. an infinite spacing — the off switch
     // for the stash path is POE_NETWORTH_AUTOSYNC=0, which also stops the timer.
     // The dangerous direction is UP, so this row carries a ceiling and NO floor:
     // a refused value falls back to the default (env-number.mjs), and for a
     // ceiling that fallback is the conservative direction. Above 1 would claim
-    // more than GGG publishes; the derivation is floored at the old constant
-    // regardless, so no value here can make the tool send faster than it did.
+    // more than GGG publishes; the derivation is floored at the base spacing
+    // (baseMs, 1500ms) regardless, so no value here can make the tool send
+    // faster than that.
     zero: false,
     max: 1,
     hint: 'Use POE_NETWORTH_AUTOSYNC=0 to switch the background stash reads off.'
@@ -406,8 +400,8 @@ export const NUMERIC_SETTINGS = [
     name: 'POE_NETWORTH_LIST_TTL_MS',
     fallback: 15 * 60 * 1000,
     // Zero re-fetches the stash-tab LIST on every tick — and that is worse than
-    // the "one extra request per user per tick" this comment used to claim, in
-    // all three of its parts. A tick refreshes the list OR syncs one tab, never
+    // "one extra request per user per tick", in all three of its parts. A tick
+    // refreshes the list OR syncs one tab, never
     // both (networth/refresher.mjs: the list branch returns, "one request spent
     // — the tab syncs happen on following ticks"), and a tick belongs to ONE
     // user, walked round-robin. So a zero costs no extra request: it spends
@@ -471,6 +465,52 @@ export const NUMERIC_SETTINGS = [
     hint: 'Use POE_FAUSTUS_DISABLED=1 to fall through to poe.ninja instead.'
   },
 
+  // ---- Price sources: status and poe.ninja ages (docs/bugs.md B29) ----------
+  {
+    name: 'POE_SOURCE_STALE_MS',
+    fallback: 3 * HOUR_MS,
+    // From this age of its last success the status line on every page names a
+    // price source (Faustus, poe.ninja) as stale. Display only: no request
+    // depends on it. Per source it is additionally raised to twice that
+    // source's own refresh interval (server.mjs sourceStaleAfterMs), so a slow
+    // schedule is not reported between two of its own ticks.
+    //
+    // The floor of one hour is Faustus' own pace: below it a healthy source
+    // would be called stale between two ticks. Zero would be "always stale".
+    zero: false,
+    min: HOUR_MS
+  },
+  {
+    name: 'POE_NINJA_MAX_AGE_MS',
+    fallback: NINJA_MAX_AGE_DEFAULT_MS,
+    // How long a poe.ninja answer is still served after refreshing it failed.
+    // Past it the item is unpriced and falls through to the next source — a
+    // wrong price is worse than none (ninja.mjs). An answer is up to 15 min old
+    // by design, hence the floor; zero would serve nothing that is not
+    // younger than this very instant.
+    zero: false,
+    min: NINJA_MIN_MS
+  },
+  {
+    name: 'POE_NINJA_MAP_TTL_MS',
+    fallback: NINJA_MAP_TTL_DEFAULT_MS,
+    // How long the net-worth valuation keeps its merged exchange map before it
+    // reads the 14 overview types again (networth/valuator.mjs). Below 15 min a
+    // rebuild only re-reads the answers ninja.mjs still has cached; zero would
+    // rebuild on every valuation.
+    zero: false,
+    min: NINJA_MIN_MS
+  },
+  {
+    name: 'POE_NINJA_FAIL_LOG_MS',
+    fallback: NINJA_FAIL_LOG_DEFAULT_MS,
+    // How often a poe.ninja key that keeps failing is logged again (fail-log.mjs);
+    // the start and the recovery are always logged. ZERO HONOURED: "one line per
+    // failed attempt", which stays bounded because ninja.mjs does not ask the
+    // same key again for 15 minutes after a failure.
+    zero: true
+  },
+
   // ---- Corpses (Trade API, background priority) ---------------------------
   {
     name: 'POE_CORPSE_TTL_MS',
@@ -479,7 +519,8 @@ export const NUMERIC_SETTINGS = [
     // spends its whole hourly budget re-asking questions it already has answers
     // to. Trade-API requests, i.e. the budget that gets accounts banned.
     //
-    // The floor is one hour, the pricer's budget WINDOW (corpse-pricer.mjs):
+    // The floor is one hour, the pricer's budget WINDOW (corpse-pricer.mjs
+    // WINDOW_MS):
     // under it an entry goes stale faster than the budget that produced it can
     // refill, which is the same "re-ask what you already know" as zero, merely
     // rationed. It is the smallest DEFENSIBLE floor rather than the honest one
@@ -493,9 +534,8 @@ export const NUMERIC_SETTINGS = [
   {
     name: 'POE_CORPSE_BUDGET_PER_HOUR',
     fallback: 25,
-    // ZERO HONOURED, and this is the case the whole change is about: 0 means
-    // the corpse pricer asks the Trade API for NOTHING. It used to hand back
-    // 25 queries an hour to an operator who was trying to stop it.
+    // ZERO HONOURED: 0 means the corpse pricer asks the Trade API for NOTHING,
+    // not 25 queries an hour to an operator who is trying to stop it.
     zero: true,
     integer: true,
     // The one row here whose dangerous direction is UP, and it had no ceiling
@@ -662,10 +702,10 @@ export const NUMERIC_SETTINGS = [
     // ZERO HONOURED, and this is the one of the seven that costs REQUESTS. A
     // re-queued card is an `auto` price search on the Trade API (server.mjs,
     // `enqueue({ kind: 'auto' })`), so `=0` — "re-queue nothing", the strongest
-    // form of the flood cap this setting exists for — used to hand back the
-    // default 10 searches per reconnect. Exactly the shape of
-    // POE_CORPSE_BUDGET_PER_HOUR=0 handing back 25 an hour, only bounded by one
-    // reconnect instead of repeating on a schedule.
+    // form of the flood cap this setting exists for — must not hand back the
+    // default 10 searches per reconnect (the same shape as
+    // POE_CORPSE_BUDGET_PER_HOUR=0, only bounded by one reconnect instead of
+    // repeating on a schedule).
     //
     // Which also puts this row in the small class where a REFUSAL sends more
     // than was asked for: `=none` or `=-1` falls back to 10. That is the same
@@ -734,6 +774,212 @@ export const NUMERIC_SETTINGS = [
     // headline disagrees with its asks by construction; somebody investigating
     // exactly that can switch the floor off.
     zero: true
+  },
+
+  // ---- The Net-Worth uncertainty marker (display only) ---------------------
+  // Two bars behind the Confidence column of the Net-Worth table
+  // (docs/pricing-logic.md, "Uncertain prices"). Like the ask-conflict block
+  // above, neither sends anything and neither changes a price, a total or a
+  // history point: they decide which rows the page marks. Both honour zero.
+  {
+    name: 'POE_NETWORTH_THIN_TURNOVER_C',
+    fallback: SELL_MIN_QUOTE_TURNOVER_C,
+    // ZERO HONOURED: mark nothing as "thin market". A very large value marks
+    // every Faustus and poe.ninja exchange price; that is a choice, not a
+    // danger, because nothing is subtracted.
+    zero: true
+  },
+  {
+    name: 'POE_NETWORTH_CORPSE_MIN_LISTINGS',
+    fallback: CORPSE_MIN_LISTINGS,
+    // ZERO HONOURED: never mark a corpse price. Above 10 (the most listings the
+    // corpse pricer fetches) every corpse is marked.
+    zero: true,
+    integer: true
+  },
+
+  // ---- Farm sessions (display and bookkeeping only — none of these sends a request)
+  {
+    name: 'POE_SESSION_BASELINE_MAX_AGE_MS',
+    fallback: SESSION_BASELINE_MAX_AGE_MS_DEFAULT,
+    // Refused below a minute: the history records at most one point a minute,
+    // so a shorter bar refuses starts while the sync runs normally. Zero
+    // likewise.
+    zero: false,
+    min: 60_000,
+    integer: true
+  },
+  {
+    name: 'POE_SESSION_RATE_MIN_MS',
+    fallback: SESSION_RATE_MIN_MS_DEFAULT,
+    // ZERO HONOURED: an hourly figure for every session, however short.
+    zero: true,
+    integer: true
+  },
+  {
+    name: 'POE_SESSION_TOP_N',
+    fallback: SESSION_TOP_N_DEFAULT,
+    // ZERO HONOURED: no item lists; the totals do not depend on it.
+    zero: true,
+    integer: true,
+    max: 20
+  },
+  {
+    name: 'POE_SESSION_LIST_MAX',
+    fallback: SESSION_LIST_MAX_DEFAULT,
+    zero: false,
+    min: 1,
+    max: 200,
+    integer: true
+  },
+  {
+    name: 'POE_SESSIONS_KEEP',
+    fallback: SESSIONS_KEEP_DEFAULT,
+    // At least the default list length, so the page never lists fewer than it
+    // promises.
+    zero: false,
+    min: 20,
+    max: 5000,
+    integer: true
+  },
+  {
+    name: 'POE_SESSION_FINALIZE_MAX_MS',
+    fallback: SESSION_FINALIZE_MAX_MS_DEFAULT,
+    // A round is tab count × users × the sync interval; below an hour a normal
+    // stash would be closed as unconfirmed before its round could finish.
+    zero: false,
+    min: 3_600_000,
+    integer: true
+  },
+  {
+    name: 'POE_SESSION_GAME_GAP_MS',
+    fallback: GAME_GAP_MS_DEFAULT,
+    // How long the game has to be reported not running before a game session
+    // ends (networth/session-control.mjs). Refused below a minute, zero
+    // included: the daemon reports a change of the game state at once (it
+    // looks every 10 s by default) and beats every 60 s while the game runs,
+    // so a shorter gap would end the evening at a game restart.
+    zero: false,
+    min: 60_000,
+    integer: true
+  },
+  {
+    name: 'POE_DAEMON_SESSION_MAX_PER_MIN',
+    fallback: 10,
+    // POST /daemon/session requests accepted per user in any sliding minute;
+    // one more is answered 429. Each accepted start or end writes the
+    // sessions file. Zero would refuse the session key altogether.
+    zero: false,
+    min: 1,
+    max: 120,
+    integer: true
+  },
+
+  // ---- The hotkey daemon's channel (memory and LAN only — none of these sends a request to GGG)
+  // daemon-feed.mjs (GET /daemon/events) and daemon-presence.mjs
+  // (POST /daemon/heartbeat); frontend/PROTOCOL.md describes both routes.
+  {
+    name: 'POE_DAEMON_POLL_MAX_HOLD_MS',
+    fallback: 30_000,
+    // The longest a GET /daemon/events is held open. ZERO HONOURED: every
+    // request is answered at once, and the daemon then paces its own asking.
+    // At most 55 s, under the usual reverse-proxy read timeout of 60 s: a hold
+    // the proxy cuts is a poll that never answers.
+    zero: true,
+    max: 55_000,
+    integer: true
+  },
+  {
+    name: 'POE_DAEMON_EVENTS_KEEP',
+    fallback: 100,
+    // Events (and followed cards) kept per user. Fewer than 10 would drop a
+    // card's own events before a daemon that is one request behind reads them.
+    zero: false,
+    min: 10,
+    max: 10_000,
+    integer: true
+  },
+  {
+    name: 'POE_DAEMON_WAITERS_MAX',
+    fallback: 4,
+    // Held requests per user; one per daemon instance anyway. Zero would
+    // answer every daemon 429.
+    zero: false,
+    min: 1,
+    max: 32,
+    integer: true
+  },
+  {
+    name: 'POE_DAEMON_FEED_MAX_AGE_MS',
+    fallback: 120_000,
+    // How long a card is followed after its final state, and the age past
+    // which no event reaches the game. Zero would forget every card at once.
+    zero: false,
+    min: 10_000,
+    integer: true
+  },
+  {
+    name: 'POE_DAEMON_BEAT_STALE_MS',
+    fallback: 180_000,
+    // After this long without a heartbeat a daemon counts as silent (three
+    // missed beats at a minute). Under a minute a daemon beating once a minute
+    // would flicker between known and unknown; zero always would.
+    zero: false,
+    min: 60_000,
+    integer: true
+  },
+
+  // ---- Buyer whispers (memory only; pricing reads cached poe.ninja/Faustus data, never the trade API)
+  // whisper-price.mjs (POST /daemon/whisper); frontend/PROTOCOL.md describes the route.
+  {
+    name: 'POE_WHISPER_KEEP',
+    fallback: 50,
+    // Whispers kept per user for the Price Check page. ZERO HONOURED: nothing
+    // is kept for the page; the daemon still gets its answer, and a late
+    // result still reaches the page and the daemon.
+    zero: true,
+    max: 1000,
+    integer: true
+  },
+  {
+    name: 'POE_WHISPER_PRICE_DEADLINE_MS',
+    fallback: 3000,
+    // How long the answer to a whisper waits for the market value; a later
+    // result follows over the page and the daemon's feed. ZERO HONOURED: every
+    // answer is 'pending' at once. Below the daemon's 5 s curl limit
+    // (ppt_link.post_json timeout_s), so an answer within the deadline also
+    // reaches the daemon over HTTP.
+    zero: true,
+    max: 4000,
+    integer: true
+  },
+  {
+    name: 'POE_WHISPER_MAX_PER_MIN',
+    fallback: 60,
+    // Whispers accepted per user in any sliding minute. Zero would refuse every one.
+    zero: false,
+    min: 1,
+    max: 600,
+    integer: true
+  },
+  {
+    name: 'POE_WHISPER_LOW_RATIO',
+    fallback: 0.85,
+    // Your listed price below this share of the market value is 'below'.
+    // Also the threshold of the Net Worth page's "Listed below market" block.
+    // Zero would never say 'below'; above 1 a fair price would be 'below'.
+    zero: false,
+    min: 0.1,
+    max: 1
+  },
+  {
+    name: 'POE_WHISPER_HIGH_RATIO',
+    fallback: 1.15,
+    // Your listed price above this multiple of the market value is 'above'.
+    // Below 1 a fair price would be 'above'.
+    zero: false,
+    min: 1,
+    max: 10
   },
 
   // ---- The update button --------------------------------------------------

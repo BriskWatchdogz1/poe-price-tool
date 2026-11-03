@@ -1,55 +1,36 @@
 // Stash highlight generator: turns "these are the items I want to see" into a
-// search string for Path of Exile's stash search field.
+// search string for Path of Exile's stash search field (regex, capped at 250
+// characters). Format follows the Path-of-Regex style: ONE quoted keyword with
+// the alternatives chained inside via |, e.g. "egr|tev|efl"; unquoted, the game
+// would split it at the spaces into several keywords. The core is the
+// SHORTENING: for every wanted name, the shortest fragment in NO unwanted name.
 //
-// The search field understands regex (the in-game tips say so) and is capped
-// at 250 characters. Output format follows the established Path-of-Regex
-// style: ONE quoted keyword with the alternatives chained inside it via | —
-//   "egr|tev|efl"
-// Without the quotes the game would split at the spaces into several keywords;
-// quoted, it stays a single expression.
+// IMPORTANT — the exclusion set is ALL item names the game knows
+// (renderer/public/data/<lang>/items.ndjson, via GET /item-names), never the
+// player's own holdings. Items come in families with shared suffixes ("...
+// Scarab of Discernment" exists for Ambush, Breach, Harbinger and others): a
+// "dis" checked against your own stash alone looks unambiguous and lit up ~14
+// slots instead of 9 in game (networth.js, "Stash-Highlight"). Longer
+// fragments are the point.
 //
-// The core is not the chaining, it is the SHORTENING: for every wanted name we
-// look for the shortest fragment that occurs in NO unwanted name.
+// LANGUAGE: wanted and unwanted must be in ONE language, the one the game
+// client prints, because the game matches what it prints (B10). The generator
+// only shortens what it is handed against what it is handed; the caller owns
+// that contract.
 //
-// IMPORTANT — what the exclusion set MUST be built from:
-// not from the player's own holdings (snapshot/stash), but from ALL item names
-// the game knows. PoE items come in families with shared suffixes: "... Scarab
-// of Discernment" exists for Ambush, Breach, Harbinger and others. A "dis"
-// checked against your own stash alone looks unambiguous there and still
-// lights up half the tab in game, because the foreign variants appear in no
-// ownership-based list — no matter how complete you make the snapshot.
-// Source of truth: renderer/public/data/<lang>/items.ndjson, reached from the
-// frontend via GET /item-names. That makes the fragments longer — which is
-// exactly the point.
-//
-// This generator has no opinion about LANGUAGE: it shortens the strings it is
-// handed against the strings it is handed. That is the whole contract, and the
-// caller has to honour it — wanted and unwanted must be in ONE language, the
-// one the game client prints, because the game matches what it prints (B10).
-// Feeding it English names against a German universe (or the reverse) produces
-// fragments that are unambiguous in a universe nobody is searching.
-//
-// SECOND UNIVERSE, THE ONE WE DO NOT HAVE (B21):
-// the stash search does not read names only. It reads the WHOLE item text, the
-// flavour text included. Nine divination cards produced
+// SECOND UNIVERSE, THE ONE WE DO NOT HAVE (B21): the stash search reads the
+// WHOLE item text, flavour text included. Nine divination cards produced
 //   "awr|ne be|mono|ial l|tuna|rker |oml|yos|some"
-// and lit up twelve slots in game: "some" is unique among the ~4700 NAMES, and
-// it is an everyday word that sits in the flavour text of Boon of Justice,
-// Demigod's Wager, Disdain, Forbidden Power, The Aesthete and The Body.
-// Shortening against the name list alone is therefore minimizing against the
-// wrong universe, one level below the "14 slots instead of 9" case above.
-//
-// This file has NO flavour texts, and nothing here can look one up: no data
-// file maps a name to its flavour text and no endpoint answers with one. (The
-// daemon does see the flavour text of the ONE item a user pastes, in the
-// clipboard text — that path never touches this page and is not a lookup.) So
-// the guard below cannot verify that a
-// fragment is free of collisions; it can only refuse fragments that are LIKELY
-// to collide, and everything it does not know about passes. That is a
-// reduction of the risk, not a guarantee, and no test in this repository can
-// turn it into one. What it costs is characters, and therefore items per
-// search field — that is the intended direction: fewer cards per pass beats a
-// field that lights up half the stash.
+// and lit up twelve slots: "some" is unique among the ~4700 NAMES but sits in
+// the flavour text of Boon of Justice, Demigod's Wager, Disdain, Forbidden
+// Power, The Aesthete and The Body — the "14 slots instead of 9" failure one
+// level down. Nothing here has or can look up a flavour text (no data file or
+// endpoint maps a name to one; the daemon sees only the one pasted item, which
+// never reaches this page). So the guard below only refuses fragments LIKELY
+// to collide and lets what it does not know pass: a reduction of the risk, not
+// a guarantee, and no test in this repository can make it one. It costs
+// characters, so fewer items per field — fewer cards per pass beats a field
+// that lights up half the stash.
 
 export const HIGHLIGHT_MAX_DEFAULT = 250
 const MIN_TOKEN = 2

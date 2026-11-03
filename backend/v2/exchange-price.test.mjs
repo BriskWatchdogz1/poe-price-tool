@@ -17,8 +17,8 @@ quietEnv()
 // this file turns back off: the exchange price path is what this file measures. Nothing leaves
 // the machine for it — `fetch` is stubbed in this file, and the runner's guard
 // (test-net-guard.mjs) blocks anything that is not loopback anyway. Written out
-// rather than left implicit, because "this file prices" used to be visible only
-// as the ABSENCE of a line.
+// rather than left implicit, because otherwise "this file prices" is visible
+// only as the ABSENCE of a line.
 delete process.env.POE_PRICE_CHECK_DISABLED
 // And this one, for the same reason and with the same protection: the Faustus store IS the price source under test here.
 delete process.env.POE_FAUSTUS_DISABLED
@@ -121,7 +121,7 @@ test('trade result without a price: Faustus headline price, but no trade-ask lin
 
 test('sub-chaos fungibles (Lifeforce and friends) are not rounded down to 0', () => {
   const r = mod.withExchangeMain(tradeResult({ currency: 'chaos', priceLow: 0.1, priceHigh: 0.1 }), 0.0179, CD)
-  assert.equal(r.priceLow, 0.018)
+  assert.equal(r.priceLow, 0.0179, 'three significant digits below 1 c')
   assert.ok(r.priceLow > 0, 'no "0 c" as the headline price')
 })
 
@@ -172,7 +172,7 @@ test('the range is passed through as exchangeRange, rounded like the headline nu
   const r = mod.withExchangeMain(tradeResult(), 13.6, CD, { min: 10.04, max: 17.06 })
   assert.deepEqual(r.exchangeRange, { low: 10, high: 17.1 })
   const sub = mod.withExchangeMain(tradeResult(), 0.0179, CD, { min: 0.0121, max: 0.0304 })
-  assert.deepEqual(sub.exchangeRange, { low: 0.012, high: 0.03 }, 'below 1c three decimal places')
+  assert.deepEqual(sub.exchangeRange, { low: 0.0121, high: 0.0304 }, 'below 1c three significant digits')
 })
 
 test('without (or with a degenerate) range exchangeRange stays absent — no placeholder', () => {

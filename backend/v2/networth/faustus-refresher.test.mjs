@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createFaustusStore } from './faustus-store.mjs'
 import { createFaustusRefresher } from './faustus-refresher.mjs'
+import { failure } from '../check-failure.mjs'
 
 const silentLog = { warn () {}, error () {}, log () {} }
 
@@ -143,5 +144,81 @@ test('tickOnce: an empty detailByName() result is treated the same way', async (
   await r.tickOnce()
   assert.deepEqual(s.allPrices(), { 'Chaos Orb': 1 })
   assert.equal(warnings.length, 1)
+  await cleanup()
+})
+
+// ---------------------------------------------------------------------------
+// B29: a failure is reported to the source status, and the first success after
+// failures says so in the log.
+// ---------------------------------------------------------------------------
+test('tickOnce: a thrown refresh calls onFailed with the reason and the error kind', async () => {
+  const { s, cleanup } = await freshStore()
+  const pricer = { chaosByName: async () => { throw failure('CDN 503', 'unreachable') } }
+  const failed = []
+  let refreshed = 0
+  const r = createFaustusRefresher({
+    league: 'Standard', store: s, pricer, log: silentLog,
+    onFailed: (reason, kind) => failed.push([reason, kind]),
+    onRefreshed: () => { refreshed++ }
+  })
+  await r.tickOnce()
+  assert.deepEqual(failed, [['CDN 503', 'unreachable']])
+  assert.equal(refreshed, 0)
+  await cleanup()
+})
+
+test('tickOnce: no market matched calls onFailed with kind rejected and keeps the store', async () => {
+  const { s, cleanup } = await freshStore()
+  let setCalls = 0
+  const orig = s.setPrices.bind(s)
+  s.setPrices = async (...a) => { setCalls++; return orig(...a) }
+  const pricer = { detailByName: async () => new Map() }
+  const failed = []
+  const r = createFaustusRefresher({ league: 'Standard', store: s, pricer, log: silentLog, onFailed: (reason, kind) => failed.push([reason, kind]) })
+  await r.tickOnce()
+  assert.equal(failed.length, 1)
+  assert.match(failed[0][0], /no market matched league=/)
+  assert.equal(failed[0][1], 'rejected')
+  assert.equal(setCalls, 0)
+  await cleanup()
+})
+
+test('tickOnce: the first success after failures logs one recovery line', async () => {
+  const { s, cleanup } = await freshStore()
+  let fail = true
+  const pricer = { chaosByName: async () => { if (fail) throw new Error('down'); return new Map([['Chaos Orb', 1]]) } }
+  const lines = []
+  const log = { warn: l => lines.push(l), error () {}, log () {} }
+  let t = 0
+  const r = createFaustusRefresher({ league: 'Standard', store: s, pricer, log, now: () => t })
+  await r.tickOnce(); t += 3600000
+  await r.tickOnce(); t += 3600000
+  fail = false
+  await r.tickOnce()
+  await r.tickOnce()
+  const rec = lines.filter(l => /refresh succeeded again/.test(l))
+  assert.equal(rec.length, 1)
+  assert.match(rec[0], /refresh succeeded again after .* \(2 failed ticks\)/)
+  await cleanup()
+})
+
+test('tickOnce: the turnover behind each price is persisted, and a price without one has none', async () => {
+  // Like `at`, the turnover exists only for the length of one pricer call; the
+  // refresher is the one place that can hand it to the store.
+  const { s, cleanup } = await freshStore()
+  const seen = []
+  const orig = s.setPrices.bind(s)
+  s.setPrices = async (...a) => { seen.push(a[6]); return orig(...a) }
+  const pricer = {
+    detailByName: async () => new Map([
+      ['Imperial Legacy', { chaos: 4.6, at: 9 * 3600, turnoverC: 55 }],
+      ['Chaos Orb', { chaos: 1 }]
+    ])
+  }
+  await createFaustusRefresher({ league: 'Standard', store: s, pricer, log: silentLog }).tickOnce()
+  assert.ok(seen[0] instanceof Map, 'the seventh argument is the turnover map')
+  assert.deepEqual([...seen[0]], [['Imperial Legacy', 55]])
+  assert.equal(s.getTurnover('Imperial Legacy'), 55)
+  assert.equal(s.getTurnover('Chaos Orb'), null)
   await cleanup()
 })

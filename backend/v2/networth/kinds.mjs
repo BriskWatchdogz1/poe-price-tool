@@ -22,11 +22,14 @@
 //   - frame    = ggg.frameType; entry = items.ndjson index entry for typeLine
 //   - index    = the loaded items index (has categoryOfBase)
 //
-// A VALUATION_ROUTE is  kind -> async (desc, api) => ({ each, source })  where
-// `each` is chaos-per-unit (null = honestly unpriced -> lands in `unpriced`,
-// NEVER counted as 0). `api` bundles the cached poe.ninja helpers built in
-// valuator.mjs: fromExchangeMap, exchangeSingle, fromItemOverview, fromGem,
-// plus league.
+// A VALUATION_ROUTE is  kind -> async (desc, api) => ({ each, source, uncertain? })
+// where `each` is chaos-per-unit (null = honestly unpriced -> lands in
+// `unpriced`, NEVER counted as 0) and `uncertain` is a code from valuator.mjs
+// UNCERTAIN or null (no known doubt; a route that names none yields null).
+// `api` bundles the helpers built in valuator.mjs: fromFaustus,
+// fromCorpseStore, fromNinjaCurrencyOverview, fromExchangeMap, exchangeSingle,
+// fromItemOverview, fromGem, plus league. Each helper answers null or
+// { each, uncertain }; `answer` below turns that into a route result.
 import { ninjaTypeFor } from '../ninja.mjs'
 
 // Pull a numeric property (Level / Quality) out of the GGG properties array.
@@ -150,9 +153,10 @@ function uniqueCategory (c) {
 }
 
 // Unidentified uniques arrive with an EMPTY name field (GGG only reveals it on
-// identification), which used to produce a nameless row in the unpriced list
-// ("x4 (Uniques)"). They stay unpriced — before identifying, WHICH unique it is
-// is unknown, so no poe.ninja query can be honest — but the row must read.
+// identification), which would otherwise produce a nameless row in the
+// unpriced list ("x4 (Uniques)"). They stay unpriced — before identifying,
+// WHICH unique it is is unknown, so no poe.ninja query can be honest — but the
+// row must read.
 // baseType == typeLine; no typeLine either -> the generic label.
 const unidentifiedLabel = typeLine => typeLine ? `Unidentified ${typeLine}` : 'Unidentified Unique'
 
@@ -217,6 +221,12 @@ export const CLASSIFIERS = [
   { kind: 'skip', detect: c => (c.frame === 1 || c.frame === 2) ? { kind: 'skip', reason: 'rare-gear', name: c.name || c.typeLine, stack: c.stack } : null }
 ]
 
+// The kinds whose rule above pins stack to 1: one item per stash slot, never a
+// stack. A buyer whisper for one of them names the whole quantity
+// (whisper-price.mjs); every other kind keeps the stash's stack size.
+// kinds.test.mjs holds this list and the rules together.
+export const SINGLE_ITEM_KINDS = Object.freeze(new Set(['gem', 'unique', 'beast']))
+
 // Run the ordered rules; first match wins, else an honest unknown-skip.
 export function classify (ctx) {
   for (const rule of CLASSIFIERS) {
@@ -238,27 +248,31 @@ export function classify (ctx) {
 //   3. poe.ninja stash currency overview (Currency + Fragment only) — player
 //      stash LISTINGS, not trades; last resort for names (2) doesn't carry.
 //
-// (3) used to sit ahead of (2) and mispriced cheap currency badly: a currency
-// with no `pay` side in the stash data comes back as `chaosEquivalent: 1.0`.
-// Observed live — Armourer's Scrap at 1c each (20 of them counted as 20c) while
-// the exchange overview said 0.096c, Faustus 0.133c, and the in-game window
-// 1:10. Stage 3 stays as a fallback, just no longer above the truer source.
+// (3) sits BELOW (2) because ahead of it it misprices cheap currency badly: a
+// currency with no `pay` side in the stash data comes back as
+// `chaosEquivalent: 1.0`. Observed live — Armourer's Scrap at 1c each (20 of
+// them counted as 20c) while the exchange overview said 0.096c, Faustus
+// 0.133c, and the in-game window 1:10. Stage 3 stays as a fallback only.
+// A helper's answer (null or { each, uncertain }) as a route result with its
+// source — the doubt passes through untouched, the routes add no logic of
+// their own.
+const answer = (r, source) => (r ? { each: r.each, source, uncertain: r.uncertain ?? null } : null)
+const UNPRICED = Object.freeze({ each: null, source: null, uncertain: null })
+
 async function fungibleChain (api, name, tradeTag) {
-  let v = await api.fromFaustus(name)
-  if (v != null) return { each: v, source: 'faustus' }
-  v = await api.fromExchangeMap(tradeTag, name)
-  if (v != null) return { each: v, source: 'exchange' }
-  v = await api.fromNinjaCurrencyOverview('Currency', name)
-  if (v != null) return { each: v, source: 'ninja:currency' }
-  v = await api.fromNinjaCurrencyOverview('Fragment', name)
-  if (v != null) return { each: v, source: 'ninja:fragment' }
-  return { each: null, source: null }
+  // `??` evaluates lazily: a later stage is only asked when every earlier one
+  // missed, in the order below.
+  return answer(await api.fromFaustus(name), 'faustus') ??
+    answer(await api.fromExchangeMap(tradeTag, name), 'exchange') ??
+    answer(await api.fromNinjaCurrencyOverview('Currency', name), 'ninja:currency') ??
+    answer(await api.fromNinjaCurrencyOverview('Fragment', name), 'ninja:fragment') ??
+    UNPRICED
 }
 
-// kind -> pricing route. Each returns { each, source }; each==null = unpriced.
+// kind -> pricing route. Each returns { each, source, uncertain }; each==null = unpriced.
 export const VALUATION_ROUTES = {
   stackable: async (d, api) => {
-    if (d.name === 'Chaos Orb') return { each: 1, source: 'chaos' } // primary, has no exchange line
+    if (d.name === 'Chaos Orb') return { each: 1, source: 'chaos', uncertain: null } // primary, has no exchange line
     // Divine Orb is the second DISPLAY unit: the entire UI converts chaos into
     // divine with the C:D rate from the poe.ninja currency exchange (cdMsgFor,
     // the same source the price check and corpse pricer use). Through the
@@ -267,43 +281,43 @@ export const VALUATION_ROUTES = {
     // have been "1 Divine Orb = 1.2 div", a unit contradicting itself. Hence the
     // same source as the display rate, and nothing else.
     if (d.name === 'Divine Orb') {
-      const v = await api.fromExchangeMap(d.tradeTag, d.name)
-      if (v != null) return { each: v, source: 'exchange' }
+      const r = answer(await api.fromExchangeMap(d.tradeTag, d.name), 'exchange')
+      if (r) return r
     }
     return fungibleChain(api, d.name, d.tradeTag)
   },
   // Div-cards are fungibles too: Faustus first (GGG's Currency Exchange carries
   // DivinationCards), then the poe.ninja card exchange overview. A card absent
-  // from BOTH is honestly unpriced (null) — the old forced-0 vendor-trash rule
-  // is GONE (Task 4): it wrongly zeroed cards during a Faustus/exchange gap.
-  divcard: async (d, api) => {
-    const f = await api.fromFaustus(d.name)
-    if (f != null) return { each: f, source: 'faustus' }
-    return { each: await api.exchangeSingle('DivinationCard', d.name), source: 'exchange:DivinationCard' }
-  },
+  // from BOTH is honestly unpriced (null), never forced to 0 as vendor trash:
+  // that would zero cards during a Faustus/exchange gap.
+  divcard: async (d, api) =>
+    answer(await api.fromFaustus(d.name), 'faustus') ??
+    answer(await api.exchangeSingle('DivinationCard', d.name), 'exchange:DivinationCard') ??
+    UNPRICED,
   // Corpses (Task 5): priced on-demand via the official Trade API, cached in the
   // corpse store (poe.ninja doesn't carry corpse prices outside a corpse-focused
-  // league; the old empty "Coffin" exchange route is gone). NO live trade query
-  // here — that's slow + rate-limited; a background pricer fills the store.
+  // league, and the "Coffin" exchange route returned nothing). NO live trade
+  // query here — that's slow + rate-limited; a background pricer fills the
+  // store.
   //  - 'Imperfect ' corpses are worthless -> hard 0, never a query (documented
   //    exception to the null-never-0 rule).
   //  - else read the store's FRESH price; a hit wins. Missing/stale -> null
   //    (this snapshot honestly unpriced) — the background pricer refills it.
   corpse: async (d, api) => {
-    if (isImperfectCorpse(d.name)) return { each: 0, source: 'corpse:imperfect' }
-    const v = await api.fromCorpseStore(d.name)
-    return v != null ? { each: v, source: 'corpse:trade' } : { each: null, source: null }
+    // A stated value of 0, not a guess: never marked.
+    if (isImperfectCorpse(d.name)) return { each: 0, source: 'corpse:imperfect', uncertain: null }
+    return answer(await api.fromCorpseStore(d.name), 'corpse:trade') ?? UNPRICED
   },
-  gem: async (d, api) => ({ each: await api.fromGem(d), source: 'item:SkillGem' }),
-  beast: async (d, api) => ({ each: await api.fromItemOverview('Beast', d.name), source: 'item:Beast' }),
-  incubator: async (d, api) => ({ each: await api.fromItemOverview('Incubator', d.name), source: 'item:Incubator' }),
-  vial: async (d, api) => ({ each: await api.fromItemOverview('Vial', d.name), source: 'item:Vial' }),
-  invitation: async (d, api) => ({ each: await api.fromItemOverview('Invitation', d.name), source: 'item:Invitation' }),
+  gem: async (d, api) => answer(await api.fromGem(d), 'item:SkillGem') ?? UNPRICED,
+  beast: async (d, api) => answer(await api.fromItemOverview('Beast', d.name), 'item:Beast') ?? UNPRICED,
+  incubator: async (d, api) => answer(await api.fromItemOverview('Incubator', d.name), 'item:Incubator') ?? UNPRICED,
+  vial: async (d, api) => answer(await api.fromItemOverview('Vial', d.name), 'item:Vial') ?? UNPRICED,
+  invitation: async (d, api) => answer(await api.fromItemOverview('Invitation', d.name), 'item:Invitation') ?? UNPRICED,
   unique: async (d, api) => {
     // Unidentified: the descriptor name is our own label, not a poe.ninja name —
     // querying with it can only miss. Honestly unpriced (null), never 0.
-    if (d.unidentified) return { each: null, source: null }
+    if (d.unidentified) return UNPRICED
     const type = ninjaTypeFor({ category: d.category })
-    return type ? { each: await api.fromItemOverview(type, d.name, d.baseType, d.links, d.mods), source: `item:${type}` } : { each: null, source: null }
+    return type ? (answer(await api.fromItemOverview(type, d.name, d.baseType, d.links, d.mods), `item:${type}`) ?? UNPRICED) : UNPRICED
   }
 }

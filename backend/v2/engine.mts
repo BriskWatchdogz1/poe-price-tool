@@ -27,11 +27,11 @@ export { RATE_LIMIT_RULES } from '@/web/price-check/trade/common'
 
 // Re-export of APT's OWN routing decision (the desktop overlay uses this in
 // CheckedItem.vue to pick TradeListing.vue vs TradeBulk.vue): bulk only when
-// no stat filter is active AND the item has an exchange tradeTag. The server
-// used to approximate this with a much coarser `category === 'Currency'`
-// check, which also catches Corpses/Incubators (same clipboard `Rarity:
-// Currency` line, but no exchange tradeTag) -> sends them into bulkPriceItem,
-// which hard-returns {total:0} for them. Use THIS instead of re-deriving it.
+// no stat filter is active AND the item has an exchange tradeTag. A coarser
+// `category === 'Currency'` check is wrong: it also catches Corpses/Incubators
+// (same clipboard `Rarity: Currency` line, but no exchange tradeTag) and sends
+// them into bulkPriceItem, which hard-returns {total:0} for them. Use THIS
+// instead of re-deriving it.
 export { apiToSatisfySearch, tradeTag } from '@/web/price-check/trade/common'
 
 // --- fetch FS adapter: serves the relative data/ URLs from the filesystem ---
@@ -335,10 +335,10 @@ function sliceEvidence (slice: { total?: number, listed: unknown[] }): number {
  *   sides compete. Comparing medians already kills single outliers inside a
  *   slice, but a whole slice can BE the troll corner: two offers at 6x the real
  *   rate are not a better market, they're bait, and on price alone they would
- *   beat a twelve-offer side. This keeps the old "don't show the 9-listing
- *   troll corner" protection. Only when every side is thin do they all compete.
+ *   beat a twelve-offer side. This is the "don't show the 9-listing troll
+ *   corner" protection. Only when every side is thin do they all compete.
  * - No comparable chaos value on either side (divine-only without a cdRatio)
- *   -> fall back to the old behaviour: most listings wins.
+ *   -> most listings wins.
  * - EXTREME SPLIT: when the surviving sides are more than BULK_EXTREME_SPLIT
  *   apart, the better-ATTESTED side wins instead of the better-paying one (see
  *   below). Paying-more is still the rule everywhere else.

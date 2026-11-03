@@ -1,18 +1,12 @@
 #!/usr/bin/env node
 // Builds a LOCALIZED APT data set (items.ndjson + stats.ndjson) out of two
 // inputs: the English snapshot this container is actually using, and the game
-// data of the current patch straight from GGG's update servers.
-//
-// Why locally and not from an upstream: there is no upstream for German. APT
-// ships en/ru/ko, nothing else, so every installation makes its own. Nobody
-// has to maintain a release for a third party's container to stay current, no
-// game data gets redistributed, and the validation runs against exactly the
-// English set this container has — not against a presumed one.
-//
-// The target language is a PARAMETER. `de` is what the project needs, `ru` is
-// what proves the generator: upstream ships a Russian set built by APT itself,
-// so generating `ru` and diffing it character by character says whether the
-// derivation is right without anyone having to read the language.
+// data of the current patch straight from GGG's update servers. Locally,
+// because there is no upstream for German (APT ships en/ru/ko): no release to
+// maintain, no game data redistributed, and the validation runs against exactly
+// the English set this container has. The target language is a PARAMETER: `de`
+// is what the project needs, `ru` proves the generator — diffed character by
+// character against APT's own Russian set.
 //
 // Usage:
 //   node backend/v2/lang-data-gen.mjs --lang de
@@ -52,10 +46,10 @@
 // Three traps that strike silently, all three checked here rather than trusted:
 //   - a misspelled language name ("Deutsch" instead of "German") filters the
 //     language list empty and the export exits 0 with no output. So the output
-//     is checked for existence and plausibility, and NOT ONLY the exit code —
-//     which is read as well since 2026-08-18 (docs/bugs.md B24), because
-//     ignoring it made every other way the exporter can die arrive as advice
-//     about the language name. See classifyExportFailure().
+//     is checked for existence and plausibility, and the exit code is read as
+//     well (docs/bugs.md B24), so that every other way the
+//     exporter can die does not arrive as advice about the language name. See
+//     classifyExportFailure().
 //   - a missing language file makes the tool fall back to English without a
 //     word. Detectable only by target and English output being byte identical
 //     — which is exactly what gets compared.
@@ -78,6 +72,7 @@ import { TEXT_PAIRS_FILE } from './mod-text-pairs.mjs'
 import { buildIndexBins } from './apt-index.mjs'
 import { PATCH_RE, PATCH_EXAMPLE } from './patch-version.mjs'
 import { FAIL_KIND, failure } from './check-failure.mjs'
+import { AGENT_BASE } from './version.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const RENDERER_DATA = path.join(HERE, '../../renderer/public/data')
@@ -206,7 +201,8 @@ export const PATCH_CDN_HOST = 'patch.poecdn.com'
  * would be a form that accepts what the next start refuses.
  */
 export { PATCH_RE }
-const PATCH_UA = 'poe-price-tool/0.1 (language data generator, personal LAN tool)'
+// Tool name and version (version.mjs), then the purpose.
+const PATCH_UA = `${AGENT_BASE} (language data generator, personal LAN tool)`
 
 /** The value of `source` when the version comes from the pin, not the lookup. */
 export const PATCH_SOURCE_PIN = 'POE_PATCH_VERSION'
@@ -235,7 +231,7 @@ async function lookUpPatch (fetchImpl, url) {
   // portal, an error page, or a CDN base whose last segment is not a version.
   // Waiting does not help with any of the three, so they are `rejected` and the
   // status line says so; the remedy is POE_PATCH_VERSION (settable from the
-  // admin area) or a fix to PATCH_RE, see docs/admin.md.
+  // admin area) or a fix to PATCH_RE, see docs/runbooks.md.
   let parsed
   try { parsed = new URL(body) } catch { parsed = null }
   if (!parsed || parsed.host !== PATCH_CDN_HOST) {
@@ -326,14 +322,75 @@ export async function resolvePatchVersion ({
 // --------------------------------------------------------- build provenance
 
 /**
+ * The files the DERIVATION is made of: what this generator writes changes only
+ * when one of them changes (or the game data, which the patch version covers).
+ * Plus the two packages that export GGG's tables, by installed version.
+ */
+export const GENERATOR_INPUTS = ['lang-data-gen.mjs', 'lang-derive.mjs', 'lang-statdesc.mjs', 'lang-pseudo-matchers.json']
+export const GENERATOR_PACKAGES = ['pathofexile-dat', 'pathofexile-dat-schema']
+
+/**
+ * The version of the derivation, recorded in build-info.json and compared by
+ * the data refresher next to the patch and the English fingerprint. Without it
+ * a release that repaired the generator reached an installation only with the
+ * next game patch — the old set matched patch and skeleton and stayed live.
+ *
+ * It is a hash over GENERATOR_INPUTS (name and bytes) and the installed
+ * versions of GENERATOR_PACKAGES, computed at runtime from the files the image
+ * carries (the Dockerfile copies every one of them;
+ * lang-data-gen-version.test.mjs checks that). Nobody has to remember to raise
+ * a number. The price: ANY change to those files, a comment included, rebuilds
+ * every localized set once on its next apt check — minutes of CPU, and the game
+ * bundles stay cached per patch in the refresher's work dir.
+ *
+ * Returns 16 hex digits, or null when a file or package cannot be read. Null is
+ * "unknown": the refresher rebuilds once and records null, so an image that
+ * lacks a file does not rebuild on every tick.
+ *
+ * `dir` is where the input files sit (default: next to this module); the
+ * packages are looked up the way Node resolves them, in the node_modules of
+ * `dir` and of every directory above it.
+ */
+export async function generatorVersion ({ dir = HERE } = {}) {
+  try {
+    const h = createHash('sha256')
+    for (const f of GENERATOR_INPUTS) {
+      h.update(f + '\0')
+      h.update(await readFile(path.join(dir, f)))
+      h.update('\0')
+    }
+    for (const pkg of GENERATOR_PACKAGES) {
+      const version = await installedVersion(dir, pkg)
+      if (!version) return null
+      h.update(`${pkg}@${version}\0`)
+    }
+    return h.digest('hex').slice(0, 16)
+  } catch {
+    return null
+  }
+}
+
+/** The version in <dir or above>/node_modules/<pkg>/package.json, or null. */
+async function installedVersion (dir, pkg) {
+  for (let d = path.resolve(dir); ; d = path.dirname(d)) {
+    const file = path.join(d, 'node_modules', pkg, 'package.json')
+    if (existsSync(file)) {
+      const v = JSON.parse(await readFile(file, 'utf8')).version
+      return typeof v === 'string' && v ? v : null
+    }
+    if (path.dirname(d) === d) return null
+  }
+}
+
+/**
  * What a localized set says it was built FROM. Written next to the data, so it
  * travels with the tree when a snapshot carries it forward, and read back by
- * the data refresher: it compares this pair against the current state on every
- * tick and regenerates when they drift apart (a LEVEL, not an edge — a run that
- * failed leaves the difference standing, so the next tick tries again instead
- * of reporting "nothing to do").
+ * the data refresher: it compares patch, English fingerprint and generator
+ * version against the current state on every tick and regenerates when they
+ * drift apart (a LEVEL, not an edge — a run that failed leaves the difference
+ * standing, so the next tick tries again instead of reporting "nothing to do").
  *
- *   { lang, patch, enFingerprint, builtAt }
+ *   { lang, patch, enFingerprint, generator, builtAt, run }
  */
 export const BUILD_INFO_FILE = 'build-info.json'
 
@@ -454,10 +511,9 @@ function markMatch (stderr, re) {
  * cause). So the sentences here say what was seen, `kind` decides what to do,
  * and `unknown` says nothing at all.
  *
- * `status === 0` is NOT taken as success on its own — that trap is older than
- * this function (a language filter that matches nothing exits 0 with no output)
- * and is still caught by the file checks in loadGameData(). What is new is that a
- * NON-zero exit is no longer ignored.
+ * `status === 0` is NOT taken as success on its own (a language filter that
+ * matches nothing exits 0 with no output; the file checks in loadGameData()
+ * catch that), and a NON-zero exit is never ignored.
  *
  * `patchSource` is what resolvePatchVersion() said about where the version came
  * from. It only matters in the CDN branch, and it matters there completely; see
@@ -587,11 +643,10 @@ export async function exportGameData ({ workDir, languageName, patch, patchSourc
 /**
  * Reads the exported tables and description files back in.
  *
- * THE MESSAGE NAMES WHAT IS ACTUALLY MISSING. It used to say "a misspelled
- * language name filters the list empty" for every shape of incomplete export,
- * which is one possible cause stated as the finding (docs/bugs.md B24). The
- * export writes one directory per translation, so the two sides can simply be
- * told apart:
+ * THE MESSAGE NAMES WHAT IS ACTUALLY MISSING, not one possible cause ("a
+ * misspelled language name filters the list empty") for every shape of
+ * incomplete export (docs/bugs.md B24). The export writes one directory per
+ * translation, so the two sides can simply be told apart:
  *
  *   neither side there   the export wrote no tables at all — that is not about
  *                        the language, and the reason says so.
@@ -774,9 +829,9 @@ export async function generate (opts = {}) {
   }
   if (stats.report.misses.length) {
     // Split by whether the stat is NEW to this run, because that is the one
-    // question the operator asks next and the log used to make him answer by
-    // hand (docs/bugs.md B23). Matchers on refs the previous set already had are
-    // texts the derivation used to manage and does not any more — a defect here.
+    // question the operator asks next (docs/bugs.md B23). Matchers on refs the
+    // previous set already had are texts the previous derivation managed and
+    // this one does not — a defect here.
     // Matchers on refs that only just arrived with an English update are texts
     // the game data may simply not contain yet, which is upstream's schedule and
     // not a defect. Same list, sorted by which of the two it is.
@@ -852,6 +907,7 @@ export async function generate (opts = {}) {
     lang,
     patch: patch ?? null,
     enFingerprint: buildFingerprint(enItemsText, enStatsText),
+    generator: await generatorVersion(),
     builtAt: new Date().toISOString(),
     // What this run measured, so the admin area can answer "is this still being
     // maintained, and how complete is it" without a log (buildRunSummary above).

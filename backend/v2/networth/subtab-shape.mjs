@@ -3,87 +3,38 @@
 // tab per process, and NOTHING ELSE — this module makes no request, takes no
 // decision, changes no behaviour and returns nothing.
 //
-// ---------------------------------------------------------------------------
-// WHY IT IS ONLY AN OBSERVATION, AND WHY THAT IS THE WHOLE FEATURE
-// ---------------------------------------------------------------------------
-// There was a rule here once (`subtab-skip.mjs`, 2026-08-13, reverted the same
-// day): the map stash costs 1+N requests and N was ~37, so the per-tier
-// sub-tabs — which hold only normal maps, which are never priced — were passed
-// over. A child was identified as a tier folder by its NAME matching a pattern
-// (`Tier: 16`, `T16`, `XVI`, `16`).
-//
-// The names are not section names. This very log line, shipped alongside that
-// rule, answered the question one lap later: the map stash's children are
-// called `"1"` and `"2"` — PAGE NUMBERS — and all 39 of them carry the same
-// `type=MapStash`. The pattern's "a name that is nothing but a number" branch
-// therefore matched every child, the whole map stash was skipped, `Unique Maps`
-// and `Special Maps` with it, and the net worth lost the value that sits in
-// them. See docs/bugs.md, B19.
-//
-// So the rule went, and this line stayed — the measurement that should have come
-// FIRST. It is still the only thing this module does, and it still decides
-// nothing.
-//
-// ---------------------------------------------------------------------------
-// IT ANSWERED ITS QUESTION ON 2026-08-19
-// ---------------------------------------------------------------------------
-// The open question was whether the response says which SECTION a child belongs
-// to (`Unique Maps` / `Special Maps` / a tier page). `name` does not, and `type`
-// does not — both were measured. `metadata` does:
-//
+// WHY ONLY AN OBSERVATION. A name rule (`subtab-skip.mjs`, 2026-08-13, reverted
+// the same day) skipped the per-tier map sub-tabs (N was ~37) by NAME pattern
+// (`Tier: 16`, `T16`, `XVI`, `16`). This line showed the children are called
+// `"1"` and `"2"` — PAGE NUMBERS — and all 39 carry `type=MapStash`, so the
+// rule skipped the whole map stash, `Unique Maps` and `Special Maps` with it
+// (docs/bugs.md B19). On 2026-08-19 it answered where the SECTION is: not in
+// `name`, not in `type` (both measured), but in `metadata`:
 //   "1" type=MapStash metadata={"items":70,"map":{"section":"tier16", …}}
 //   "1" type=MapStash metadata={"items":16,"map":{"section":"unique",  …}}
+// The skip reads that field — anything that does not explicitly say
+// `tier<N>` is read — in networth/map-sections.mjs. This line is kept exactly
+// as it is: it answers the NEXT such question, and must go on reporting what
+// GGG sends rather than what anything downstream reads.
 //
-// The skip was rebuilt on that field, in the other direction — read anything
-// that does not explicitly say `tier<N>` — and lives in networth/map-sections.mjs
-// with the reasoning for why it is allowed to decide where the name rule was
-// not. The line below is what made that possible and is therefore kept exactly
-// as it is: it is how the NEXT such question gets answered, and it must go on
-// reporting what GGG sends rather than what anything downstream now reads.
+// WHAT IT SHOWS, all free (the parent response is in hand, no extra request):
+// the union of the child entry FIELD NAMES; each child's `name` and `type`;
+// each child's `metadata` AS JSON; every OTHER child field that is not an
+// opaque id, by value (so a `folder`, `page`, `index` or sort field shows up by
+// itself); the parent's own fields and its `metadata`. "The parent" is the
+// parent object of the `/api/stash/<league>/<tabId>` response, NOT the legacy
+// tab list's entry (trimmed to {index,name,type,id} by stash-client.mjs
+// `listTabs` and refresher.mjs; its fields show in the `tab entry fields:` line
+// under POE_NETWORTH_DEBUG). `id` and `parent` are printed by NAME ONLY: opaque
+// addressing tokens, a handle on somebody's stash.
 //
-// ---------------------------------------------------------------------------
-// WHAT THE LINE HAS TO SHOW TO BE WORTH ANYTHING
-// ---------------------------------------------------------------------------
-// Everything the response already carries is reported here, because all of it is
-// free (the parent response is in hand; not one extra request is made for any of
-// it):
-//
-//   - the union of the child entry FIELD NAMES — so a field nobody thought of
-//     cannot hide,
-//   - each child's `name` and `type`,
-//   - each child's `metadata`, AS JSON — the field whose CONTENT was never
-//     logged, and the likeliest place for a section marker,
-//   - every OTHER field of a child that is not an opaque id, printed by value —
-//     so a `folder`, `page`, `index` or sort field shows up by itself, without
-//     this file having to guess its name in advance,
-//   - the parent's own fields and its `metadata`, in case the structure is
-//     explained one level up rather than per child.
-//
-// WHAT "THE PARENT" MEANS HERE is the parent object of the `/api/stash/<league>/
-// <tabId>` response — the one the children came out of. It is NOT the legacy tab
-// list's entry for the same tab: that one is trimmed to {index,name,type,id}
-// before it ever reaches this file (stash-client.mjs `listTabs`, refresher.mjs),
-// and whether it carries anything else is already answerable from the
-// `tab entry fields:` line under POE_NETWORTH_DEBUG. Nothing here makes a
-// request to find out, which is the rule this module is held to.
-//
-// `id` and `parent` are the two fields deliberately printed by NAME ONLY. They
-// are opaque addressing tokens, they say nothing about a section, and they are
-// the one part of the response that is a handle on somebody's stash.
-//
-// THIS IS FOREIGN DATA, so it is treated as foreign data. Every value is passed
-// through the project's own credential filter (`secret-keys.mjs`, the same
-// expression that guards `/config-view`): a key that could name a credential is
-// printed as `[redacted]`, never by value. Control characters are stripped so
-// nothing can forge a log line, and every part is length-capped so one absurd
-// response cannot push the rest of the log off the screen.
-//
-// FREQUENCY: once per folder tab per process, never per walk. The refresher runs
-// round the clock and reaches the map stash every lap; a line per walk would be
-// a line every couple of hours forever, for an answer that does not change. The
-// set is module-level for the same reason the rule-set log in stash-client.mjs
-// is: the server builds a fresh client every tick, so per-instance memory would
-// mean per-tick logging.
+// THIS IS FOREIGN DATA: every value passes the project's credential filter
+// (`secret-keys.mjs`, the expression that guards `/config-view`), so a key that
+// could name a credential prints as `[redacted]`; control characters are
+// stripped so nothing can forge a log line; every part is length-capped.
+// FREQUENCY: once per folder tab per process, never per walk (the refresher
+// reaches the map stash every lap). The set is module-level like the rule-set
+// log in stash-client.mjs: the server builds a fresh client every tick.
 
 import { SECRET_KEY_RE } from '../secret-keys.mjs'
 

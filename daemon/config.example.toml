@@ -29,14 +29,179 @@ user = "player1"
 item_prefixes = ["Item Class: "]
 
 # Window class used to detect PoE (substring, case-insensitive) — used for
-# the CHAT MACROS focus gate below (price check itself is clipboard-driven
-# and needs no focus check). Find it (in the PoE window):
+# the chat macros' focus gate ([macros]), the overlay's focus check
+# ([results]) and game detection ([presence]); the price check itself is
+# clipboard-driven and needs no focus check. Find it (in the PoE window):
 #   xdotool getwindowfocus getwindowclassname
 poe_window_class = "steam_app_238960"
 
 # ydotool socket. Leave empty -> $XDG_RUNTIME_DIR/.ydotool_socket. Only used
 # by the chat macros below (ydotool key injection); price check needs no ydotool.
 # ydotool_socket = ""
+
+# How often the same failure is repeated in the daemon's journal
+# (journalctl --user -u poe-price-daemon). The first one is always logged at
+# once; identical ones after it at most once per error_repeat_s seconds, with
+# the repeat's number and a count of how many were not logged. After
+# error_repeat_slow_after such repeats, at most once per error_repeat_slow_s
+# seconds, so a failure that never stops does not fill the journal. Defaults
+# 60, 10 and 600. All three are finite numbers above 0 (TOML's nan and inf are
+# refused), error_repeat_slow_s must not be shorter than error_repeat_s, and
+# error_repeat_slow_after is a whole number; otherwise the daemon does not
+# start and names the key.
+# error_repeat_s = 60
+# error_repeat_slow_after = 10
+# error_repeat_slow_s = 600
+
+# --- In-game results (optional) ---
+# Both sections may be left out: the defaults below then apply.
+[link]
+# The way back from the backend to this machine: price results for the
+# notification and the overlay. A request is held by the backend for at most hold_s seconds
+# (the server caps it, by default at 30 s) and then asked again; a reverse
+# proxy needs a read timeout above 30 s (nginx: 60 s by default). Off: results
+# stay in the browser.
+back_channel = true
+hold_s = 25                     # at most 50
+min_gap_s = 2                   # least pause after an empty answer that came back early
+
+[results]
+# After the hotkey the price also shows on THIS PC. Only items your own
+# daemon sent are shown; a search you start in the browser does not pop up.
+# notification: a desktop notification via notify-send (libnotify). It
+# appears at once ("queued") and is replaced by the price. On KDE Plasma it is
+# held back while a fullscreen game has focus, unless you switch that off
+# (./daemon/selftest.sh says how).
+notify = true
+notify_timeout_ms = 8000        # how long the notification stays
+# overlay: a small click-through card next to the mouse, over the game. It
+# lets every click through and never takes focus. Needs PySide6, an X11
+# display (the game runs on XWayland) and xdotool and xprop, which tell whether
+# the game has focus. "auto": on when PySide6 is there, "on": a missing PySide6
+# is an error in the journal, "off": never started. Whenever the overlay cannot
+# show a card, the notification shows it. ./daemon/selftest.sh --overlay shows
+# a test card.
+overlay = "auto"
+overlay_only_in_game = true     # true: the overlay only while the game has focus, else the notification; false: always the overlay
+item_hold_s = 8                 # how long a finished price stays at the mouse
+pending_hold_s = 60             # how long a card without a result stays
+hide_distance_px = 220          # moving the mouse this far away hides the card
+offset_px = 24                  # the card's distance from the mouse pointer
+font_pt = 13
+opacity = 0.88                  # of the card's background, at most 1
+max_width_px = 420
+result_wait_s = 120             # without a final result after this long, the card says so
+lang = ""                       # number format on the card: "en" (1,484 c) | "de" (1.484 c); empty: the language the server reads your items in
+
+# --- Buyer whispers (optional) ---
+[whispers]
+# The daemon reads the game's log and, for each trade whisper a buyer sends
+# you, shows YOUR listed price against the market, with the stash tab and
+# position (overlay, notification, browser). It never invites, answers or
+# clicks. Only whispers that start like a trade-site template leave this PC;
+# the buyer's name stays on this PC, in memory only, and is shown on the
+# overlay card only. Empty path = off (the section may be left out too).
+# Steam (also Proton): <library>/steamapps/common/Path of Exile/logs/Client.txt
+# A second Steam library or a Wine/Lutris prefix has its own path
+# (…/drive_c/Program Files (x86)/Grinding Gear Games/Path of Exile/logs/Client.txt);
+# ./daemon/selftest.sh lists the ones it finds under Steam, ~/Games and ~/.wine.
+client_log = ""
+# How the game marks an INCOMING whisper, per client language. English: "@From".
+# German "@Von", French, Spanish and Portuguese "@De", Russian "@От кого" are
+# from SlimTrade's patterns, not seen in a real log. SlimTrade has them in lower
+# case and compares without regard to case; the daemon compares exactly, so the
+# capital first letter here is assumed, after the English "@From". The
+# self-test says if your client writes another one. Never the marker of the
+# whispers you send ("@To", "@An", ...): your own whispers would be checked as
+# a buyer's.
+incoming_markers = ["@From", "@Von", "@De", "@От кого"]
+# How a trade whisper starts, in the buyer's trade-site language (English,
+# German, French, Russian, Spanish, Portuguese; all but English from
+# SlimTrade's patterns, not seen in a real log). Anything else stays on this PC.
+trade_prefixes = ["Hi, I would like to buy your", "Hi, I'd like to buy your", "Hi, ich möchte '",
+                  "Bonjour, je souhaiterais t'acheter", "Bonjour, je voudrais t'acheter",
+                  "Здравствуйте, хочу купить у вас", "Hola, quisiera comprar tu", "Hola, me gustaría comprar tu(s)",
+                  "Olá, eu gostaria de comprar"]
+# Words that make a whisper LOOK like a trade offer. Used only to count the
+# ones that do not start like a template (one journal line an hour); such a
+# whisper is never sent.
+trade_hints = ["buy your", "kaufen", "acheter", "купить", "comprar"]
+toast_shows_name = false        # the notification shows "buyer 3"; the overlay shows the name
+whisper_anchor = [0.02, 0.35]   # where whisper cards stack, as fractions of the screen (left, top)
+whisper_hold_s = 20             # how long a whisper card stays on the overlay
+max_whispers = 3                # whisper cards on the overlay at once; the oldest goes first
+keep = 50                       # whispers kept in memory for late results
+poll_s = 0.5                    # how often the log is read, in seconds
+# Stash cell frame (not the net-worth page's Stash Highlight): a key that
+# frames, on the overlay, the stash cell of the newest whisper with a stash
+# position, for whisper_hold_s; each further press within that time goes one
+# whisper older, after the oldest back to the newest.
+# Only while the game has focus (like the chat macros), only on the overlay,
+# and only where [stash_grid] below puts the grid. The key is read like the
+# macro keys (evdev: your user must be in the 'input' group). Empty = off.
+# A key name as evdev spells it without KEY_, e.g. "F10", "KP1", "DOT"; not one
+# of [macros.keys]. Not tried with a running game yet (README, Known issues).
+highlight_key = ""
+
+[stash_grid]
+# Where the stash grid lies on the screen, for the stash cell frame above.
+# "auto": from the game window's size (xdotool), as SlimTrade computes it: on a
+# 1920x1080 window the grid is 634x634 px at x 15, y 125, scaled with the
+# window. "manual": you give the grid's top-left corner and size in screen
+# pixels (x, y, w, h below), e.g. when auto misses it. "off": no frame.
+# Cells are 12x12, in a quad tab 24x24 (the server knows a quad tab from the
+# net-worth sync; a left or top above 12 means quad as well).
+# ./daemon/selftest.sh --overlay shows a frame at cell 1,1 to check it.
+mode = "auto"                   # "auto" | "manual" | "off"
+# Stash tab folders move the grid down: "none" (you use no folders),
+# "outside" (you use folders, the tabs you sell from are not in one; y 133 at
+# 1920x1080), "inside" (the tabs you sell from are inside a folder; y 167).
+folders = "none"
+# x = 15                        # manual only: the grid's left edge, top edge, width and height in screen pixels
+# y = 125
+# w = 634
+# h = 634
+
+[presence]
+# Tells the server whether the game is running on this machine (it looks for
+# a window of poe_window_class, nothing else), so the net-worth sync reads the
+# stash of players who are playing first and slows down when nobody plays. It
+# never makes the sync faster than it is without it. When the daemon cannot
+# tell, it says so and the server keeps the normal pace for you.
+# Needs xdotool. The daemon says 'not running' only after it has found the
+# game's window once on this display (so a wrong poe_window_class or a game
+# under gamescope never slows you down); ./daemon/selftest.sh shows whether
+# the window is found while the game runs.
+# Off: the server treats this player like one without such a daemon (plain
+# round-robin; the daemon still reports its
+# version and which of its parts work).
+report_game = true
+heartbeat_s = 60          # while the game runs or the daemon cannot tell (10 to 600)
+idle_heartbeat_s = 300    # while it is not running (10 to 600, not below heartbeat_s)
+game_check_s = 10         # how often the window is looked for (1 to 600)
+
+[session]
+# Farm and game sessions: what your stash gained between a start and an end
+# (the History page). The server starts a game session when the game detection
+# above reports the game running, and ends it once the game has not run for
+# 10 minutes (the server's POE_SESSION_GAME_GAP_MS), unless the server switches
+# game sessions off (POE_SESSION_AUTO_GAME=0). A farm session is yours to
+# start and end, inside the game evening: start it when you begin to farm
+# (maps bought, say), end it when you stop. A session counts the stash only,
+# so put your loot in the stash before you end it.
+# key: a press while the game has focus starts a farm session, or ends the
+# running one, like the History page's buttons. It is read like the macro keys
+# (evdev: your user must be in the 'input' group). A key name as evdev spells
+# it without KEY_, e.g. "F11", "KP1", "DOT"; not one of [macros.keys] and not
+# [whispers] highlight_key. Empty = off. Not tried with a running game yet
+# (README, Known issues).
+key = ""
+# cards: what the server says about your sessions, as cards where whisper
+# cards stack (whisper_anchor) or as notifications: a farm session started,
+# its baseline set (the first full read of your stash after the start), ended,
+# its balance; a game session started, ended, its balance. They come through
+# the back channel ([link]). false: only the answer to your own press is shown.
+cards = true
 
 [macros]
 keyboard_layout = "us"     # "us" | "de" — so chat commands type correctly

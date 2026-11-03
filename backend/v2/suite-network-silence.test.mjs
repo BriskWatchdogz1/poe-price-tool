@@ -114,6 +114,58 @@ test('the runner preloads the guard into every process it starts', async () => {
     'a blocked outbound request has to turn the run red, or the measurement is a log line')
 })
 
+/** Lines in the fenced code blocks of `md` that start Node's test runner without the guard. */
+function unguardedTestCommands (md) {
+  const out = []
+  for (const block of md.matchAll(/^```[^\n]*\n([\s\S]*?)^```/gm)) {
+    for (const line of block[1].split('\n')) {
+      if (/\bnode\b.*\s--test\b/.test(line) && !/--import=\S*test-net-guard\.mjs/.test(line)) out.push(line.trim())
+    }
+  }
+  return out
+}
+
+test('CONTRIBUTING never hands out a test command that skips the guard', async () => {
+  // The guard only reaches processes the runner starts. CONTRIBUTING used to
+  // recommend `node --test <path>` for a single file, and that runs the file
+  // unguarded: a test missing a mock then sends its request for real. So every
+  // `node ... --test` it shows has to preload the guard itself; the runner with
+  // a filter (`npm test -- <part of the path>`) is the plain way.
+  const md = await readFile(path.join(HERE, '..', '..', 'CONTRIBUTING.md'), 'utf8')
+  assert.deepEqual(unguardedTestCommands(md), [],
+    'CONTRIBUTING shows a node --test command without --import=./backend/v2/test-net-guard.mjs')
+  // Negative control: the check has to see the form it exists for.
+  assert.deepEqual(
+    unguardedTestCommands('```bash\nnpm test\nnode --test backend/v2/ninja.test.mjs\n' +
+      'node --import=./backend/v2/test-net-guard.mjs --test backend/v2/ninja.test.mjs\n```\n'),
+    ['node --test backend/v2/ninja.test.mjs'])
+})
+
+/** package.json scripts that start Node's test runner without the guard. */
+function unguardedScripts (scripts) {
+  return Object.entries(scripts || {})
+    .filter(([, cmd]) => /\bnode\b.*\s--test\b/.test(cmd) && !/--import=\S*test-net-guard\.mjs/.test(cmd))
+    .map(([name]) => name)
+}
+
+test('no package.json script starts the test runner without the guard', async () => {
+  // `test:fast` was `node --test backend/v2`: one process, no runner, so no
+  // guard either, and on Node 24 it did not even start (a directory is not
+  // expanded, ERR_UNSUPPORTED_DIR_IMPORT). It is gone; `npm test -- <filter>`
+  // runs part of the suite through the runner. A script that comes back in
+  // that shape has to preload the guard itself.
+  const manifest = JSON.parse(await readFile(path.join(HERE, '..', '..', 'package.json'), 'utf8'))
+  assert.match(manifest.scripts.test, /run-tests\.mjs/, 'npm test has to go through the runner, which preloads the guard')
+  assert.deepEqual(unguardedScripts(manifest.scripts), [],
+    'a package.json script starts node --test without --import=./backend/v2/test-net-guard.mjs')
+  // Negative control: the check has to see the form it exists for.
+  assert.deepEqual(unguardedScripts({
+    test: 'node backend/v2/run-tests.mjs',
+    'test:fast': 'node --test backend/v2',
+    'test:guarded': 'node --import=./backend/v2/test-net-guard.mjs --test backend/v2/ninja.test.mjs'
+  }), ['test:fast'])
+})
+
 test('the guard lets loopback through and refuses everything else', async () => {
   // Read rather than imported: importing it would install it in THIS process,
   // and a guard that rewrote fetch for the file testing it would be testing

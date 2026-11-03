@@ -4,9 +4,10 @@
 // Currency Exchange's metadata ids into the names the valuator prices by; every
 // id missing from it is an item the exchange prices and we cannot name.
 //
-// CLI, NOT imported by the server at runtime — but the data refresher
-// (backend/v2/data-refresher.mjs) imports buildBaseNames and URLS so its
-// conditional requests run against exactly these sources.
+// A CLI and a module. The server loads it at runtime through the data
+// refresher (backend/v2/data-refresher.mjs), which imports buildBaseNames and
+// URLS so its conditional requests run against exactly these sources; on
+// import nothing runs (the CLI part is guarded at the end of the file).
 //
 // Usage: node backend/v2/base-names-gen.mjs
 // No arguments — the run always rewrites base-names.json and then reports
@@ -15,6 +16,7 @@
 import { writeFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
+import { AGENT_BASE } from './version.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const BASE_NAMES_OUT_PATH = path.join(HERE, 'networth/base-names.json')
@@ -53,8 +55,12 @@ const BASE_NAMES_DROP_PREFIXES = [
   'NecropolisPacks',
 ]
 
-async function fetchJson (url, headers) {
-  const res = await fetch(url, headers ? { headers } : undefined)
+// Every download names the tool: name and version (version.mjs), then the
+// purpose. fetchImpl is injectable so the tests never touch the network.
+const UA = `${AGENT_BASE} (base-names generator, personal LAN tool)`
+
+async function fetchJson (fetchImpl, url) {
+  const res = await fetchImpl(url, { headers: { 'User-Agent': UA, Accept: 'application/json' } })
   if (!res.ok) throw new Error(`Fetch failed (${res.status} ${res.statusText}): ${url}`)
   return res.json()
 }
@@ -73,15 +79,15 @@ function baseNamesTopSegment (metadataId) {
  * prefixes dropped (see BASE_NAMES_DROP_PREFIXES). Sorted by key.
  * Returns a plain object { "<metadataId>": "<name>" }.
  */
-export async function generateBaseNames () {
+export async function generateBaseNames ({ fetchImpl = fetch } = {}) {
   console.log(`Fetching base_items.json (${URLS.baseItems})...`)
   let baseItems
   try {
-    baseItems = await fetchJson(URLS.baseItems)
+    baseItems = await fetchJson(fetchImpl, URLS.baseItems)
   } catch (err) {
     console.warn('WARNING: %s', err.message)
     console.warn('WARNING: falling back to the STALE RePoE mirror — expect Faustus coverage gaps.')
-    baseItems = await fetchJson(URLS.baseItemsFallback)
+    baseItems = await fetchJson(fetchImpl, URLS.baseItemsFallback)
   }
   return buildBaseNames(baseItems)
 }
@@ -116,14 +122,14 @@ export function buildBaseNames (baseItems) {
  * run it on every regeneration instead of waiting for a wrong price in-game.
  * Returns { total, missing: [ids] }.
  */
-export async function checkFaustusCoverage (names, { hours = 8, now = Date.now() } = {}) {
+export async function checkFaustusCoverage (names, { hours = 8, now = Date.now(), fetchImpl = fetch } = {}) {
   const ids = new Set()
   let id = Math.floor(now / 1000 / 3600) * 3600 - 3600
   for (let collected = 0, guard = 0; collected < hours && guard < hours + 24; guard++) {
     let digest = null
     try {
-      const r = await fetch(`https://web.poecdn.com/api/currency-exchange/${id}`, {
-        headers: { 'User-Agent': 'poe-price-tool/0.1', Accept: 'application/json' }
+      const r = await fetchImpl(`https://web.poecdn.com/api/currency-exchange/${id}`, {
+        headers: { 'User-Agent': UA, Accept: 'application/json' }
       })
       if (r.ok) digest = await r.json()
     } catch { /* treat as not-ready -> step back an hour */ }

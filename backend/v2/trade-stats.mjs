@@ -16,8 +16,11 @@
 // failure so a hiccup can't turn into a fetch loop. Every failure degrades
 // silently to "unresolved" (the mod stays visible as not-searchable).
 
+import { AGENT_BASE } from './version.mjs'
+
 const TRADE_STATS_URL = 'https://www.pathofexile.com/api/trade/data/stats'
-const UA = 'poe-price-tool/0.1 (personal LAN tool)'
+// Tool name and version (version.mjs), then the purpose.
+const UA = `${AGENT_BASE} (personal LAN tool)`
 const DEFAULT_TTL_MS = 24 * 60 * 60 * 1000
 const FAIL_COOLDOWN_MS = 10 * 60 * 1000
 

@@ -74,9 +74,11 @@ test('items[]: every priced item, grouped per tab, descending by chaosTotal', ()
   assert.equal(s.items.length, 3)
   // `source` rides along on every row — once the valuation is over it is the
   // only surviving record of which feed produced the price (price-guard.mjs).
-  assert.deepEqual(s.items[0], { name: 'Headhunter', kind: 'unique', tab: 'C', tabIndex: 1, qty: 1, chaosEach: 900, chaosTotal: 900, source: 'test' })
-  assert.deepEqual(s.items[1], { name: 'Divine Orb', kind: 'stackable', tab: 'A', tabIndex: 0, qty: 3, chaosEach: 200, chaosTotal: 600, source: 'test' })
-  assert.deepEqual(s.items[2], { name: 'Divine Orb', kind: 'stackable', tab: 'B', tabIndex: 3, qty: 1, chaosEach: 200, chaosTotal: 200, source: 'test' })
+  // So does `uncertain` (docs/pricing-logic.md, "Uncertain prices"): null
+  // here, because no entry named a doubt.
+  assert.deepEqual(s.items[0], { name: 'Headhunter', kind: 'unique', tab: 'C', tabIndex: 1, qty: 1, chaosEach: 900, chaosTotal: 900, source: 'test', uncertain: null })
+  assert.deepEqual(s.items[1], { name: 'Divine Orb', kind: 'stackable', tab: 'A', tabIndex: 0, qty: 3, chaosEach: 200, chaosTotal: 600, source: 'test', uncertain: null })
+  assert.deepEqual(s.items[2], { name: 'Divine Orb', kind: 'stackable', tab: 'B', tabIndex: 3, qty: 1, chaosEach: 200, chaosTotal: 200, source: 'test', uncertain: null })
 })
 
 test('items[]: uncapped (far beyond the 100-entry topItems limit)', () => {
@@ -506,4 +508,64 @@ test('unpricedStock(): nothing, junk and a missing list are an empty answer, nev
   // number counts as nothing, exactly as foldItems reads it.
   assert.deepEqual(unpricedStock([{ index: 0, unpriced: [{ name: '', count: 3 }, { count: 2 }, { name: 'X', count: 'n/a' }] }]),
     [{ name: 'X', count: 0 }])
+})
+
+// ---------------------------------------------------------------------------
+// The uncertainty marker (docs/pricing-logic.md, "Uncertain prices"): the
+// doubt of the valued entry rides on its row exactly like `source`, and it
+// never moves a number (sum option (b): counted, and marked).
+// ---------------------------------------------------------------------------
+const doubted = (kind, tabIndex, tabName, chaosTotal, uncertain, extra = {}) => {
+  const e = entry(kind, tabIndex, tabName, chaosTotal, extra)
+  e.value.uncertain = uncertain
+  return e
+}
+
+test('items[] carries the doubt of the valued entry, null when there is none', () => {
+  const s = aggregate({
+    entries: [
+      doubted('gem', 0, 'A', 300, 'gem-guessed', { name: 'Enlighten Support' }),
+      entry('stackable', 0, 'A', 600, { name: 'Divine Orb' })
+    ],
+    cdRatio: 200, league: 'L', accountName: 'a', now: NOW
+  })
+  assert.deepEqual(s.items.map(i => [i.name, i.uncertain]), [['Divine Orb', null], ['Enlighten Support', 'gem-guessed']])
+  assert.equal(s.totalChaos, 900, 'the uncertain row counts in the total')
+  assert.deepEqual(s.categories.gem, { chaos: 300, items: 1 })
+})
+
+test('a row folded from a doubted and an undoubted entry is uncertain, in either order', () => {
+  for (const order of [0, 1]) {
+    const pair = [
+      entry('unique', 0, 'A', 5, { name: 'Voices', chaosEach: 5 }),
+      doubted('unique', 0, 'A', 5, 'variant-guessed', { name: 'Voices', chaosEach: 5 })
+    ]
+    if (order) pair.reverse()
+    const s = aggregate({ entries: pair, cdRatio: 200, league: 'L', accountName: 'a', now: NOW })
+    assert.equal(s.items.length, 1)
+    assert.equal(s.items[0].qty, 2)
+    assert.equal(s.items[0].uncertain, 'variant-guessed', `order ${order}`)
+  }
+})
+
+test('uncertain survives the round trip through the per-tab store and never changes a total', () => {
+  const s = aggregate({
+    tabs: [{
+      index: 0,
+      name: 'Cards',
+      items: [
+        { name: 'Imperial Legacy', kind: 'divcard', tab: 'Cards', tabIndex: 0, qty: 14, chaosEach: 4.6, chaosTotal: 64.4, source: 'faustus', uncertain: 'thin-market' },
+        { name: 'Divine Orb', kind: 'stackable', tab: 'Cards', tabIndex: 0, qty: 3, chaosEach: 200, chaosTotal: 600, source: 'exchange', uncertain: null },
+        // A row stored before the field existed.
+        { name: 'Ancient Orb', kind: 'stackable', tab: 'Cards', tabIndex: 0, qty: 1, chaosEach: 30, chaosTotal: 30, source: 'exchange' }
+      ],
+      unpriced: [],
+      counts: { priced: 3, unpriced: 0, unpricedPieces: 0, skipped: 0 }
+    }],
+    cdRatio: 200, league: 'L', accountName: 'a', now: NOW
+  })
+  const by = Object.fromEntries(s.items.map(i => [i.name, i.uncertain]))
+  assert.deepEqual(by, { 'Imperial Legacy': 'thin-market', 'Divine Orb': null, 'Ancient Orb': null })
+  assert.equal(s.totalChaos, 694.4, 'the uncertain row counts in the headline exactly as before')
+  assert.equal(s.tabs[0].chaos, 694.4)
 })

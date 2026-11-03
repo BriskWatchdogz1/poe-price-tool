@@ -6,7 +6,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   createPriceGuard, guardOptionsFromEnv, GUARD_FACTOR, GUARD_SHARE, GUARD_MAX_HOLD_MS,
-  GUARD_ARRIVAL_MIN_DIVINE, findSpikeRanges, stockMove
+  GUARD_ARRIVAL_MIN_DIVINE, GUARD_STATE_MAX_NAMES, findSpikeRanges, stockMove
 } from './price-guard.mjs'
 
 const SILENT = () => {}
@@ -206,10 +206,10 @@ test('the hold measures STANDING, not the wall clock', () => {
 })
 
 // --- a point that says nothing ends nothing ---------------------------------
-// GONE and HERE-BUT-UNPRICED used to be the same observation to the hold sweep,
-// and they are not: absence says the item did not stand, a missing price says
-// only that the valuation had nothing for that name this minute. Treating the
-// second as the first restarted the six hours at every flicker of a price feed.
+// GONE and HERE-BUT-UNPRICED are not the same observation to the hold sweep:
+// absence says the item did not stand, a missing price says only that the
+// valuation had nothing for that name this minute. Treating the second as the
+// first restarted the six hours at every flicker of a price feed.
 
 test('a point in which the item carries no price of its own does not end the hold', () => {
   let t = 1_000_000
@@ -295,9 +295,10 @@ test('every bar can be set to 0, and 0 is not the default', () => {
     POE_NETWORTH_GUARD_FACTOR: '0',
     POE_NETWORTH_GUARD_SHARE: '0',
     POE_NETWORTH_GUARD_HOLD_MS: '0',
-    POE_NETWORTH_GUARD_ARRIVAL_MIN_DIVINE: '0'
+    POE_NETWORTH_GUARD_ARRIVAL_MIN_DIVINE: '0',
+    POE_NETWORTH_GUARD_STATE_MAX_NAMES: '0'
   })
-  assert.deepEqual(o, { factor: 0, share: 0, maxHoldMs: 0, arrivalMinDivine: 0 })
+  assert.deepEqual(o, { factor: 0, share: 0, maxHoldMs: 0, arrivalMinDivine: 0, stateMaxNames: 0 })
 })
 
 test('0 divine really does switch the arrival bar off', () => {
@@ -360,7 +361,8 @@ test('a hold window of 0 is not "no hold": the brake then never lets go', () => 
 test('unset, empty and unusable values fall back to the documented defaults', () => {
   const defaults = {
     factor: GUARD_FACTOR, share: GUARD_SHARE,
-    maxHoldMs: GUARD_MAX_HOLD_MS, arrivalMinDivine: GUARD_ARRIVAL_MIN_DIVINE
+    maxHoldMs: GUARD_MAX_HOLD_MS, arrivalMinDivine: GUARD_ARRIVAL_MIN_DIVINE,
+    stateMaxNames: GUARD_STATE_MAX_NAMES
   }
   assert.deepEqual(guardOptionsFromEnv({}), defaults)
   assert.deepEqual(guardOptionsFromEnv({
@@ -468,4 +470,252 @@ test('a jump hold hands its reference to the memory when the item leaves', () =>
   assert.equal(r.items.get('The Scavenger')[1], 1)
   assert.equal(r.notes[0].oldPrice, 1)
   assert.equal(r.notes[0].withheld, undefined, 'a known price is held, not withheld')
+})
+
+// --- the memory across a restart (exportState / importState) ----------------
+// The Scavenger night's container had just been rebuilt. Everything below is
+// what a restart used to take away: a running hold, a remembered price for a
+// name that had left the stash, and the last C:D rate.
+const H6 = 6 * 3600e3
+const roundTrip = doc => JSON.parse(JSON.stringify(doc))
+
+test('exportState/importState: a restart loses neither a hold nor a remembered price', () => {
+  let t = 1_000_000
+  const g1 = createPriceGuard({ now: () => t, maxHoldMs: H6, log: SILENT })
+  const p0 = new Map([['The Scavenger', [1, 1]], ['Card B', [1, 1]], ['Rest', [1, 98]]])
+  const c0 = new Map([['The Scavenger', [1, 174039]], ['Card B', [1, 1]], ['Rest', [1, 98]]])
+  const r0 = g1.apply('player1', p0, c0, 100, { cdRatio: 200 })
+  assert.equal(g1.held.size, 1)
+  t += 60_000
+  // Card B leaves the stash; the spike is still standing.
+  const c1 = new Map([['The Scavenger', [1, 174039]], ['Rest', [1, 98]]])
+  const r1 = g1.apply('player1', r0.items, c1, 100, { cdRatio: 200 })
+  const seenBefore = g1.held.get('player1|The Scavenger').seen
+  const doc = roundTrip(g1.exportState({ covered: new Map([['player1', r1.items]]) }))
+
+  // --- restart ---
+  t += 60_000
+  const g2 = createPriceGuard({ now: () => t, maxHoldMs: H6, log: SILENT })
+  const got = g2.importState(doc)
+  assert.equal(got.held, 1)
+  assert.equal(got.known, 1)
+  const c2 = new Map([['The Scavenger', [1, 174039]], ['Rest', [1, 98]], ['Card B', [1, 60]]])
+  const r2 = g2.apply('player1', r1.items, c2, 99, { cdRatio: 200 })
+  assert.equal(r2.items.get('The Scavenger')[1], 1, 'the running hold went on through the restart')
+  const h = g2.held.get('player1|The Scavenger')
+  assert.equal(h.since, 1_000_000 + (t - seenBefore), 'no new hold: the old one, moved out by the downtime')
+  const b = r2.notes.find(n => n.name === 'Card B')
+  assert.ok(b, 'Card B came back at 60x and was let through')
+  assert.equal(b.oldPrice, 1, 'judged against the remembered price, not through the arrival bar')
+  assert.equal(b.withheld, undefined)
+})
+
+test('a name the sidecar carried and that leaves on the first point after the restart keeps its reference', () => {
+  // The export leaves covered names out because the sidecar carries them. The
+  // import has to put them back, or a name that is gone on the very first point
+  // afterwards has lost what an uninterrupted guard would still remember.
+  let t = 1_000_000
+  const g1 = createPriceGuard({ now: () => t, maxHoldMs: H6, log: SILENT })
+  const p0 = new Map([['Card B', [1, 1]], ['Rest', [1, 98]]])
+  const r0 = g1.apply('player1', p0, p0, 99, { cdRatio: 200 })
+  const covered = new Map([['player1', r0.items]])
+  const doc = roundTrip(g1.exportState({ covered }))
+  assert.deepEqual(doc.users.player1?.known ?? [], [], 'covered names are not written')
+
+  t += 60_000
+  const g2 = createPriceGuard({ now: () => t, maxHoldMs: H6, log: SILENT })
+  const got = g2.importState(doc, { covered: new Map([['player1', { at: 1_000_000, items: r0.items }]]) })
+  assert.equal(got.fromSidecar, 2)
+  const gone = new Map([['Rest', [1, 98]]])
+  g2.apply('player1', r0.items, gone, 99, { cdRatio: 200 })
+  t += 60_000
+  const back = new Map([['Rest', [1, 98]], ['Card B', [1, 60]]])
+  const r = g2.apply('player1', gone, back, 98, { cdRatio: 200 })
+  const b = r.notes.find(n => n.name === 'Card B')
+  assert.ok(b, 'Card B at 60x was let through')
+  assert.equal(b.oldPrice, 1)
+})
+
+test('a restored hold treats the downtime as blind: an update does not release a suspicious price', () => {
+  const t0 = 1_000_000
+  let t = t0
+  const lines = []
+  const g1 = createPriceGuard({ now: () => t, maxHoldMs: H6, log: SILENT })
+  g1.apply('player1', prev(), spike(), TOTAL)
+  for (; t < t0 + 3600e3;) { t += 60_000; g1.apply('player1', prev(), spike(), TOTAL) }
+  const doc = roundTrip(g1.exportState())
+
+  t = t0 + H6 // five hours down
+  const g2 = createPriceGuard({ now: () => t, maxHoldMs: H6, log: (...a) => lines.push(a) })
+  g2.importState(doc)
+  const r = g2.apply('player1', prev(), spike(), TOTAL)
+  assert.equal(r.items.get('The Scavenger')[1], 1, 'the spike is still corrected after the update')
+  assert.equal(g2.held.size, 1)
+  assert.equal(lines.filter(l => /released/.test(l[0])).length, 0)
+  for (; t < t0 + 11 * 3600e3 - 60_000;) {
+    t += 60_000
+    g2.apply('player1', prev(), spike(), TOTAL)
+    assert.equal(lines.filter(l => /released/.test(l[0])).length, 0, `released early at +${(t - t0) / 3600e3}h`)
+  }
+  t += 60_000
+  g2.apply('player1', prev(), spike(), TOTAL)
+  const rel = lines.filter(l => /price hold released after %dh/.test(l[0]))
+  assert.equal(rel.length, 1, 'released once six observed hours have passed')
+  assert.equal(rel[0][1], 6)
+  assert.equal(t, t0 + 11 * 3600e3)
+})
+
+test('a restored hold of a user who does not report yet is not reaped by another user\'s point', () => {
+  const t0 = 1_000_000
+  let t = t0
+  const g1 = createPriceGuard({ now: () => t, maxHoldMs: H6, log: SILENT })
+  g1.apply('player2', prev(), spike(), TOTAL)
+  t += 5 * 3600e3
+  g1.apply('player2', prev(), spike(), TOTAL)    // seen at +5h, since at t0
+  const doc = roundTrip(g1.exportState())
+  t = t0 + 13 * 3600e3                            // since is 13h old, seen 8h
+  const g2 = createPriceGuard({ now: () => t, maxHoldMs: H6, log: SILENT })
+  assert.equal(g2.importState(doc).held, 1)
+  g2.apply('player1', prev(), prev(), TOTAL)
+  assert.equal(g2.held.size, 1, 'the downtime is blind for the reaper as well')
+})
+
+test('importState applies the expiry apply() would apply', () => {
+  const t = 100 * H6
+  const g = createPriceGuard({ now: () => t, maxHoldMs: H6, log: SILENT })
+  const r = g.importState({
+    ratio: [212, t - H6 - 1],
+    users: {
+      player1: {
+        held: [['Old Hold', t - 3 * H6, t - 2 * H6 - 1, 1], ['Fresh Hold', t - 3 * H6, t - 2 * H6, 1]],
+        known: [['Old Memo', t - H6 - 1, 5], ['Fresh Memo', t - H6, 5]]
+      }
+    }
+  })
+  assert.equal(r.held, 1)
+  assert.equal(r.known, 1)
+  assert.equal(r.expired, 3)
+  assert.ok(g.held.has('player1|Fresh Hold'))
+  assert.ok(g.known.has('player1|Fresh Memo'))
+  // The stale rate was not taken: the arrival bar abstains without one.
+  const res = g.apply('player1', before(), withMoon(), BASELINE)
+  assert.equal(res.notes.find(n => n.withheld), undefined, 'a rate older than the window is no rate')
+
+  const g2 = createPriceGuard({ now: () => t, maxHoldMs: H6, log: SILENT })
+  g2.importState({ ratio: [CD, t - H6], users: {} })
+  const res2 = g2.apply('player1', before(), withMoon(), BASELINE)
+  assert.equal(res2.notes[0]?.withheld, true, 'a rate within the window converts the floor')
+})
+
+test('the export leaves out what the sidecar already carries', () => {
+  let t = 1_000_000
+  const g = createPriceGuard({ now: () => t, log: SILENT })
+  g.importState({ users: { player1: { held: [['H', t - 1000, t - 500, 0]], known: [['A', t - 10, 2], ['B', t - 10, 3], ['C', t - 10, 4]] } } })
+  const covered = new Map([['player1', new Map([['A', [1, 2]], ['C', [1, 0]]])]])
+  const s = g.exportState({ covered })
+  assert.deepEqual(s.users.player1.known.map(r => r[0]), ['B', 'C'])
+  assert.deepEqual(s.users.player1.held, [['H', t - 1000, t - 500, 0]])
+})
+
+test('the export keeps the newest remembered prices when it has to cut, and says so once', () => {
+  const t = 1_000_000
+  const lines = []
+  const g = createPriceGuard({ now: () => t, stateMaxNames: 2, log: (...a) => lines.push(a) })
+  g.importState({ users: { player1: { known: [['N1', t - 3, 1], ['N2', t - 2, 1], ['N3', t - 1, 1]] } } })
+  const s = g.exportState()
+  assert.deepEqual(s.users.player1.known.map(r => r[0]), ['N2', 'N3'])
+  assert.equal(s.cut, 1)
+  assert.equal(lines.length, 1)
+  assert.match(lines[0][0], /POE_NETWORTH_GUARD_STATE_MAX_NAMES/)
+  g.exportState()
+  assert.equal(lines.length, 1, 'said once per process, not once per save')
+})
+
+test('stateMaxNames 0 persists holds and the rate but no remembered prices', () => {
+  const t = 1_000_000
+  const g = createPriceGuard({ now: () => t, stateMaxNames: 0, log: SILENT })
+  g.importState({ ratio: [200, t], users: { player1: { held: [['H', t - 10, t - 5, 3]], known: [['K', t - 1, 1]] } } })
+  const s = g.exportState()
+  assert.deepEqual(s.users.player1.known, [])
+  assert.equal(s.users.player1.held.length, 1)
+  assert.deepEqual(s.ratio, [200, t])
+})
+
+test('importState skips unreadable rows and counts them', () => {
+  const t = 1_000_000
+  const g = createPriceGuard({ now: () => t, log: SILENT })
+  const r = g.importState({
+    users: {
+      player1: {
+        held: [['', t - 10, t - 5, 1], ['Future', t - 10, t + 5, 1], ['Backwards', t - 5, t - 10, 1], ['Good Hold', t - 10, t - 5, 1]],
+        known: [['NaN', NaN, 1], ['Zero', t - 1, 0], ['Good Memo', t - 1, 2]]
+      },
+      '': { known: [['X', t - 1, 1]] }
+    }
+  })
+  assert.equal(r.skipped, 6, 'five bad rows, and the row of a user with no name')
+  assert.equal(r.held, 1)
+  assert.equal(r.known, 1)
+  assert.deepEqual([...g.held.keys()], ['player1|Good Hold'])
+  assert.deepEqual([...g.known.keys()], ['player1|Good Memo'])
+  assert.deepEqual(g.importState(null), { held: 0, known: 0, expired: 0, skipped: 0, fromSidecar: 0 })
+})
+
+test('entries already in memory win over the file', () => {
+  const t = 1_000_000
+  const g = createPriceGuard({ now: () => t, log: SILENT })
+  g.importState({ users: { player1: { known: [['K', t - 1, 7]] } } })
+  g.importState({ users: { player1: { known: [['K', t - 1, 9]] } } })
+  assert.equal(g.known.get('player1|K').price, 7)
+})
+
+test('export rows are sorted, so an unchanged memory serialises to the same bytes', () => {
+  const t = 1_000_000
+  const rows = [['Zeta', t - 1, 1], ['Alpha', t - 2, 2], ['Mid', t - 3, 3]]
+  const a = createPriceGuard({ now: () => t, log: SILENT })
+  a.importState({ users: { u2: { known: rows }, u1: { known: [...rows].reverse() } } })
+  const b = createPriceGuard({ now: () => t, log: SILENT })
+  b.importState({ users: { u1: { known: rows }, u2: { known: [...rows].reverse() } } })
+  assert.equal(JSON.stringify(a.exportState()), JSON.stringify(a.exportState()))
+  assert.equal(JSON.stringify(a.exportState()), JSON.stringify(b.exportState()))
+  assert.deepEqual(Object.keys(a.exportState().users), ['u1', 'u2'])
+})
+
+test('the memory cap is read like the four bars, and 0 is honoured', () => {
+  assert.equal(GUARD_STATE_MAX_NAMES, 10000)
+  assert.equal(guardOptionsFromEnv({}).stateMaxNames, 10000)
+  assert.equal(guardOptionsFromEnv({ POE_NETWORTH_GUARD_STATE_MAX_NAMES: '0' }).stateMaxNames, 0)
+  const lines = []
+  const log = { warn: (...a) => lines.push(a), log: (...a) => lines.push(a) }
+  assert.equal(guardOptionsFromEnv({ POE_NETWORTH_GUARD_STATE_MAX_NAMES: '-1' }, { log }).stateMaxNames, 10000)
+  assert.equal(guardOptionsFromEnv({ POE_NETWORTH_GUARD_STATE_MAX_NAMES: '2.5' }, { log }).stateMaxNames, 10000)
+  assert.equal(lines.length, 2)
+})
+
+test('the rate\'s time alone does not change the export every point: it moves in steps of half a hold window', () => {
+  let t = 1_800_000_000_000
+  const g = createPriceGuard({ now: () => t, maxHoldMs: H6, log: SILENT })
+  const stock = () => new Map([['Rest', [1, 100]]])
+  // As history.mjs calls it: Rest is in the last breakdown, so not in the file.
+  const covered = new Map([['player1', stock()]])
+  g.apply('player1', stock(), stock(), 100, { cdRatio: 200 })
+  const first = JSON.stringify(g.exportState({ covered }))
+  assert.deepEqual(g.exportState({ covered }).ratio, [200, t])
+  t += 60_000
+  g.apply('player1', stock(), stock(), 100, { cdRatio: 200 })
+  assert.equal(JSON.stringify(g.exportState({ covered })), first, 'same rate a minute later: the same bytes, no rewrite')
+  t += H6 / 2 - 60_000
+  g.apply('player1', stock(), stock(), 100, { cdRatio: 200 })
+  assert.deepEqual(g.exportState({ covered }).ratio, [200, t], 'half a window on, the time is renewed')
+  t += 60_000
+  g.apply('player1', stock(), stock(), 100, { cdRatio: 201 })
+  assert.deepEqual(g.exportState({ covered }).ratio, [201, t], 'a new rate is written at once')
+
+  // After a restart the restored rate is what the file says, so the first
+  // export matches the file and does not rewrite it.
+  const g2 = createPriceGuard({ now: () => t, maxHoldMs: H6, log: SILENT })
+  g2.importState({ ratio: [201, t - 1000], users: {} })
+  t += 60_000
+  g2.apply('player1', stock(), stock(), 100, { cdRatio: 201 })
+  assert.deepEqual(g2.exportState({ covered }).ratio, [201, t - 61_000])
 })

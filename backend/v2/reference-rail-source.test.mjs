@@ -12,6 +12,7 @@ import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import vm from 'node:vm'
 import { quietEnv } from './test-quiet-env.mjs'
+import { configureNinja } from './ninja.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const dir = await mkdtemp(join(tmpdir(), 'refrailsrc-'))
@@ -42,8 +43,12 @@ const BEASTS = {
 }
 
 const realFetch = globalThis.fetch
+let cdnDown = false // the Faustus CDN unreachable (onFailed case)
 globalThis.fetch = async (url) => {
   const u = String(url)
+  // One league whose poe.ninja requests fail on the network (the C:D outage case).
+  if (u.includes('poe.ninja') && u.includes('league=CdDown')) throw new Error('connect ECONNREFUSED')
+  if (u.includes('web.poecdn.com') && cdnDown) throw new Error('getaddrinfo ENOTFOUND web.poecdn.com')
   if (u.includes('web.poecdn.com')) return { ok: true, status: 200, json: async () => ({ markets: [] }) }
   const body = u.includes('exchange/current/overview')
     ? EXCHANGE
@@ -101,6 +106,92 @@ test('mixed section: Mirror is poe.ninja, Sulphur right below it is Faustus', as
   assert.equal(typeof rows['Vivid Lifeforce'].sell.updatedAt, 'number')
 })
 
+test('refreshedAt is the time of the poe.ninja answer, not of the rebuild (B29)', async () => {
+  // A fresh league: the answer is fetched now, so the stamp lies in this window.
+  const before = Date.now()
+  const fresh = await mod.refreshReference('SrcStamp')
+  assert.ok(fresh.refreshedAt >= before && fresh.refreshedAt <= Date.now())
+  // An answer poe.ninja gave two hours ago (ninja.mjs is the same module
+  // instance the server uses, so its clock can be set back for one fetch).
+  // The rail used to stamp it with the time of the rebuild.
+  const twoHoursAgo = Date.now() - 2 * 60 * 60 * 1000
+  configureNinja({ now: () => twoHoursAgo })
+  try {
+    const old = await mod.refreshReference('SrcOldAnswer')
+    assert.equal(old.refreshedAt, twoHoursAgo)
+  } finally {
+    configureNinja({ now: () => Date.now() })
+  }
+})
+
+test('an old poe.ninja answer adds no Mirror or beast point, but the fresh Faustus rows still get theirs (B29)', async () => {
+  const LGX = 'SrcNinjaDown'
+  const hist = mod.referenceHistory
+  await mod.faustusStore.setPrices(LGX, {}, Date.now(), null, SELL)
+  const twoHoursAgo = Date.now() - 2 * 60 * 60 * 1000
+  // The history already holds a point built from the poe.ninja answers of two
+  // hours ago, an hour old itself (past the history's 10 min spacing).
+  hist.points.push({
+    lg: LGX,
+    at: Date.now() - 60 * 60 * 1000,
+    cd: RATIO,
+    v: { 'c:mirror': 100_000, 'b:Vivid Vulture': 1800 },
+    ob: { exchange: twoHoursAgo, beasts: twoHoursAgo }
+  })
+  // poe.ninja serves those same answers again (its clock set back for this
+  // league's fetches, as in the refreshedAt case above).
+  configureNinja({ now: () => twoHoursAgo })
+  try {
+    await mod.refreshReference(LGX)
+  } finally {
+    configureNinja({ now: () => Date.now() })
+  }
+  const pts = hist.points.filter(p => p.lg === LGX)
+  assert.equal(pts.length, 2, 'a new point despite the old poe.ninja answer')
+  const v = pts[1].v
+  assert.equal('c:mirror' in v, false, 'the old exchange answer is not a new Mirror point')
+  assert.equal('b:Vivid Vulture' in v, false, 'the old beast answer is not a new beast point')
+  for (const k of ['s:Vivid Crystallised Lifeforce', "s:Dead Man's Sulphur"]) {
+    assert.equal(typeof v[k], 'number', `${k} (Faustus) still gets its point`)
+  }
+  assert.deepEqual(Object.keys(pts[1].ob || {}), ['faustus'], 'no poe.ninja feed is stamped, only the Faustus one')
+})
+
+test('the same Faustus store adds no Sulphur or lifeforce point; a newer store does (B29)', async () => {
+  // The rail rebuilds every 15 min, the Faustus store only on its hourly tick,
+  // and during a Faustus outage not at all. The same store written again as a
+  // new point is a flat line that looks like a quiet market.
+  const hist = mod.referenceHistory
+  const storeAt = Date.now() - 30 * 60 * 1000
+  const FAUSTUS_KEYS = ['s:Vivid Crystallised Lifeforce', "s:Dead Man's Sulphur"]
+  const seed = (lg, faustusAt) => hist.points.push({
+    lg,
+    at: Date.now() - 60 * 60 * 1000,
+    cd: RATIO,
+    v: { 's:Vivid Crystallised Lifeforce': 26, "s:Dead Man's Sulphur": 1.5 },
+    ob: { faustus: faustusAt }
+  })
+
+  const SAME = 'SrcFaustusSame'
+  seed(SAME, storeAt)
+  await mod.faustusStore.setPrices(SAME, {}, storeAt, null, SELL)
+  await mod.refreshReference(SAME)
+  const same = hist.points.filter(p => p.lg === SAME)
+  assert.equal(same.length, 2, 'the poe.ninja rows still get a point')
+  for (const k of FAUSTUS_KEYS) assert.equal(k in same[1].v, false, `${k}: the same store is not a new point`)
+  assert.equal(typeof same[1].v['c:mirror'], 'number')
+  assert.equal('faustus' in (same[1].ob || {}), false)
+
+  const NEWER = 'SrcFaustusNewer'
+  seed(NEWER, storeAt - 60 * 60 * 1000)
+  await mod.faustusStore.setPrices(NEWER, {}, storeAt, null, SELL)
+  await mod.refreshReference(NEWER)
+  const newer = hist.points.filter(p => p.lg === NEWER)
+  assert.equal(newer.length, 2)
+  for (const k of FAUSTUS_KEYS) assert.equal(typeof newer[1].v[k], 'number', `${k}: a newer store is a new point`)
+  assert.equal(newer[1].ob.faustus, storeAt, 'the point carries the time of the store, not of the rebuild')
+})
+
 test('a row without a number claims no source', async () => {
   // Store far beyond the TTL -> the sell-side rows print "—".
   await mod.faustusStore.setPrices('SrcStale', {}, Date.now() - 3 * 24 * 60 * 60 * 1000, null, SELL)
@@ -113,6 +204,64 @@ test('a row without a number claims no source', async () => {
   }
   // The poe.ninja rows are unaffected.
   assert.equal(rows['Mirror of Kalandra'].src, 'ninja')
+})
+
+// ---- The C:D tile and the source status, against the same booted server ---
+
+test('C:D from an old poe.ninja answer carries THAT answer\'s time, plus now and staleAfterMs (B29)', async () => {
+  const twoHoursAgo = Date.now() - 2 * 60 * 60 * 1000
+  configureNinja({ now: () => twoHoursAgo })
+  let cd
+  try {
+    cd = await mod.refreshCdRatio('CdOld')
+  } finally {
+    configureNinja({ now: () => Date.now() })
+  }
+  assert.equal(cd.chaosPerDivine, RATIO)
+  assert.equal(cd.trendHint, 'live · poe.ninja')
+  // The old answer is not re-stamped with the time of the rebuild.
+  assert.equal(cd.asOf, twoHoursAgo)
+  assert.equal(typeof cd.now, 'number')
+  assert.ok(cd.now >= twoHoursAgo + 2 * 60 * 60 * 1000 - 5000, 'now is the server clock, not the answer time')
+  assert.ok(cd.staleAfterMs >= 3 * 60 * 60 * 1000)
+  // The cached message (what a WS connect sends) carries the same.
+  const again = mod.cdMsgFor('CdOld')
+  assert.equal(again.asOf, twoHoursAgo)
+  assert.equal(typeof again.staleAfterMs, 'number')
+})
+
+test('a network error on the C:D fetch marks ninja-cd failing in source-status; the tile stays on its fallback', async () => {
+  await new Promise(r => setTimeout(r, 5)) // the failure must be younger than the earlier successes
+  const cd = await mod.refreshCdRatio('CdDown')
+  assert.equal(cd.trendHint, 'fallback')
+  assert.equal('asOf' in cd, false)
+  const row = mod.sourceStatusMsg().sources.find(s => s.source === 'ninja-cd')
+  assert.equal(typeof row.lastFailureAt, 'number')
+  assert.ok(row.lastSuccessAt == null || row.lastFailureAt > row.lastSuccessAt, 'the failure is the latest event')
+  assert.match(row.reason, /network error: connect ECONNREFUSED/)
+  assert.equal(row.failKind, 'unreachable')
+})
+
+test('a Faustus refresh reaches source-status: the boot tick through onRefreshed, a failed one through onFailed', async () => {
+  // The boot tick ran against the CDN stub above and wrote the store.
+  const ok = mod.sourceStatusMsg().sources.find(s => s.source === 'faustus')
+  assert.equal(ok.enabled, true)
+  assert.equal(typeof ok.lastSuccessAt, 'number')
+  assert.equal(ok.lastFailureAt, null)
+  // The CDN goes away: the next tick fails, keeps the store and says why.
+  const storeAt = mod.faustusStore.updatedAt()
+  cdnDown = true
+  try {
+    await new Promise(r => setTimeout(r, 5))
+    await mod.faustusRefresher.tickOnce()
+  } finally {
+    cdnDown = false
+  }
+  const row = mod.sourceStatusMsg().sources.find(s => s.source === 'faustus')
+  assert.equal(typeof row.lastFailureAt, 'number')
+  assert.ok(row.lastFailureAt > row.lastSuccessAt, 'the failure is the latest event')
+  assert.ok(row.reason, 'a reason is named')
+  assert.equal(mod.faustusStore.updatedAt(), storeAt, 'the last good store stays')
 })
 
 // ---- Part 2: the rail renders one stamp per source --------------------------

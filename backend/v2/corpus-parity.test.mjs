@@ -4,33 +4,26 @@
 // recognised stat `ref`s, same trade query.
 //
 // The corpus is `corpus/`, one directory per item, and this file iterates over
-// whatever is in there. Nothing about any item is written down here: no name,
-// no base, no mod text, no expected value. Adding an item is two text files and
-// a `covers.txt`; adding a category is a line in `corpus/wanted.txt`. That is
-// the whole point — the corpus is small today and has to grow without anybody
-// coming back to edit a test.
+// whatever is in there; nothing about any item is written down here. Adding an
+// item is two text files and a `covers.txt`; adding a category is a line in
+// `corpus/wanted.txt` — the corpus has to grow without anybody editing a test.
 //
-// WHAT IS RED AND WHAT IS ONLY REPORTED. The corpus is knowingly incomplete:
-// no wanted category is covered yet, because covering one needs a PAIR and not
-// one of the collected texts has an English partner. Failing on that would mean a permanently red
-// suite that tells nobody anything. So a missing partner and a missing category
-// are PRINTED, in full, by a test that passes. What turns this file red is a
-// text that is IN the corpus and stops parsing, and a pair that IS complete and
-// drifts apart.
+// WHAT IS RED AND WHAT IS ONLY REPORTED. The corpus is knowingly incomplete: no
+// wanted category is covered yet, because covering one needs a PAIR and not one
+// of the collected texts has an English partner. So a missing partner and a
+// missing category are PRINTED, in full, by a test that passes. Red is a text
+// that is IN the corpus and stops parsing, or a complete pair that drifts
+// apart.
 //
 // THE TRADE QUERY IS THE REAL ONE. `createTradeRequest` is not exported from
-// engine.mts, and rebuilding it here would test a copy of the logic instead of
-// the logic. So the query is built the way base-percentile.test.mjs builds it:
+// engine.mts, so the query is built as in base-percentile.test.mjs:
 // `searchPreset` runs, and the fetch spy takes the body out of the request and
-// aborts before anything leaves the machine. It also answers the question the
-// preset alone cannot: `filters.searchExact.name` legitimately differs between
-// the two languages (it is the display name), and only the request body shows
-// whether that difference reaches GGG — it does not, because `nameTrade` wins.
-//
-// ONE ENGINE GRAPH PER QUERY. The bundle's RateLimiter is module state and
-// allows exactly one search per graph (1 per 5s); the second one throws instead
-// of building a body. A fresh graph costs ~20 ms and ~10 MB, which is the
-// cheaper side of that trade.
+// aborts before anything leaves the machine. Only the request body shows that
+// `filters.searchExact.name` (the display name, which legitimately differs
+// between the languages) does not reach GGG, because `nameTrade` wins.
+// ONE ENGINE GRAPH PER QUERY: the bundle's RateLimiter is module state and
+// allows exactly one search per graph (1 per 5s), the second throws; a fresh
+// graph costs ~20 ms and ~10 MB.
 //
 // NO NETWORK. The spy sits on `globalThis.fetch` BEFORE the engine loads, so it
 // ends up underneath the engine's own file:// adapter (installFetchFs binds
@@ -39,10 +32,9 @@
 // http(s) call that is not a trade query we deliberately asked for is recorded
 // and fails the last test in this file.
 //
-// Skips without a generated `renderer/public/data/de/` — that set is derived
-// from GGG's game data and every installation makes its own. The bookkeeping
-// over `corpus/` runs regardless, so a fresh clone still gets told what the
-// corpus is missing.
+// Skips without a generated `renderer/public/data/de/` (derived from GGG's game
+// data, every installation makes its own); the bookkeeping over `corpus/` runs
+// regardless, so a fresh clone still gets told what the corpus is missing.
 import { test, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile, readdir } from 'node:fs/promises'

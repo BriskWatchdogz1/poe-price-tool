@@ -1,6 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { lastHour, rateXperQuote, createFaustusPricer, isInformativeMarket } from './faustus.mjs'
+import { lastHour, rateXperQuote, createFaustusPricer, isInformativeMarket, FAUSTUS_UA } from './faustus.mjs'
+import { AGENT_BASE } from '../version.mjs'
 import { isTooOld } from './faustus-age.mjs'
 
 const CHAOS = 'Metadata/Items/Currency/CurrencyRerollRare'
@@ -300,9 +301,9 @@ test('the gate is RELATIVE: a small chaos market survives a not-much-better divi
 })
 
 test('a single-trade chaos envelope does not veto the bridge (The Fiend case)', async () => {
-  // The envelope used to be built from the newest informative hour alone, and
-  // in 926 of 1402 firings that was a single chaos trade — min === max. It then
-  // vetoed the very bridge that was replacing it: The Fiend kept 121c (89% off)
+  // An envelope built from the newest informative hour alone was, in 926 of
+  // 1402 firings, a single chaos trade — min === max — and vetoed the very
+  // bridge that was replacing it: The Fiend kept 121c (89% off)
   // while the bridge would have said 1059c against a real 1107c. A degenerate
   // envelope is no evidence, so it is ignored; the bridge goes through.
   const X = 'Metadata/Items/DivinationCards/DivinationCardThin'
@@ -349,7 +350,7 @@ test('the plausibility envelope spans the whole union window, not just the newes
     `the union envelope must accept the bridge, got ${withHistory.get('Dual Item')}`)
   // Without that older hour the window only ever saw 100..110c, and the same
   // bridge is out of band -> the chaos market keeps it. This is the control:
-  // the envelope is still doing work, it is just no longer a single point.
+  // the envelope is still doing work, it is just not a single point.
   const withoutHistory = await build([])
   assert.ok(approx(withoutHistory.get('Dual Item'), 105, 1e-9),
     `out-of-band bridge must be rejected, got ${withoutHistory.get('Dual Item')}`)
@@ -701,7 +702,7 @@ test("finding: The Jeweller's Boon no longer gets a 1400c price", async () => {
   const d = await cardPricer(byHour, now).detailByName()
   const card = d.get("The Jeweller's Boon")
   // chaos volume (12) is below the floor of 50 -> no price; what matters is
-  // that the bridge no longer kicks in (the valuator falls back to ninja).
+  // that the bridge does not kick in (the valuator falls back to ninja).
   assert.equal(card, undefined, 'bridge priced the card at ~1400c again')
 })
 
@@ -808,6 +809,26 @@ test('a deeper hour that clears THIN_X_UNITS but is not materially deeper (below
   }
   const d = await btPricer(byHour, now).detailByName()
   assert.equal(d.get('Broken Truce')?.chaos, 22, 'volume ratio below DEEP_HOUR_VOL_RATIO must not override')
+})
+
+// B36 in docs/bugs.md, the same arithmetic in this check: the two rates are
+// quotients, and a pair the recorded numbers put exactly 2x apart can come out
+// a hair under 2. Here 3 units for 52 chaos (17.33c) against the midpoint of
+// 8c and 28/3c (8.67c): exactly 2x as numbers, 1.9999999999999996 as computed.
+test('two rates exactly 2x apart by their numbers trigger the cross-hour check, though the division gives a hair under 2', async () => {
+  assert.ok((52 / 3) / ((8 + 28 / 3) / 2) < 2) // the arithmetic error this test is about
+  const now = 12 * 3600 // -> lastHour 11:00
+  const byHour = {
+    [11 * 3600]: [mk([BT, CHAOS], { [BT]: 1, [CHAOS]: 16 }, { [BT]: 1, [CHAOS]: 18 }, { [BT]: 3, [CHAOS]: 52 })],
+    // 30 units for 210 chaos (7c) lies outside this hour's own 8 to 9.33c, so
+    // the midpoint prices the hour.
+    [10 * 3600]: [mk([BT, CHAOS], { [BT]: 1, [CHAOS]: 8 }, { [BT]: 3, [CHAOS]: 28 }, { [BT]: 30, [CHAOS]: 210 })]
+  }
+  const d = await btPricer(byHour, now).detailByName()
+  assert.equal(d.get('Broken Truce'), undefined, 'exactly 2x apart is DEEP_HOUR_DISAGREE_RATIO, the check fires')
+  // One chaos less in the thin hour (17c, 1.96x apart) and the check holds back.
+  byHour[11 * 3600] = [mk([BT, CHAOS], { [BT]: 1, [CHAOS]: 16 }, { [BT]: 1, [CHAOS]: 18 }, { [BT]: 3, [CHAOS]: 51 })]
+  assert.equal((await btPricer(byHour, now).detailByName()).get('Broken Truce')?.chaos, 17)
 })
 
 test('guard: an expensive item that legitimately trades 1-3 units every hour, with huge chaos turnover, keeps its price across the whole union window', async () => {
@@ -1043,4 +1064,53 @@ test('B20: the two cards WITH a bid come out of the identical path, and nothing 
   const at = d2.get('The Chosen').at
   assert.equal(at, HOUR_NEW)
   assert.equal(isTooOld(at, { now: (at + 3600 + 7 * 3600) * 1000, maxMs: 6 * 3600 * 1000 }), true)
+})
+
+// ---------------------------------------------------------------------------
+// turnoverC — the evidence behind the number (docs/bugs.md B20), read by the
+// Net-Worth "thin market" marker and never by the price itself.
+// ---------------------------------------------------------------------------
+test('turnoverC is the quote turnover of the market hour the price came from', async () => {
+  const XR = 'Metadata/Items/Currency/CurrencyRanged'
+  const XB = 'Metadata/Items/Currency/CurrencyBridgedOnly'
+  const names = { byId: new Map([[CHAOS, 'Chaos Orb'], [DIVINE, 'Divine Orb'], [XR, 'Ranged Item'], [XB, 'Bridged Item']]) }
+  const markets = [
+    mk([DIVINE, CHAOS], { [DIVINE]: 1, [CHAOS]: 100 }, { [DIVINE]: 1, [CHAOS]: 100 }, { [DIVINE]: 50, [CHAOS]: 5000 }),
+    mk([XR, CHAOS], { [XR]: 1, [CHAOS]: 17 }, { [XR]: 1, [CHAOS]: 10 }, { [XR]: 1000, [CHAOS]: 13600 }),
+    mk([XB, DIVINE], { [XB]: 1, [DIVINE]: 2 }, { [XB]: 1, [DIVINE]: 3 }, { [XB]: 4, [DIVINE]: 40 })
+  ]
+  const d = await createFaustusPricer({
+    league: 'Standard',
+    deps: { now: () => NOW, baseNames: names, fetchHour: async id => (id === HOUR_NEW ? { next_change_id: id + 1, markets } : null) }
+  }).detailByName()
+  // Direct chaos path: the chaos that changed hands in the price's own market.
+  assert.ok(approx(d.get('Ranged Item').chaos, 13.6, 1e-9), 'the price itself is unchanged')
+  assert.equal(d.get('Ranged Item').turnoverC, 13600)
+  // Bridged path: the divine side of the price's market, at this run's C:D.
+  assert.equal(d.get('Bridged Item').chaos, 250, 'the bridged price is unchanged')
+  assert.equal(d.get('Bridged Item').turnoverC, 40 * 100)
+  // Divine Orb itself is priced off the Divine<->Chaos market.
+  assert.equal(d.get('Divine Orb').turnoverC, 5000)
+  // Chaos Orb is the anchor, not an observation: no evidence to state.
+  assert.equal(d.get('Chaos Orb').turnoverC, undefined)
+})
+
+test('the Currency Exchange request names the tool, its version and its purpose', async t => {
+  assert.equal(FAUSTUS_UA, `${AGENT_BASE} (personal LAN tool)`)
+  // And the request really carries it: the default hour fetch (no fetchHour
+  // injected) goes through the global fetch, which is mocked here, so a literal
+  // string written back into defaultFetchHour turns this red. Every hour answers
+  // 404, so the walk steps back and ends without data; nothing leaves the process.
+  const seen = []
+  t.mock.method(globalThis, 'fetch', async (url, init = {}) => {
+    seen.push({ url: String(url), ua: init.headers?.['User-Agent'] })
+    return { ok: false, status: 404, json: async () => ({}) }
+  })
+  await createFaustusPricer({
+    league: 'Standard',
+    deps: { now: () => NOW, baseNames: { byId: new Map() }, unionHours: 1 }
+  }).detailByName()
+  assert.ok(seen.length > 0, 'the default path made no request at all')
+  assert.ok(seen.every(r => r.url.startsWith('https://')), JSON.stringify(seen))
+  assert.deepEqual([...new Set(seen.map(r => r.ua))], [FAUSTUS_UA])
 })

@@ -320,3 +320,36 @@ test('the per-hour budget caps how many queries go out', async () => {
   assert.equal(trade.queried.length, 4)
   await cleanup()
 })
+
+// docs/pricing-logic.md "Uncertain prices": the store gets the number of
+// usable (normalisable) listings the average was built from — counted BEFORE
+// the cut to the five cheapest, so 7 usable offers say 7, not 5.
+test('the store gets the number of usable listings the average was built from', async () => {
+  const calls = []
+  const spyStore = {
+    isFresh: () => false,
+    ageOf: () => Infinity,
+    async setPrice (...a) { calls.push(a) }
+  }
+  const T0 = 9_000_000
+  const trade = fakeTrade({
+    // One chaos offer and one exalted offer: only the chaos one is usable.
+    One: [{ priceAmount: 10, priceCurrency: 'chaos' }, { priceAmount: 1, priceCurrency: 'exalted' }],
+    // Seven usable offers: the average is still over the five cheapest.
+    Seven: [1, 2, 3, 4, 5, 6, 7].map(v => ({ priceAmount: v, priceCurrency: 'chaos' })),
+    None: []
+  })
+  for (const name of ['One', 'Seven', 'None']) {
+    const pricer = createCorpsePricer({
+      store: spyStore, tradeClient: trade, league: 'Standard',
+      getCorpseNames: () => [name], now: () => T0,
+      chaosPerDivine: () => 200, enqueueBackground: async fn => fn(), log: silent
+    })
+    await pricer.tickOnce()
+  }
+  assert.deepEqual(calls, [
+    ['Standard', 'One', 10, T0, 1],
+    ['Standard', 'Seven', 3, T0, 7],
+    ['Standard', 'None', null, T0, 0]
+  ])
+})

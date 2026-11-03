@@ -148,7 +148,85 @@ const DEFAULTS_ADDED_FROM_HAND_ROLLED_READS = {
   PORT: 8788
 }
 
+// The four that came with the price-source status, added 2026-11-02 with
+// docs/bugs.md B29. None of them existed before: poe.ninja answers were served
+// with no age limit, the merged exchange map lived as long as the process, and
+// a failing key was logged once per process.
+const DEFAULTS_ADDED_WITH_THE_SOURCE_STATUS = {
+  POE_SOURCE_STALE_MS: 3 * HOUR,
+  POE_NINJA_MAX_AGE_MS: 24 * HOUR,
+  POE_NINJA_MAP_TTL_MS: HOUR,
+  POE_NINJA_FAIL_LOG_MS: HOUR
+}
+
+// The six that came with farm sessions (networth/sessions.mjs), added
+// 2026-11-03. Display and bookkeeping only: none of them sends a request.
+const DEFAULTS_ADDED_WITH_FARM_SESSIONS = {
+  POE_SESSION_BASELINE_MAX_AGE_MS: 10 * 60 * 1000,
+  POE_SESSION_RATE_MIN_MS: 10 * 60 * 1000,
+  POE_SESSION_TOP_N: 5,
+  POE_SESSION_LIST_MAX: 20,
+  POE_SESSIONS_KEEP: 200,
+  POE_SESSION_FINALIZE_MAX_MS: 24 * HOUR
+}
+
+// The two bars of the Net-Worth uncertainty marker, added 2026-11-03. Display
+// only: they mark rows, they send nothing and change no total. Both defaults
+// are imported in the table from the module that argues them
+// (sell-side.mjs SELL_MIN_QUOTE_TURNOVER_C, corpse-pricer.mjs
+// CORPSE_MIN_LISTINGS); the literals here catch either one moving.
+const DEFAULTS_ADDED_WITH_THE_TRUST_MARKER = {
+  POE_NETWORTH_THIN_TURNOVER_C: 5000,
+  POE_NETWORTH_CORPSE_MIN_LISTINGS: 2
+}
+
+// The five of the hotkey daemon's own channel (daemon-feed.mjs,
+// daemon-presence.mjs), added 2026-11-03. Memory and LAN only: none of them
+// sends a request to GGG or poe.ninja.
+const DEFAULTS_ADDED_WITH_THE_DAEMON_CHANNEL = {
+  POE_DAEMON_POLL_MAX_HOLD_MS: 30_000,
+  POE_DAEMON_EVENTS_KEEP: 100,
+  POE_DAEMON_WAITERS_MAX: 4,
+  POE_DAEMON_FEED_MAX_AGE_MS: 120_000,
+  POE_DAEMON_BEAT_STALE_MS: 180_000
+}
+
+// The five of the buyer-whisper check (whisper-price.mjs), added 2026-11-03.
+// Memory only; the valuation reads cached poe.ninja/Faustus data and never
+// the trade API.
+const DEFAULTS_ADDED_WITH_BUYER_WHISPERS = {
+  POE_WHISPER_KEEP: 50,
+  POE_WHISPER_PRICE_DEADLINE_MS: 3000,
+  POE_WHISPER_MAX_PER_MIN: 60,
+  POE_WHISPER_LOW_RATIO: 0.85,
+  POE_WHISPER_HIGH_RATIO: 1.15
+}
+
+// The two of sync follows the game (networth/refresher.mjs, daemon-presence.mjs
+// makeHoldAfterGame), added 2026-11-03. Both can only move or drop stash
+// reads, never add one: they decide which tick a user whose game is not
+// running gets, and how long a stopped game keeps the playing pace.
+const DEFAULTS_ADDED_WITH_SYNC_FOLLOWS_THE_GAME = {
+  POE_NETWORTH_IDLE_EVERY: 10,
+  POE_SYNC_AFTER_GAME_MAX_MS: HOUR
+}
+
+// The gap that ends a game session (networth/session-control.mjs) and the
+// rate of the daemon's session key (POST /daemon/session), added 2026-11-03
+// with the game sessions. Memory and the sessions file only; they send nothing.
+const DEFAULTS_ADDED_WITH_GAME_SESSIONS = {
+  POE_SESSION_GAME_GAP_MS: 10 * 60 * 1000,
+  POE_DAEMON_SESSION_MAX_PER_MIN: 10
+}
+
 const ALL_DEFAULTS = {
+  ...DEFAULTS_ADDED_WITH_GAME_SESSIONS,
+  ...DEFAULTS_ADDED_WITH_SYNC_FOLLOWS_THE_GAME,
+  ...DEFAULTS_ADDED_WITH_BUYER_WHISPERS,
+  ...DEFAULTS_ADDED_WITH_THE_DAEMON_CHANNEL,
+  ...DEFAULTS_ADDED_WITH_THE_TRUST_MARKER,
+  ...DEFAULTS_ADDED_WITH_FARM_SESSIONS,
+  ...DEFAULTS_ADDED_WITH_THE_SOURCE_STATUS,
   ...DEFAULTS_BEFORE_THE_CHANGE,
   ...DEFAULTS_ADDED_SINCE,
   ...DEFAULTS_ADDED_WITH_THE_RULE_TTL,
@@ -170,13 +248,21 @@ test('the table covers every numeric setting of the config block, and nothing el
     [...NUMERIC_SETTINGS_BY_NAME.keys()].sort(),
     Object.keys(ALL_DEFAULTS).sort()
   )
-  assert.equal(NUMERIC_SETTINGS.length, 36,
+  assert.equal(NUMERIC_SETTINGS.length, 62,
     'eighteen call sites of the idiom, two stash budget shares, the seven ' +
     'positiveEnvInt sites converted on 2026-08-11, the stash rule TTL ' +
     'plus the two window resolutions added on 2026-08-13, and the localized ' +
     'coverage bar plus the status-line reason cap added on 2026-08-18, and the ' +
     'cooldown of the manual data check added with it, and the stash timeout, ' +
-    'the language skew bar and PORT that used to be read by hand')
+    'the language skew bar and PORT that used to be read by hand, and the ' +
+    'source stale bar, the poe.ninja max age, the exchange map TTL and the ' +
+    'poe.ninja failure-log repeat added with the source status on 2026-11-02, ' +
+    'and the six farm-session settings added on 2026-11-03, and the two bars ' +
+    'of the Net-Worth uncertainty marker added the same day, and the five of ' +
+    "the hotkey daemon's channel added the same day as well, and the five " +
+    'of the buyer-whisper check added with it, and the two of sync follows ' +
+    'the game added the same day, and the gap that ends a game session and ' +
+    "the rate of the daemon's session key")
 })
 
 test('the coverage bar honours a 0 and refuses a share that is not one', () => {
@@ -190,6 +276,21 @@ test('the coverage bar honours a 0 and refuses a share that is not one', () => {
   // Above 1 it is not a share of the baseline any more.
   assert.equal(read(name, '2'), 0.01, 'a value that is not a share falls back to the default')
   assert.equal(read(name, '-0.1'), 0.01)
+})
+
+test('the source thresholds refuse values below their floor and the log repeat honours 0', () => {
+  // One hour is Faustus' own refresh pace: below it a healthy source would be
+  // called stale between two ticks.
+  assert.equal(read('POE_SOURCE_STALE_MS', '600000'), 3 * HOUR)
+  assert.equal(read('POE_SOURCE_STALE_MS', String(2 * HOUR)), 2 * HOUR)
+  // A poe.ninja answer is up to 15 min old by design; serving less is no answer.
+  assert.equal(read('POE_NINJA_MAX_AGE_MS', '60000'), 24 * HOUR)
+  assert.equal(read('POE_NINJA_MAX_AGE_MS', String(6 * HOUR)), 6 * HOUR)
+  // Below 15 min a rebuild reads the same cached answers again.
+  assert.equal(read('POE_NINJA_MAP_TTL_MS', '0'), HOUR)
+  assert.equal(read('POE_NINJA_MAP_TTL_MS', '60000'), HOUR)
+  // 0 = log every failed attempt, bounded by the 15 min wait per key.
+  assert.equal(read('POE_NINJA_FAIL_LOG_MS', '0'), 0)
 })
 
 test('PORT=0 is a legal port (random), the other two hand-rolled reads have their ranges', () => {
@@ -257,6 +358,27 @@ test('the settings that accept a literal 0 accept it and hand it back', () => {
   assert.equal(read('POE_ASK_CONFLICT_ABS_GAP_C', '0'), 0, 'the ratio alone decides')
   assert.equal(read('POE_MIN_ASK_EVIDENCE', '0'), 0, 'no minimum listing count')
   assert.equal(read('POE_MIN_CONFLICT_HEADLINE_C', '0'), 0, 'mark sub-chaos headlines too')
+  // Farm sessions: an hourly figure for every session, and no item lists.
+  assert.equal(read('POE_SESSION_RATE_MIN_MS', '0'), 0, 'an hourly figure for every session')
+  assert.equal(read('POE_SESSION_TOP_N', '0'), 0, 'name no items, keep the totals')
+  // The uncertainty marker: 0 marks nothing (it only ever marks).
+  assert.equal(read('POE_NETWORTH_THIN_TURNOVER_C', '0'), 0, 'mark nothing as thin market')
+  assert.equal(read('POE_NETWORTH_CORPSE_MIN_LISTINGS', '0'), 0, 'never mark a corpse price')
+  // Buyer whispers: keep nothing for the page, answer every whisper 'pending'.
+  assert.equal(read('POE_WHISPER_KEEP', '0'), 0, 'keep no whisper for the page')
+  assert.equal(read('POE_WHISPER_PRICE_DEADLINE_MS', '0'), 0, 'every answer pending at once')
+  // The deadline stays under the daemon's 5 s HTTP limit, the band on its side of 1.
+  assert.equal(read('POE_WHISPER_PRICE_DEADLINE_MS', '5000'), 3000, 'past 4000 the daemon would give up first')
+  assert.equal(read('POE_WHISPER_LOW_RATIO', '1.2'), 0.85, 'the low bar is at most 1')
+  assert.equal(read('POE_WHISPER_HIGH_RATIO', '0.9'), 1.15, 'the high bar is at least 1')
+  assert.equal(read('POE_WHISPER_LOW_RATIO', '0.8'), 0.8)
+  assert.equal(read('POE_WHISPER_HIGH_RATIO', '1.25'), 1.25)
+  assert.equal(read('POE_NETWORTH_CORPSE_MIN_LISTINGS', '1.5'), 2, 'listings are counted, not measured')
+  // Sync follows the game: a stopped game yields at once.
+  assert.equal(read('POE_SYNC_AFTER_GAME_MAX_MS', '0'), 0, 'a stopped game yields at once')
+  assert.equal(read('POE_SESSION_GAME_GAP_MS', '0'), 10 * 60 * 1000, 'a gap of none would end an evening at every game restart')
+  assert.equal(read('POE_SESSION_GAME_GAP_MS', '59999'), 10 * 60 * 1000)
+  assert.equal(read('POE_SESSION_GAME_GAP_MS', '60000'), 60_000)
   // The two readers that live with their own module go through the same rule.
   assert.equal(slowStepMsFromEnv({ POE_NETWORTH_SLOW_STEP_MS: '0' }), 0)
   assert.equal(guardOptionsFromEnv({ POE_NETWORTH_GUARD_ARRIVAL_MIN_DIVINE: '0' }).arrivalMinDivine, 0)
@@ -279,7 +401,25 @@ test('a 0 that would be dangerous or meaningless is refused, loudly, for the def
     // The two of the seven late converts with no sensible zero: a room that
     // evicts every card as fast as it is created, and a conflict ratio that
     // marks every card there is.
-    'POE_MAX_ITEMS_PER_ROOM', 'POE_ASK_CONFLICT_RATIO'
+    'POE_MAX_ITEMS_PER_ROOM', 'POE_ASK_CONFLICT_RATIO',
+    // The price-source status (B29): "always stale", "never serve an answer",
+    // "rebuild the exchange map on every valuation".
+    'POE_SOURCE_STALE_MS', 'POE_NINJA_MAX_AGE_MS', 'POE_NINJA_MAP_TTL_MS',
+    // Farm sessions: "refuse every start", "list nothing", "keep nothing",
+    // "close every session unconfirmed at once".
+    'POE_SESSION_BASELINE_MAX_AGE_MS', 'POE_SESSION_LIST_MAX', 'POE_SESSIONS_KEEP',
+    'POE_SESSION_FINALIZE_MAX_MS',
+    // The daemon channel: "keep no event", "hold no request", "forget every
+    // card at once", "every daemon is silent".
+    'POE_DAEMON_EVENTS_KEEP', 'POE_DAEMON_WAITERS_MAX', 'POE_DAEMON_FEED_MAX_AGE_MS',
+    'POE_DAEMON_BEAT_STALE_MS',
+    // Buyer whispers: "accept none", "every price is below and above at once".
+    'POE_WHISPER_MAX_PER_MIN', 'POE_WHISPER_LOW_RATIO', 'POE_WHISPER_HIGH_RATIO',
+    // The daemon's session key: "accept none".
+    'POE_DAEMON_SESSION_MAX_PER_MIN',
+    // Sync follows the game: "the idle users never get a tick" is the switch
+    // POE_NETWORTH_IDLE_REST=1, not a 0 here.
+    'POE_NETWORTH_IDLE_EVERY'
   ]
   for (const name of refuseZero) {
     const log = recorder()
@@ -339,7 +479,7 @@ test('a range is enforced instead of silently clamped', () => {
   assert.equal(read('POE_MAX_LISTINGS', '11'), 10)
   assert.equal(read('POE_MAX_LISTINGS', '-5'), 10)
   assert.equal(read('POE_MAX_LISTINGS', '2.5'), 10, 'a fraction of a listing is not a thing')
-  // The three that used to be written as Math.max(…) clamps.
+  // The three that a Math.max(…) clamp would otherwise silently lift.
   assert.equal(read('POE_DATA_STALE_TICKS', '0.5'), 3)
   assert.equal(read('POE_GAP_LOG_TEXT_MAX', '10'), 400)
   assert.equal(read('POE_UPDATE_HEARTBEAT_MAX_AGE_MS', '1000'), 20 * 60 * 1000)
@@ -493,4 +633,27 @@ test('POE_CORPSE_BUDGET_PER_HOUR=0 really does query nothing', async () => {
   } finally {
     await rm(dir, { recursive: true, force: true })
   }
+})
+
+test("the daemon channel's hold honours a 0 and stays under a proxy's usual read timeout", () => {
+  // 0: every GET /daemon/events is answered at once, and the daemon paces itself.
+  assert.equal(read('POE_DAEMON_POLL_MAX_HOLD_MS', '0'), 0)
+  assert.equal(read('POE_DAEMON_POLL_MAX_HOLD_MS', '45000'), 45_000)
+  // 60 s is the usual reverse-proxy read timeout; a hold at or past it cuts every poll.
+  assert.equal(read('POE_DAEMON_POLL_MAX_HOLD_MS', '60000'), 30_000)
+  assert.equal(read('POE_DAEMON_EVENTS_KEEP', '5'), 100, 'fewer than 10 events per user is refused')
+  assert.equal(read('POE_DAEMON_WAITERS_MAX', '33'), 4)
+  assert.equal(read('POE_DAEMON_FEED_MAX_AGE_MS', '5000'), 120_000)
+  assert.equal(read('POE_DAEMON_BEAT_STALE_MS', '30000'), 180_000, 'under a minute a beat a minute would flicker')
+})
+
+test('POE_NETWORTH_IDLE_EVERY refuses 1 (the players would get no tick) and takes 2', () => {
+  for (const bad of ['1', '0', '1.5', '1001']) {
+    const log = recorder()
+    assert.equal(read('POE_NETWORTH_IDLE_EVERY', bad, log), 10, `${bad} falls back to 10`)
+    assert.equal(log.lines.length, 1, `${bad} is reported`)
+    assert.match(log.lines[0], /POE_NETWORTH_IDLE_REST=1/, 'the line names the switch for resting completely')
+  }
+  assert.equal(read('POE_NETWORTH_IDLE_EVERY', '2'), 2)
+  assert.equal(read('POE_NETWORTH_IDLE_EVERY', '1000'), 1000)
 })

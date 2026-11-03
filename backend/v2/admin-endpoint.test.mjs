@@ -172,8 +172,8 @@ test('admin endpoint: password partition, gap list and dataset offset', { timeou
 
     // ---- 4. where the localized set came from -------------------------------
     // The skew rows are a distance and say nothing about WHEN or FROM WHAT the
-    // set was made — "is anything still generating this" used to be answerable
-    // only from the container log.
+    // set was made — so "is anything still generating this" has to be
+    // answerable without the container log.
     assert.ok(Array.isArray(body.langBuild), 'the answer carries the provenance block')
     assert.deepEqual(body.langBuild.map(b => b.lang), ['de'],
       'one row per generated language, English excluded — it has no run of its own')

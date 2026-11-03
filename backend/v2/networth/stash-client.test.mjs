@@ -173,9 +173,9 @@ test('fetchAllTabs: sequential, correct URLs (tabs=1 then tabIndex=N&tabs=0), Co
   assert.equal(all[1].items[0].typeLine, 'item-of-tab-1')
 })
 
-// A 429 used to be slept off (Retry-After+1, capped at 90s) and retried up to
-// maxRetries times — six requests into a throttle GGG had already declared.
-// It now costs exactly ONE request, and the wait becomes the caller's cooldown.
+// A 429 is not slept off (Retry-After+1, capped at 90s) and retried up to
+// maxRetries times — six requests into a throttle GGG has already declared.
+// It costs exactly ONE request, and the wait becomes the caller's cooldown.
 test('429 -> propagated at once, exactly ONE request, no client-side retry', async () => {
   let n = 0
   const fetchImpl = async () => { n++; return res(429, { 'Retry-After': '0' }, {}) }
@@ -452,7 +452,7 @@ test('collection tab: sub-tabs that answer without items make the tab UNREAD, wi
   assert.equal(lines.log.length, 2)
   assert.match(lines.log[0], /folder tab "Maps" \(MapStash\): reading sub-tabs/)
   assert.match(lines.log[1], /sub-tab shape as GGG returns it/)
-  // …and the line, with the same numbers that used to say where the items went.
+  // …and the line, with the numbers that say where the items went.
   assert.equal(lines.warn.length, 1)
   assert.match(lines.warn[0], /folder tab "Maps" \(MapStash\) was NOT read in full/)
   assert.match(lines.warn[0], /3 sub-tabs/)
@@ -559,10 +559,10 @@ test('collection tab without an id -> old endpoint (no guessing against the new 
   assert.match(calls[0], /character-window\/get-stash-items/)
 })
 
-// This used to degrade to an empty array, on the argument that a scan must keep
-// running past an endpoint that can change under it. The scan does keep running
-// — every caller skips an `unread` tab exactly the way it skips a timeout — but
-// it no longer keeps running while OVERWRITING the tab with nothing, which is
+// Not an empty array, although a scan must keep running past an endpoint that
+// can change under it. The scan does keep running — every caller skips an
+// `unread` tab exactly the way it skips a timeout — but it does not keep
+// running while OVERWRITING the tab with nothing, which is
 // the part that reached the recorder as a whole tab leaving the stash
 // (docs/bugs.md B2).
 test('collection tab: a 404 from the new endpoint is UNREAD, not empty, and a ratelimit propagates', async () => {

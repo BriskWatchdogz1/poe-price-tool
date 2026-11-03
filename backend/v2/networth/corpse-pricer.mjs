@@ -10,7 +10,10 @@
 // (divine via the SHARED live C:D, the same value Faustus uses — no second
 // constant) -> each = average of the 5 CHEAPEST (fewer than 5 -> what exists;
 // 0 results -> null). The result (INCLUDING null) goes into the corpse store so
-// illiquid corpses aren't re-queried until the entry goes stale.
+// illiquid corpses aren't re-queried until the entry goes stale. The count of
+// usable listings is stored with the price (`n`), so the valuator can mark a
+// price from too few offers (docs/pricing-logic.md, "Uncertain prices"); it
+// falls out of the same search, no extra request.
 //
 // Modelled on faustus-refresher's shape (overlap guard, .unref()'d interval,
 // start/stop/tickOnce) but paces ONE name per tick with a hard hourly budget.
@@ -18,6 +21,13 @@ const DEFAULT_INTERVAL_MS = 2 * 60 * 1000 // 2min/name -> ~30/h ceiling; budget 
 const WINDOW_MS = 60 * 60 * 1000
 
 const isImperfect = name => typeof name === 'string' && name.startsWith('Imperfect ')
+
+// Default bar of the Net-Worth "few listings" marker: a corpse price averaged
+// from fewer usable trade offers than this is marked uncertain. 2 marks
+// exactly a price from ONE offer — one seller's ask, which says little about
+// what the corpse sells for. It only marks; no price changes. numeric-settings
+// imports it as the default of POE_NETWORTH_CORPSE_MIN_LISTINGS.
+export const CORPSE_MIN_LISTINGS = 2
 
 // Normalise a buyout to chaos. Only the two currencies we can price are kept:
 // chaos 1:1 and divine via the shared C:D. ANY other priceCurrency (exalted,
@@ -37,14 +47,17 @@ function toChaos (listing, cdRatio) {
   return null // unknown/exotic currency -> drop this listing
 }
 
+// { each, n }: each = the average of the 5 cheapest usable listings (null when
+// there is none), n = how many usable listings there were BEFORE the cut to
+// five — the evidence behind the number.
 function averageOf5Cheapest (listings, cdRatio) {
   const chaos = listings
     .map(l => toChaos(l, cdRatio))
     .filter(v => typeof v === 'number' && isFinite(v) && v >= 0)
     .sort((a, b) => a - b)
-  if (!chaos.length) return null // 0 results / all unparseable -> honestly unpriced (cached as null)
+  if (!chaos.length) return { each: null, n: 0 } // 0 results / all unparseable -> honestly unpriced (cached as null)
   const take = chaos.slice(0, 5)
-  return take.reduce((a, b) => a + b, 0) / take.length
+  return { each: take.reduce((a, b) => a + b, 0) / take.length, n: chaos.length }
 }
 
 export function createCorpsePricer ({
@@ -107,8 +120,8 @@ export function createCorpsePricer ({
     try {
       const listings = await tradeClient.searchListings(name, league, { maxFetch })
       const cd = await resolveCd()
-      const each = averageOf5Cheapest(listings, cd) // number or null (0 results)
-      await store.setPrice(league, name, each, now())
+      const { each, n } = averageOf5Cheapest(listings, cd) // each: number or null (0 results)
+      await store.setPrice(league, name, each, now(), n)
       onPriced(name, each)
     } catch (e) {
       if (e?.code === 'CIRCUIT_OPEN') return // breaker tripped -> stay quiet, leave the entry as-is

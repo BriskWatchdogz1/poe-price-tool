@@ -351,12 +351,15 @@ test('Price Check: card, mod editor and every transient price state are German',
       })
       await waitFor('!document.getElementById("appStatus").hidden', 'the data-freshness note never appeared')
       assert.equal(await text('#appStatus'),
-        'Automatische Datenaktualisierung: keine erfolgreiche Prüfung von poe.ninja seit 2 Tage — das Werkzeug läuft mit den vorhandenen Daten weiter.')
+        'Automatische Datenaktualisierung: keine erfolgreiche Prüfung von poe.ninja seit 2 Tagen — das Werkzeug läuft mit den vorhandenen Daten weiter.')
 
       // ---- empty state -----------------------------------------------------
       await evalJs('document.getElementById("clear").click()')
       await waitFor('document.getElementById("empty").style.display !== "none"', 'the empty state never came back')
-      assert.equal(await text('#empty'), 'Keine Gegenstände in der Warteschlange. Prüfe im Spiel einen Gegenstand.')
+      assert.equal(await text('#empty [data-i18n="pc.empty"]'), 'Keine Gegenstände in der Warteschlange. Prüfe im Spiel einen Gegenstand.')
+      // The second sentence (daemon-status, sent on connect) is German too.
+      await waitFor('document.getElementById("emptyHint").textContent !== ""', 'the daemon hint never appeared')
+      assert.match(await text('#emptyHint'), /Hotkey-Daemon/)
     } finally {
       mod.users.get('de1').items.clear()
     }
@@ -534,7 +537,7 @@ test('Settings: the sync section, the admin gate and the whole admin view are Ge
 
     // ---- client language (the user's own setting, first section) ----------
     const heads = await evalJs('[...document.querySelectorAll(".sect h2")].map(e => e.textContent)')
-    assert.deepEqual(Array.from(heads), ['Sprache des Spiel-Clients', 'Sync-Einstellungen', 'Versionen', 'Admin-Bereich'])
+    assert.deepEqual(Array.from(heads), ['Sprache des Spiel-Clients', 'Sync-Einstellungen', 'Versionen', 'Quellen', 'Admin-Bereich'])
     assert.match(await text('.sect .lead'), /^Wähle die Sprache, in der dein Spiel läuft/)
     assert.equal(await evalJs('document.querySelector("label[for=langSel] span").textContent'),
       'Sprache deines Spiel-Clients')
@@ -559,7 +562,7 @@ test('Settings: the sync section, the admin gate and the whole admin view are Ge
     assert.ok(!(await evalJs('document.getElementById("langNote").hidden')),
       'the "not persisted" note is missing although /config is not writable here')
     assert.equal(await text('#langNote'),
-      'Dieser Server kann sein /config-Volume nicht beschreiben: deine Wahl gilt jetzt, ist aber beim nächsten Neustart des Servers wieder weg.')
+      'Dieser Server kann deine Wahl gerade nicht speichern (sein Log nennt den Grund, meist ein nicht beschreibbares /config): sie gilt jetzt, ist aber beim nächsten Neustart des Servers wieder weg.')
 
     // the plausibility hint is its own dynamic state
     await evalJs(`(() => { const s = document.getElementById('setSessid'); s.value = 'zu-kurz'; s.dispatchEvent(new Event('input')) })()`)
@@ -734,7 +737,9 @@ test('the English user still gets English — the language comes from the mappin
     await S('Page.navigate', { url: base + '/' })
     await waitFor('window.I18n && window.I18n.lang() === "en"', 'the English user did not resolve to English')
     assert.equal(await text('.mhead h1'), 'Checked items')
-    assert.equal(await text('#empty'), 'No items in the queue. Price-check something in-game.')
+    assert.equal(await text('#empty [data-i18n="pc.empty"]'), 'No items in the queue. Price-check something in-game.')
+    await waitFor('document.getElementById("emptyHint").textContent !== ""', 'the daemon hint never appeared')
+    assert.match(await text('#emptyHint'), /hotkey daemon/)
     assert.equal(await text('#clear'), 'Clear all')
 
     await S('Page.navigate', { url: base + '/networth.html' })
@@ -746,7 +751,12 @@ test('the English user still gets English — the language comes from the mappin
     await waitFor('window.I18n && window.I18n.lang() === "en"', 'the settings page did not resolve to English')
     assert.equal(await text('.mhead h1'), 'Settings')
     const heads = await evalJs('[...document.querySelectorAll(".sect h2")].map(e => e.textContent)')
-    assert.deepEqual(Array.from(heads), ['Client language', 'Sync settings', 'Releases', 'Admin area'])
+    assert.deepEqual(Array.from(heads), ['Client language', 'Sync settings', 'Releases', 'Sources', 'Admin area'])
+    // The Sources block (B29) is filled from GET /source-status, one row per source.
+    await waitFor('document.querySelectorAll("#srcRows tr").length === 4', 'the Sources block never filled')
+    const srcNames = await evalJs('[...document.querySelectorAll("#srcRows tr td:first-child")].map(e => e.textContent)')
+    assert.deepEqual(Array.from(srcNames),
+      ['Faustus prices (GGG Currency Exchange)', 'poe.ninja Chaos:Divine', 'poe.ninja prices', 'Trade API'])
     assert.equal(await text('#admOpen'), 'Open')
     await waitFor('document.getElementById("langSel").value === "en"',
       'the English user is not shown as being on English')

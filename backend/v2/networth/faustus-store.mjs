@@ -3,8 +3,9 @@
 // old Faustus history, so this store is what lets valuation (Task 4) work
 // immediately on boot, before the hourly refresher's first successful tick.
 // Atomic save (tmp+rename with a unique tmp name per writer), ENOENT-tolerant
-// load, corrupt/old-schema-tolerant (rebuildable cache, never a backup) — 1:1
-// the discipline from networth/store.mjs.
+// load; an unusable file is moved aside, a newer one left alone
+// (store-file.mjs) — a rebuildable cache, never a backup, but one that does not
+// write over what it could not read. 1:1 the discipline from networth/store.mjs.
 //
 // Shape (/config/faustus-store.json):
 //   { schema_version: 1, updatedAt: <ms epoch|null>, league: <string|null>,
@@ -12,11 +13,12 @@
 //     ranges?: { "<name>": [min, max] },    // chaos per piece, OPTIONAL
 //     sell?:   { "<name>": { c?: [perItem, volX, volQuote],
 //                            d?: [perItem, volX, volQuote] } }, // OPTIONAL
-//     hours?:  { "<name>": <unix hour the price was OBSERVED in> } } // OPTIONAL
+//     hours?:  { "<name>": <unix hour the price was OBSERVED in> }, // OPTIONAL
+//     turnover?: { "<name>": <chaos that changed hands behind the price, in its hour> } } // OPTIONAL
 //
-// `ranges`, `sell` and `hours` are deliberately NOT schema bumps: they are
-// purely additive and a file written before they existed must keep loading (it
-// then simply has no ranges/sell/hours until the next refresh tick), and a
+// `ranges`, `sell`, `hours` and `turnover` are deliberately NOT schema bumps:
+// they are purely additive and a file written before they existed must keep
+// loading (it then simply has none of them until the next refresh tick), and a
 // downgrade must not wipe the prices. `sell` mirrors the pricer's per-market
 // sell rates
 // (faustus.mjs detail.sell): chaos (`c`) and divine (`d`) side kept separate,
@@ -29,12 +31,18 @@
 // a price was observed. The union walk takes the newest hour in which a market
 // was informative, so two prices written by the same tick can be eight hours
 // apart — see networth/faustus-age.mjs for what reads this and why.
-import { readFile, writeFile, rename, unlink } from 'node:fs/promises'
+//
+// `turnover` is the evidence behind each price: the chaos that changed hands on
+// the quote side of the market hour the price came from (faustus.mjs
+// detail.turnoverC). Only the Net-Worth "thin market" marker reads it
+// (valuator.mjs thinMarket); a missing value means "unknown", not "thin".
+import { writeFile, rename, unlink } from 'node:fs/promises'
+import { loadVersionedJson } from '../store-file.mjs'
 
 const SCHEMA_VERSION = 1
 
 function emptyStore () {
-  return { schema_version: SCHEMA_VERSION, updatedAt: null, league: null, prices: {}, ranges: {}, sell: {}, hours: {} }
+  return { schema_version: SCHEMA_VERSION, updatedAt: null, league: null, prices: {}, ranges: {}, sell: {}, hours: {}, turnover: {} }
 }
 
 // One persisted sell side ([perItem, volX, volQuote]) from a pricer-side
@@ -60,29 +68,28 @@ function unpackSellSide (a) {
 
 let tmpCounter = 0
 
-export function createFaustusStore (filePath) {
+export function createFaustusStore (filePath, { log = console } = {}) {
   const store = {
     data: emptyStore(),
     // Flipped to false by the server when /config isn't writable (e.g. a
     // local run without the volume) -> setPrices()/save() become no-ops
     // instead of throwing on every refresh tick.
+    // Also false when load() found a file from a newer release or one it could
+    // not move aside: the store then runs in memory and leaves that file alone.
     writable: true,
 
     async load () {
-      let raw
-      try {
-        raw = await readFile(filePath, 'utf8')
-      } catch (err) {
-        if (err.code === 'ENOENT') { store.data = emptyStore(); return }
-        throw err
-      }
-      let parsed
-      try { parsed = JSON.parse(raw) } catch { store.data = emptyStore(); return }
-      if (!parsed || parsed.schema_version !== SCHEMA_VERSION ||
-          typeof parsed.prices !== 'object' || parsed.prices === null) {
-        store.data = emptyStore(); return
-      }
-      store.data = parsed
+      // Missing -> empty. Unusable -> moved aside, empty. From a newer release
+      // -> left alone, in memory only (store-file.mjs).
+      const r = await loadVersionedJson(filePath, {
+        tag: 'faustus-store',
+        schemaVersion: SCHEMA_VERSION,
+        shapeProblem: d => (d.prices && typeof d.prices === 'object' && !Array.isArray(d.prices)) ? null : 'prices is missing or not an object',
+        emptyMeans: 'starting empty, Faustus prices return with the next refresh (poe.ninja until then)',
+        log
+      })
+      store.data = r.data ?? emptyStore()
+      if (!r.writable) store.writable = false
     },
 
     async save () {
@@ -118,7 +125,11 @@ export function createFaustusStore (filePath) {
     // seconds survive: a bad stamp must not be able to make a price look older
     // or younger than it is, and no stamp at all is read downstream as "age
     // unknown", never as "fresh" (networth/faustus-age.mjs).
-    async setPrices (league, prices, now = Date.now(), ranges = null, sell = null, hours = null) {
+    //
+    // `turnover` (optional, Map or object of name -> chaos) carries the chaos
+    // turnover behind each price (faustus.mjs detail.turnoverC). Only finite
+    // numbers >= 0 survive; zero is evidence of nothing traded, not a gap.
+    async setPrices (league, prices, now = Date.now(), ranges = null, sell = null, hours = null, turnover = null) {
       const obj = {}
       const entries = prices instanceof Map ? prices.entries() : Object.entries(prices || {})
       for (const [name, chaos] of entries) {
@@ -148,7 +159,12 @@ export function createFaustusStore (filePath) {
       for (const [name, at] of hEntries) {
         if (typeof at === 'number' && isFinite(at) && at > 0) hrs[name] = at
       }
-      store.data = { schema_version: SCHEMA_VERSION, updatedAt: now, league, prices: obj, ranges: rng, sell: sl, hours: hrs }
+      const tov = {}
+      const tEntries = turnover instanceof Map ? turnover.entries() : Object.entries(turnover || {})
+      for (const [name, c] of tEntries) {
+        if (typeof c === 'number' && isFinite(c) && c >= 0) tov[name] = c
+      }
+      store.data = { schema_version: SCHEMA_VERSION, updatedAt: now, league, prices: obj, ranges: rng, sell: sl, hours: hrs, turnover: tov }
       if (store.writable) await store.save()
     },
 
@@ -174,6 +190,14 @@ export function createFaustusStore (filePath) {
     getHour (name) {
       const v = store.data.hours?.[name]
       return (typeof v === 'number' && isFinite(v) && v > 0) ? v : null
+    },
+
+    // The chaos turnover behind a name's price, or null — including for every
+    // file written before `turnover` existed. Null means "unknown", not "thin":
+    // the valuator does not mark a Faustus price it has no evidence about.
+    getTurnover (name) {
+      const v = store.data.turnover?.[name]
+      return (typeof v === 'number' && isFinite(v) && v >= 0) ? v : null
     },
 
     // Separated sell rates for a name: { chaos: {perItem,volX,volQuote}|null,

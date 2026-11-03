@@ -30,6 +30,16 @@ if ! "$DIR/selftest.sh" --tools; then
   exit 1
 fi
 
+# Not prerequisites, so not gated above: the daemon runs without them. The
+# tools check names a missing xdotool as a warning when game detection is on
+# ([presence] report_game, the default), which does not stop the install.
+echo "Optional: notify-send (libnotify) for results as a notification; PySide6 plus"
+echo "xdotool and xprop (Arch: pyside6 xdotool xorg-xprop) for the overlay over the"
+echo "game, which is shown only while the game has focus. xdotool also tells the"
+echo "server whether your game runs, so the net-worth sync reads the stash of whoever"
+echo "plays first (without it your sync keeps its normal pace). The self-test at the"
+echo "end says which of them work."
+
 # 2) Enable the ydotool daemon (used by the chat macros; price check itself
 # needs no ydotool, just xsel (wl-paste fallback) + curl).
 systemctl --user enable --now ydotool 2>/dev/null || warn "Could not enable ydotool service — is ydotoold running?"

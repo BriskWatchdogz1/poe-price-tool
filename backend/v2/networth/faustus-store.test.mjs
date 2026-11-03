@@ -1,7 +1,7 @@
 // faustus-store.mjs — get/set/isFresh/atomic-persist round-trip.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, writeFile, readdir, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createFaustusStore } from './faustus-store.mjs'
@@ -82,21 +82,49 @@ test('atomic save: no .tmp file left behind, load() reads back exactly', async (
   await cleanup()
 })
 
-test('load() tolerates broken JSON -> empty store, no crash', async () => {
-  const { dir, p, s, cleanup } = await fresh()
-  const { writeFile } = await import('node:fs/promises')
+function recorder () {
+  const warnings = []
+  return { warnings, log: { warn: m => warnings.push(m), log: () => {} } }
+}
+
+test('broken JSON is moved aside with one warning, the store starts empty', async () => {
+  const { dir, p, cleanup } = await fresh()
   await writeFile(p, '{not json', 'utf8')
+  const { warnings, log } = recorder()
+  const s = createFaustusStore(p, { log })
   await s.load()
   assert.deepEqual(s.data.prices, {})
+  assert.equal((await readdir(dir)).filter(f => /^faustus\.json\.broken-/.test(f)).length, 1)
+  assert.equal(warnings.length, 1)
+  assert.ok(warnings[0].includes('Faustus prices return with the next refresh'))
+  assert.equal(s.writable, true)
   await cleanup()
 })
 
-test('load() tolerates a wrong schema_version -> empty store', async () => {
-  const { p, s, cleanup } = await fresh()
-  const { writeFile } = await import('node:fs/promises')
-  await writeFile(p, JSON.stringify({ schema_version: 99, prices: { A: 1 } }), 'utf8')
+test('a file from a newer release (schema_version 99) is left byte for byte and nothing is written', async () => {
+  const { p, cleanup } = await fresh()
+  const original = JSON.stringify({ schema_version: 99, prices: { A: 1 } })
+  await writeFile(p, original, 'utf8')
+  const { warnings, log } = recorder()
+  const s = createFaustusStore(p, { log })
   await s.load()
   assert.deepEqual(s.data.prices, {})
+  assert.equal(s.writable, false)
+  await s.setPrices('Standard', { A: 2 })
+  assert.equal(s.getPrice('A'), 2)
+  assert.equal(await readFile(p, 'utf8'), original)
+  assert.equal(warnings.length, 1)
+  await cleanup()
+})
+
+test('prices that is not an object is moved aside', async () => {
+  const { dir, p, cleanup } = await fresh()
+  await writeFile(p, JSON.stringify({ schema_version: 1, prices: [] }), 'utf8')
+  const { warnings, log } = recorder()
+  const s = createFaustusStore(p, { log })
+  await s.load()
+  assert.equal((await readdir(dir)).filter(f => /^faustus\.json\.broken-/.test(f)).length, 1)
+  assert.ok(warnings[0].includes('prices is missing or not an object'))
   await cleanup()
 })
 
@@ -207,5 +235,33 @@ test('a file written before `hours` existed loads cleanly and reports the age as
   s.data = { schema_version: 1, updatedAt: Date.now(), league: 'Standard', prices: { A: 7 } }
   assert.equal(s.getPrice('A'), 7)
   assert.equal(s.getHour('A'), null)
+  await cleanup()
+})
+
+// docs/pricing-logic.md "Uncertain prices": the chaos turnover behind each
+// price, additive like `hours`. Null means "unknown", never "thin".
+test('turnover round-trips, a file without it loads, a bad value is dropped', async () => {
+  const { p, s, cleanup } = await fresh()
+  await s.setPrices('Standard', { A: 4.6, B: 1, C: 2, D: 3 }, Date.now(), null, null, null,
+    new Map([['A', 55], ['B', NaN], ['C', -1], ['D', 0]]))
+  assert.equal(s.getTurnover('A'), 55)
+  assert.equal(s.getTurnover('B'), null)
+  assert.equal(s.getTurnover('C'), null)
+  assert.equal(s.getTurnover('D'), 0, 'zero is evidence (of nothing traded), not a missing value')
+  assert.equal(s.getTurnover('Unknown'), null)
+  assert.deepEqual(JSON.parse(await readFile(p, 'utf8')).turnover, { A: 55, D: 0 })
+  // A plain object is accepted like the other optional maps.
+  await s.setPrices('Standard', { A: 4.6 }, Date.now(), null, null, null, { A: 12000 })
+  assert.equal(s.getTurnover('A'), 12000)
+  // Omitted -> no turnover at all.
+  await s.setPrices('Standard', { A: 4.6 })
+  assert.equal(s.getTurnover('A'), null)
+
+  // A file written before the field existed.
+  await writeFile(p, JSON.stringify({ schema_version: 1, updatedAt: 1, league: 'Standard', prices: { A: 4.6 } }))
+  const s2 = createFaustusStore(p)
+  await s2.load()
+  assert.equal(s2.getPrice('A'), 4.6)
+  assert.equal(s2.getTurnover('A'), null)
   await cleanup()
 })

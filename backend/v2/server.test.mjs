@@ -13,14 +13,14 @@
 // by this comment.
 //
 // POE_PRICE_CHECK_DISABLED=1 turns off the FOREGROUND one those four never
-// covered: every POST below creates a card, and a card used to be auto-priced
-// against www.pathofexile.com. Nothing here asserts on a price — the file is
-// about routing, dedupe, the room cap and the requeue — so the searches were
-// pure collateral, and they were also what kept this process alive after the
-// last test: APT's RateLimiter books each spent request as a timer running for
+// covered: every POST below creates a card, and a card is auto-priced against
+// www.pathofexile.com. Nothing here asserts on a price — the file is about
+// routing, dedupe, the room cap and the requeue — so the searches would be
+// pure collateral, and they would also keep this process alive after the last
+// test: APT's RateLimiter books each spent request as a timer running for
 // the window it read out of GGG's headers (302 s, 21602 s), and the engine's
 // response cache adds its own expiry timer. `mod.server.close()` in after()
-// closes the HTTP server; those timers are what was left.
+// closes the HTTP server; those timers would be what is left.
 import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { WebSocket } from 'ws'
@@ -42,7 +42,7 @@ process.env.POE_REFERENCE_ON_CONNECT_DISABLED = '1'
 process.env.POE_PRICE_CHECK_DISABLED = '1'
 process.env.POE_APP_NAME = 'Custom Console'
 // Dedicated users so the robustness tests don't fight the dedup tests' rooms.
-process.env.POE_USERS = 'player1,player2,capuser,requser,xuser'
+process.env.POE_USERS = 'player1,player2,capuser,requser,xuser,dsuser,dsother'
 // Small caps -> the tests can exercise eviction/requeue without posting 50+.
 process.env.POE_MAX_ITEMS_PER_ROOM = '3'
 process.env.POE_MAX_REQUEUE_ON_RECONNECT = '2'
@@ -294,6 +294,57 @@ test('POST /item: a missing X-User still falls back to USERS[0] (headerless stay
   const r = await fetch(`http://${base}/item`, { method: 'POST', body: belt('Mageblood') }).then(async x => ({ status: x.status, body: await x.json() }))
   assert.equal(r.status, 200, 'still 200 without the header')
   assert.equal(r.body.user, 'player1', 'lands in the USERS[0] room')
+})
+
+// --- daemon-status: did anything arrive from this player's hotkey daemon? ----
+// The empty Price Check page has no other way to tell "the daemon reaches the
+// server, nothing was copied" from "nothing reaches the server at all".
+
+/** A WS in `user`'s room that records every `daemon-status` it gets. */
+async function daemonStatusWatcher (user) {
+  const ws = new WebSocket(`ws://${base}/events`, { headers: { cookie: `ppt_user=${user}` } })
+  const seen = []
+  ws.on('message', d => { try { const m = JSON.parse(d.toString()); if (m.type === 'daemon-status') seen.push(m) } catch {} })
+  await new Promise((resolve, reject) => { ws.on('open', resolve); ws.on('error', reject) })
+  await new Promise(resolve => setTimeout(resolve, 150)) // the opening messages
+  return { ws, seen }
+}
+
+test('daemon-status: a fresh room reports that nothing has arrived yet', async () => {
+  const { ws, seen } = await daemonStatusWatcher('dsother')
+  ws.close()
+  assert.equal(seen.length, 1, 'one daemon-status among the opening messages')
+  assert.equal(seen[0].lastItemAt, null)
+  assert.equal(seen[0].outcome, null)
+  assert.equal(typeof seen[0].now, 'number', 'the server clock rides along, like data-status')
+})
+
+test('daemon-status: POST /item stamps the room and tells that room only', async () => {
+  const mine = await daemonStatusWatcher('dsuser')
+  const other = await daemonStatusWatcher('dsother')
+  const t0 = Date.now()
+  const r = await postAs('dsuser', belt('Mageblood'))
+  await new Promise(resolve => setTimeout(resolve, 200))
+  mine.ws.close()
+  other.ws.close()
+  assert.equal(r.status, 200)
+  assert.equal(mine.seen.length, 2, 'the opening one, then one for the POST')
+  const last = mine.seen[1]
+  assert.ok(last.lastItemAt >= t0 && last.lastItemAt <= Date.now(), `lastItemAt ${last.lastItemAt}`)
+  assert.equal(last.outcome, 'card')
+  assert.equal(other.seen.length, 1, 'another room hears nothing about it')
+  assert.equal(mod.users.get('dsuser').lastItemOutcome, 'card')
+})
+
+test('daemon-status: a refused text is reported as parse-failed, an unknown user changes no room', async () => {
+  const r = await postAs('dsuser', 'this is not an item text at all\nsecond line\n')
+  assert.ok(r.status >= 400, `status ${r.status}`)
+  assert.equal(mod.users.get('dsuser').lastItemOutcome, 'parse-failed')
+
+  const before = [...mod.users.values()].map(room => room.lastItemAt)
+  const typo = await postAs('dsuserr' /* typo */, belt('Mageblood'))
+  assert.equal(typo.status, 400)
+  assert.deepEqual([...mod.users.values()].map(room => room.lastItemAt), before, 'nobody is stamped for a user nobody is')
 })
 
 // --- W2: the configured league is ALWAYS refreshed (headless included) -------

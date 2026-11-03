@@ -1,0 +1,17 @@
+{
+"core": {"items":[{"id":"chaos","name":"Chaos Orb","image":"/gen/image/WzI1LDE0LHsiZiI6IjJESXRlbXMvQ3VycmVuY3kvQ3VycmVuY3lSZXJvbGxSYXJlIiwic2NhbGUiOjF9XQ/46a2347805/CurrencyRerollRare.png","category":"Currency","detailsId":"chaos-orb"},{"id":"divine","name":"Divine Orb","image":"/gen/image/WzI1LDE0LHsiZiI6IjJESXRlbXMvQ3VycmVuY3kvQ3VycmVuY3lNb2RWYWx1ZXMiLCJzY2FsZSI6MX1d/ec48896769/CurrencyModValues.png","category":"Currency","detailsId":"divine-orb"}],"rates":{"divine":0.002499},"primary":"chaos","secondary":"divine"},
+"lines": [
+{"id":"lost-worlds","primaryValue":0.125,"volumePrimaryValue":1.5,"maxVolumeCurrency":"chaos","maxVolumeRate":8,"sparkline":{"totalChange":0,"data":[null,null,null,null,null,null,0]}},
+{"id":"divine-beauty","primaryValue":215.2,"volumePrimaryValue":1937,"maxVolumeCurrency":"chaos","maxVolumeRate":0.004647,"sparkline":{"totalChange":27.46,"data":[-4.58,-1.85,0.98,6.14,11.37,17.33,27.46]}},
+{"id":"damnation","primaryValue":31244,"volumePrimaryValue":322851,"maxVolumeCurrency":"divine","maxVolumeRate":0.01281,"sparkline":{"totalChange":95.94,"data":[0.48,-2.59,0.05,0.49,4.25,50.89,95.94]}},
+{"id":"mawr-blaidd","primaryValue":1130,"volumePrimaryValue":3201,"maxVolumeCurrency":"divine","maxVolumeRate":0.3542,"sparkline":{"totalChange":60.25,"data":[-44.43,-33.25,-16.72,-16.17,-41.75,45.47,60.25]}},
+{"id":"the-slumbering-beast","primaryValue":26810,"volumePrimaryValue":22341,"maxVolumeCurrency":"divine","maxVolumeRate":0.01493,"sparkline":{"totalChange":32.48,"data":[9.16,10.06,8.82,9.09,13.18,17.28,32.48]}}
+],
+"items": [
+{"id":"lost-worlds","name":"Lost Worlds","category":"Cards","detailsId":"lost-worlds"},
+{"id":"divine-beauty","name":"Divine Beauty","category":"Cards","detailsId":"divine-beauty"},
+{"id":"damnation","name":"Damnation","category":"Cards","detailsId":"damnation"},
+{"id":"mawr-blaidd","name":"Mawr Blaidd","category":"Cards","detailsId":"mawr-blaidd"},
+{"id":"the-slumbering-beast","name":"The Slumbering Beast","category":"Cards","detailsId":"the-slumbering-beast"}
+]
+}

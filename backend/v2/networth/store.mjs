@@ -1,24 +1,40 @@
 // Per-tab net-worth store (schema v2). Incremental: every stash tab is
 // persisted on its own the moment it is valued, so a scan that stalls/aborts
 // in its tail never loses the tabs already fetched. Atomic save (tmp+rename
-// with a unique tmp name per writer, ENOENT-tolerant load) 1:1 from
-// the same atomic tmp+rename pattern. The POESESSID cookie NEVER touches this store.
+// with a unique tmp name per writer). A file the load cannot use is moved
+// aside, never overwritten (store-file.mjs). The POESESSID cookie NEVER touches this store.
 //
 // Shape (/config/networth-store.json):
 //   { schema_version: 2,
 //     users: { "<user>": {
 //       accountName, league, cdRatio,
-//       tabs: { "<tabIndex>": { index, name, syncedAt,
-//         items:    [ {name,kind,tab,tabIndex,qty,chaosEach,chaosTotal} ],
+//       tabs: { "<tabIndex>": { index, name, type, syncedAt,
+//                   // type = the stash API's tab type (QuadStash, ...) or
+//                   // null; a tab written before the key existed lacks it
+//                   // (listing-audit.mjs quadTabAt reads that as unknown).
+//         items:    [ {name,kind,tab,tabIndex,qty,chaosEach,chaosTotal,source,uncertain} ],
+//                   // source = the feed that priced the row, uncertain = why
+//                   // the price is doubted or null (networth/valuator.mjs
+//                   // UNCERTAIN). Rows written before either existed lack the
+//                   // key; aggregate.mjs reads it as null until the next sync.
 //         unpriced: [ {name,kind,count} ],            // count = PIECES
-//         counts:   {priced,unpriced,unpricedPieces,skipped} } },
+//         counts:   {priced,unpriced,unpricedPieces,skipped},
 //                   // priced/unpriced/skipped = GGG ENTRIES, unpricedPieces =
 //                   // the same unpriced items in PIECES. A tab written before
 //                   // unpricedPieces existed simply lacks the key; aggregate.mjs
 //                   // falls back to the row sum until the tab is next synced.
+//         listed:   [ {name,kind,qty,x,y,note,fromTab,chaosEach,uncertain} ] } },
+//                   // one per priced stash ENTRY with a price note (the item's
+//                   // own `note`, or the tab's name when that is one), its
+//                   // 0-based cell and the market value of the same sync,
+//                   // unrounded (listing-audit.mjs, "Listed below market";
+//                   // premium tabs only). A tab written
+//                   // before the key existed lacks it and lists nothing until
+//                   // the sync reads it again; the schema_version stays 2.
 //       history: [ {at, totalChaos, totalDivine, league} ]  // small, last N
 //     } } }
-import { readFile, writeFile, rename, unlink } from 'node:fs/promises'
+import { writeFile, rename, unlink } from 'node:fs/promises'
+import { loadVersionedJson } from '../store-file.mjs'
 
 const SCHEMA_VERSION = 2
 
@@ -39,27 +55,30 @@ export function createNetworthStore (filePath, { keep = 50, log = console } = {}
   const store = {
     data: emptyStore(),
     // Server flips this to false when the /config volume isn't writable (local
-    // run) -> setTab/save become no-ops instead of throwing on every tab.
+    // run) -> setTab/save become no-ops instead of throwing on every tab. Also
+    // false when load() found a file from a newer release or one it could not
+    // move aside: then the store runs in memory and leaves that file alone.
     writable: true,
 
     async load () {
-      let raw
-      try {
-        raw = await readFile(filePath, 'utf8')
-      } catch (err) {
-        if (err.code === 'ENOENT') { store.data = emptyStore(); return }
-        throw err
-      }
-      // Robustness: this store is a rebuildable cache, never a backup. A corrupt
-      // file OR an old schema_version:1 (snapshot-based) store is structurally
-      // incompatible -> start empty and rebuild per tab. NEVER crash the server.
-      let parsed
-      try { parsed = JSON.parse(raw) } catch { store.data = emptyStore(); return }
-      if (!parsed || parsed.schema_version !== SCHEMA_VERSION ||
-          typeof parsed.users !== 'object' || parsed.users === null) {
-        store.data = emptyStore(); return
-      }
-      store.data = parsed
+      // This store is a rebuildable cache, never a backup — but a file it
+      // cannot use is not emptied and overwritten. Broken JSON, a wrong
+      // shape or the old snapshot-based schema_version:1 (structurally
+      // incompatible, so there is no migration for it) is moved to
+      // `<name>.broken-<timestamp>` and the store starts empty; a file from a
+      // NEWER release is left alone and the store runs in memory
+      // (store-file.mjs). Content it cannot use never crashes the server; a
+      // file that is there but cannot be read at all (EACCES, for example)
+      // stops the start instead of being written over (docs/admin.md).
+      const r = await loadVersionedJson(filePath, {
+        tag: 'networth-store',
+        schemaVersion: SCHEMA_VERSION,
+        shapeProblem: d => (d.users && typeof d.users === 'object' && !Array.isArray(d.users)) ? null : 'users is missing or not an object',
+        emptyMeans: 'starting empty, the stash is read again tab by tab',
+        log
+      })
+      store.data = r.data ?? emptyStore()
+      if (!r.writable) store.writable = false
     },
 
     async save () {

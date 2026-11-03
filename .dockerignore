@@ -59,3 +59,7 @@ renderer/public/data/**/*.index.bin
 # Internal reports / notes
 **/*-report.md
 **/PROTOCOL.md
+
+# Market fixtures: the raw snapshots (local only) and the tracked cut the
+# tests read. Neither is part of the image.
+backend/v2/fixtures/

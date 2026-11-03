@@ -23,8 +23,8 @@ quietEnv()
 // this file turns back off: the banner is raised BY a rate-limited price job. Nothing leaves
 // the machine for it — `fetch` is stubbed in this file, and the runner's guard
 // (test-net-guard.mjs) blocks anything that is not loopback anyway. Written out
-// rather than left implicit, because "this file prices" used to be visible only
-// as the ABSENCE of a line.
+// rather than left implicit, because otherwise "this file prices" is visible
+// only as the ABSENCE of a line.
 delete process.env.POE_PRICE_CHECK_DISABLED
 // And this one, for the same reason and with the same protection: the net-worth refresher is what has to be seen pausing.
 delete process.env.POE_NETWORTH_AUTOSYNC
@@ -35,7 +35,7 @@ process.env.POE_DATA_REFRESH_DISABLED = '1'
 process.env.POE_REFERENCE_DISABLED = '1'
 // …and the reference warm-up a WS CONNECTION sets off, which the boot switch
 // above does not cover: every connection below opens a room whose league has a
-// cold cache, and that used to be two poe.ninja requests per run (docs/bugs.md
+// cold cache, and that would be two poe.ninja requests per run (docs/bugs.md
 // B12). Measured, not assumed — see server-no-network.test.mjs.
 process.env.POE_REFERENCE_ON_CONNECT_DISABLED = '1'
 process.env.POE_USERS = 'player1,player2'
@@ -156,9 +156,9 @@ test('rateLimitSeconds recognizes BOTH wordings — a real GGG ban AND client-si
 })
 
 // ---------------------------------------------------------------------------
-// B14: the same gate holds the NET-WORTH refresher. The two paths used to be
-// gated separately, on the reading that each spends a budget of its own; what
-// ended that reading is a ban reported to apply to the whole ADDRESS. Checked
+// B14: the same gate holds the NET-WORTH refresher, not a gate of its own: a
+// ban was reported to apply to the whole ADDRESS, so the two paths do not
+// spend separate budgets. Checked
 // here, where the wiring is assembled — how the refresher behaves once the gate
 // is up is networth/refresher-status.test.mjs.
 // ---------------------------------------------------------------------------

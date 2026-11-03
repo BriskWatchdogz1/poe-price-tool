@@ -1,0 +1,75 @@
+# Checks every push and pull request: the test suite on both supported Node
+# versions, the daemon's Python and shell scripts, and the Docker image build.
+#
+# Nothing here reaches poe.ninja, GGG or GitHub's release API: the test runner
+# blocks every non-loopback request (backend/v2/test-net-guard.mjs) and turns
+# the run red if one is attempted. Nothing is pushed anywhere.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: ['22', '24']
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Use Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            renderer/package-lock.json
+
+      - run: npm ci
+      - run: npm --prefix renderer ci
+
+      # The suite needs the engine bundle and the search indices, both
+      # gitignored build artifacts (CONTRIBUTING.md, "Tests").
+      - run: node backend/v2/build.mjs
+      - run: node src/assets/make-index-files.mjs
+        working-directory: renderer
+
+      # The browser tests start CHROME_BIN (default google-chrome-stable). The
+      # Ubuntu runner image installs Google Chrome as /usr/bin/google-chrome and
+      # sets CHROME_BIN to that path; it is set here as well so the tests do not
+      # depend on the image keeping it.
+      # MIN_TESTS: the runner exits 1 when fewer tests pass than this. It sits
+      # below the count of a fresh clone on a runner without PySide6 and
+      # without the generated German data, both of which skip tests.
+      - name: npm test
+        run: npm test
+        env:
+          CHROME_BIN: /usr/bin/google-chrome
+          MIN_TESTS: '1900'
+
+  scripts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Compile the daemon's Python modules
+        run: python3 -m py_compile daemon/*.py
+      - name: Parse the shell scripts
+        # One file per call: `bash -n a.sh b.sh` checks a.sh only and hands
+        # b.sh to it as an argument.
+        run: |
+          for f in daemon/*.sh; do bash -n "$f"; done
+          for f in deploy/host-update.sh docker-entrypoint.sh; do sh -n "$f"; done
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build the image (not pushed)
+        run: docker build --tag poe-price-tool:ci .

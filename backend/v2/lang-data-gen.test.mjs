@@ -14,6 +14,7 @@ import {
   resolvePatchVersion, buildFingerprint, buildRunSummary, PATCH_VERSION_URL, PATCH_SOURCE_PIN
 } from './lang-data-gen.mjs'
 import { REQUIRED_TABLES } from './lang-derive.mjs'
+import { AGENT_BASE } from './version.mjs'
 import { FAIL_KIND, kindOf } from './check-failure.mjs'
 // The exporter's own URL builder — imported, not re-implemented, so the test
 // speaks about the code that actually downloads the game data. Pure string
@@ -172,7 +173,7 @@ test('the patch version is read out of the CDN base the lookup answers with', as
   assert.equal(got.patch, '3.29.2.1')
   assert.equal(got.source, PATCH_VERSION_URL)
   assert.equal(seen[0].url, PATCH_VERSION_URL)
-  assert.match(seen[0].opts.headers['User-Agent'], /poe-price-tool/)
+  assert.equal(seen[0].opts.headers['User-Agent'], `${AGENT_BASE} (language data generator, personal LAN tool)`)
 })
 
 test('however many parts the version has, it is read — a five-part one included', async () => {

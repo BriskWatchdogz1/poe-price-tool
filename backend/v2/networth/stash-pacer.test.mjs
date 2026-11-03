@@ -233,8 +233,8 @@ test('the wait is what is LEFT of the spacing, so an ordinary tick pays nothing'
 
 test('the reactive brake survives the client that was told about it', () => {
   // delayFor() answers a nearly-full window with "wait out the window". That
-  // used to be discarded with the client at the end of the tick, so the next
-  // tick opened by sending into it.
+  // must not be discarded with the client at the end of the tick, or the next
+  // tick opens by sending into it.
   const { p, advance } = pacerAt()
   p.noteBrake(60_000)
   advance(30_000)

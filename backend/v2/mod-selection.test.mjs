@@ -25,8 +25,8 @@ quietEnv()
 // this file turns back off: a manual search is the subject of this file. Nothing leaves
 // the machine for it — `fetch` is stubbed in this file, and the runner's guard
 // (test-net-guard.mjs) blocks anything that is not loopback anyway. Written out
-// rather than left implicit, because "this file prices" used to be visible only
-// as the ABSENCE of a line.
+// rather than left implicit, because otherwise "this file prices" is visible
+// only as the ABSENCE of a line.
 delete process.env.POE_PRICE_CHECK_DISABLED
 process.env.PORT = '0'
 process.env.POE_FAUSTUS_DISABLED = '1'
@@ -35,7 +35,7 @@ process.env.POE_DATA_REFRESH_DISABLED = '1'
 process.env.POE_REFERENCE_DISABLED = '1'
 // …and the reference warm-up a WS CONNECTION sets off, which the boot switch
 // above does not cover: every connection below opens a room whose league has a
-// cold cache, and that used to be two poe.ninja requests per run (docs/bugs.md
+// cold cache, and that would be two poe.ninja requests per run (docs/bugs.md
 // B12). Measured, not assumed — see server-no-network.test.mjs.
 process.env.POE_REFERENCE_ON_CONNECT_DISABLED = '1'
 process.env.POE_NETWORTH_AUTOSYNC = '0'

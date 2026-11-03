@@ -186,8 +186,8 @@ quietEnv()
 // this file turns back off: which language a price was sourced in is the subject. Nothing leaves
 // the machine for it — `fetch` is stubbed in this file, and the runner's guard
 // (test-net-guard.mjs) blocks anything that is not loopback anyway. Written out
-// rather than left implicit, because "this file prices" used to be visible only
-// as the ABSENCE of a line.
+// rather than left implicit, because otherwise "this file prices" is visible
+// only as the ABSENCE of a line.
 delete process.env.POE_PRICE_CHECK_DISABLED
 // And this one, for the same reason and with the same protection: the Faustus store IS the price source under test here.
 delete process.env.POE_FAUSTUS_DISABLED

@@ -1,95 +1,70 @@
-// The update button: THE CONTAINER ASKS, THE HOST DECIDES.
-//
-// Restarting is something this process can do to itself — it exits and the
-// container supervisor brings it back (see POST /restart). Updating is not:
+// The update button: THE CONTAINER ASKS, THE HOST DECIDES. Restarting is
+// something this process can do to itself — it exits and the container
+// supervisor brings it back (see POST /restart). Updating is not:
 // `git pull && docker compose up -d --build` runs on the HOST, in a checkout
 // this container cannot see, against a daemon it must never be able to talk to.
 //
-// WHY THERE IS NO DOCKER SOCKET HERE. Mounting /var/run/docker.sock would make
-// the button a two-line change and is the reason this module exists instead.
-// The socket is root on the host, without authentication of its own: any
-// container that can reach it can start another container with the host root
-// filesystem bind-mounted. This tool has no authentication at all (LAN by
-// design), its admin area is behind one plaintext password whose default is
-// published in this repository, and it parses foreign text out of the network
-// all day. That combination plus a docker socket is host root for whoever gets
+// WHY THERE IS NO DOCKER SOCKET HERE. /var/run/docker.sock is root on the host
+// without authentication of its own: any container that reaches it can start
+// another with the host root filesystem bind-mounted. This tool has no
+// authentication at all (LAN by design), its admin area is behind one plaintext
+// password whose default is published in this repository, and it parses foreign
+// text out of the network all day. Together that is host root for whoever gets
 // in. So the socket stays out, and the round trip below is the price.
 //
 // THE ONE PROPERTY EVERYTHING HANGS ON:
 //
 //     NOTHING FROM THE REQUEST FILE EVER REACHES THE EXECUTED COMMAND.
 //
-// The container writes a file. A script on the host, running as whoever the
-// operator installed it as, reads that file only to learn THAT somebody asked —
-// never WHAT to do. Directory and command are constants at the top of that
-// script. No branch, no tag, no path, no argument, no fragment of a command
-// line travels in the file, and the script never expands, sources or evaluates
-// its content. If it did, this design would be worth nothing: writing that file
-// is exactly what an attacker who reached the admin area can do, and the whole
-// point is that the most he can achieve with it is "the host rebuilds the code
-// the host already trusts". `deploy/host-update.sh` repeats this argument at
-// its own head, because that is the file somebody actually installs.
+// The host script reads that file only to learn THAT somebody asked — never
+// WHAT to do. Directory and command are constants at the top of the script; no
+// branch, tag, path, argument or fragment of a command line travels in the
+// file, and the script never expands, sources or evaluates its content. Writing
+// that file is exactly what an attacker in the admin area can do, and the most
+// he gets is "the host rebuilds the code the host already trusts".
+// `deploy/host-update.sh` repeats this argument at its own head, because that
+// is the file somebody actually installs.
 //
-// THREE FILES IN THE /config VOLUME, which is the only thing container and host
-// already share:
-//
+// THREE FILES IN THE /config VOLUME, the only thing container and host share:
 //   update-request    written HERE, deleted by the script before it works.
 //                     Timestamp and requesting user, for the record. Pressing
 //                     twice replaces it; requests do not queue up.
 //   update-heartbeat  written by the script on EVERY run, whether there was
-//                     anything to do or not. This is the only way the UI can
-//                     know an updater exists at all.
+//                     anything to do or not: the only way the UI can know an
+//                     updater exists at all.
 //   update-result     written by the script after a run: outcome, times, and a
 //                     bounded excerpt of the output.
+// NOTHING IS CREATED AT BOOT: without the host script this feature is a
+// disabled button, no file is written unless somebody presses it, and a missing
+// directory is not an error.
 //
-// NOTHING IS CREATED AT BOOT. An installation without the host script must not
-// notice this feature beyond a disabled button, so no file here is written
-// unless somebody presses it, and a missing directory is not an error.
+// THE RESULT EXCERPT IS FOREIGN TEXT FROM THE HOST: bounded on the way in,
+// filtered by the same `SECRET_KEY_RE` that guards `/config-view`, credentials
+// stripped out of any URL (a failing `git` prints its remote, and a remote can
+// carry `https://user:token@host/…`), and inserted as TEXT, never as markup
+// (`redactOutput()`). THAT FILTER IS NOT A GUARANTEE: it works on names and
+// shapes, and a bare token on a line that names nothing and is not a URL
+// (`ghp_…` alone, an id echoed by a build step) walks straight through it. The
+// promise is "the shapes we can recognise are removed"; `upd.outNote` says so.
 //
-// THE RESULT EXCERPT IS FOREIGN TEXT FROM THE HOST and is treated like every
-// other foreign text in this project: bounded on the way in, filtered by the
-// same `SECRET_KEY_RE` that guards `/config-view`, credentials stripped out of
-// any URL in it (a failing `git` prints its remote, and a remote can carry
-// `https://user:token@host/…`), and inserted into the page as TEXT, never as
-// markup. See `redactOutput()`.
-//
-// THAT FILTER IS NOT A GUARANTEE, AND THE PAGE SAYS SO TOO. It works on names
-// and on shapes: a line that NAMES something like a credential, a URL that has
-// a credential in the place credentials go. A bare token on a line that names
-// nothing and is not a URL — `ghp_…` alone, an id echoed by a build step —
-// walks straight through it, and no filter over free text can be made to catch
-// that without also throwing away the error message the excerpt exists for.
-// So the promise here is "the shapes we can recognise are removed", not "there
-// is no secret in this text", and the excerpt stays as trustworthy as the host
-// that produced it. `upd.outNote` says the same thing to whoever reads it.
-//
-// WHAT "AN UPDATER IS INSTALLED" MEANS, AND THE ARITHMETIC BEHIND IT. The
-// documented interval is one run every 5 minutes. A heartbeat is treated as
-// alive for 20 minutes = three missed runs (15 min) plus a 5 min cushion for a
-// host under load or a clock that is a minute off. Generous on purpose: the
-// cost of calling a working updater dead is a disabled button and a confused
-// operator, the cost of the opposite is a button that promises something
-// nothing will ever pick up. The script writes its heartbeat BEFORE it takes
-// its lock, so the runs that a long build blocks still refresh it — WHERE THE
-// SCHEDULE STARTS RUNS INDEPENDENTLY, which cron and Unraid's User Scripts do
-// and a systemd `Type=oneshot` timer does not (it starts no second run while
-// the first is building; deploy/host-update.sh and docs/admin.md say so at the
+// "AN UPDATER IS INSTALLED": the documented interval is one run every 5
+// minutes, and a heartbeat counts as alive for 20 minutes = three missed runs
+// (15 min) plus a 5 min cushion (a host under load, a clock a minute off).
+// Generous on purpose: a working updater called dead costs a disabled button,
+// the opposite a button that promises what nothing picks up. The script writes
+// its heartbeat BEFORE it takes its lock, so runs a long build blocks still
+// refresh it WHERE THE SCHEDULE STARTS RUNS INDEPENDENTLY (cron, Unraid's User
+// Scripts), not with a systemd `Type=oneshot` timer (no second run while the
+// first is building; deploy/host-update.sh and docs/runbooks.md say so at the
 // unit file). The window is `POE_UPDATE_HEARTBEAT_MAX_AGE_MS`, for that case
-// and for anyone running the script on a slower schedule.
-//
-// AND IT NEVER GUESSES. No heartbeat means "no updater is installed" — which is
-// what the page says. It does not mean "the updater is broken": this module
-// cannot tell the difference between a script that was never installed and one
-// that was removed an hour ago, so it claims neither.
-//
-// THE ONE BROKEN STATE IT CAN NAME is the one the script tells it about. A run
-// killed hard (host reboot mid-build) leaves the script's lock behind, and
-// every later run then writes its heartbeat and exits at that lock: alive by
-// every measure above, and picking nothing up, for as long as nobody looks.
-// The script recognises its own stale lock and writes `stuck-since=` into the
-// heartbeat; that turns into `updater.stuck` here and into a disabled button
-// with the reason on the page, instead of a healthy-looking updater that does
-// nothing.
+// and for slower schedules. IT NEVER GUESSES: no heartbeat means "no updater is
+// installed", never "the updater is broken" — never installed and removed an
+// hour ago look the same. THE ONE BROKEN STATE IT CAN NAME is the one the
+// script reports: a run killed hard (host reboot mid-build) leaves the lock
+// behind, and every later run writes its heartbeat and exits at that lock. The
+// script recognises its own stale lock and writes `stuck-since=` into the
+// heartbeat; that becomes `updater.stuck` here and a disabled button with the
+// reason on the page.
 
 import { readFile, writeFile, rename, unlink, mkdir, stat, open } from 'node:fs/promises'
 import { constants } from 'node:fs'

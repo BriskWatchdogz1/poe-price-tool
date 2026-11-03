@@ -7,11 +7,9 @@
 //     — no upstream at all: generated locally out of 1. plus GGG's game data
 //     (lang-data-gen.mjs). See "the localized set" further down.
 //
-// Modelled on the repo's other background refreshers (faustus-refresher.mjs,
-// corpse-pricer.mjs): runs on its own, persists into /config, survives
-// restarts, and on ANY problem keeps the last good state instead of wiping.
-//
-// Principles (see docs/admin.md "Data auto-update"):
+// Modelled on faustus-refresher.mjs and corpse-pricer.mjs: runs on its own,
+// persists into /config, survives restarts, and on ANY problem keeps the last
+// good state instead of wiping. Principles (docs/admin.md "Data auto-update"):
 //  - Conditional requests: ETag/Last-Modified are stored per source and sent
 //    back — on days without an upstream change, no payload flows at all.
 //  - Validate BEFORE adopt: a snapshot is parsed and schema-checked, its
@@ -20,42 +18,34 @@
 //  - Adopted snapshots live under POE_DATA_REFRESH_DIR (default
 //    /config/data-refresh) and are preferred at the next boot, so an update
 //    survives a container recreate. If the dir isn't writable (local run
-//    without the volume), the whole feature silently disables — like the
-//    other /config stores, it never throws per tick.
-//  - APT snapshots are written to VERSIONED dirs (apt/v-<timestamp>/), never
-//    in place: client_strings.js is loaded via dynamic import(), which Node
-//    caches by URL — only a new path makes a runtime reload actually pick up
-//    the new strings. Each dir is a complete public/-shaped root
-//    (data/en/* + data/item-drop.json + data/patrons.json + the generated
-//    *.index.bin), so engine.ready()/reload() can point straight at it.
-//  - A snapshot is BILINGUAL when a localized set exists: data/de lives NEXT TO
-//    data/en in the SAME versioned dir, never instead of it. Two reasons, both
-//    hard: engine.ready() writes __aptEnv.BASE_URL process-wide, so two engine
-//    instances with different data roots would contaminate each other; and the
-//    load path reads data/en/client_strings.js even in a localized run
-//    (assets/data/index.ts, CLIENT_STRINGS_REF). The German set has NO upstream
-//    (it is generated locally), so every adoption CARRIES THE EXISTING ONE
-//    FORWARD — see carryLangTree.
+//    without the volume), the whole feature disables with one warning; like
+//    the other /config stores, it never throws per tick. state.json is read
+//    like their files (store-file.mjs): a broken one is moved aside with one
+//    warning and the refresher starts empty; one that cannot be read or moved
+//    is never written over, and the feature stays off (loadState).
+//  - APT snapshots go to VERSIONED dirs (apt/v-<timestamp>/), never in place:
+//    client_strings.js is loaded via dynamic import(), which Node caches by
+//    URL. Each dir is a complete public/-shaped root (data/en/* +
+//    data/item-drop.json + data/patrons.json + the generated *.index.bin) for
+//    engine.ready()/reload().
+//  - A snapshot is BILINGUAL when a localized set exists: data/de lives NEXT
+//    TO data/en in the SAME versioned dir, never instead of it —
+//    engine.ready() writes __aptEnv.BASE_URL process-wide, and the load path
+//    reads data/en/client_strings.js even in a localized run
+//    (assets/data/index.ts, CLIENT_STRINGS_REF). Every adoption CARRIES THE
+//    EXISTING German set FORWARD (carryLangTree).
 //
-// Observability (the point of this: nobody should ever have to look at the
-// server to know the thing still works):
-//  - EXACTLY ONE log line per check, whatever its outcome — updated /
-//    unchanged / failed. Three sources once a day = three lines a day.
-//    Silence now means "not running", not "nothing to do".
-//  - The timestamp of the last SUCCESSFUL check per source is persisted in
-//    state.json and handed out via status(); the UI turns a source that has
-//    missed several ticks into a status-line note (see server.mjs
-//    `data-status` and frontend/shell.js).
-//  - THE REASON OF THE LAST FAILURE IS PERSISTED WITH IT, plus the CLASS of
-//    that failure (check-failure.mjs). Until 2026-08-18 only the outcome was
-//    kept, so the browser could say "no successful check of lang-data for 5
-//    days" and nothing about why — while the cause had been standing one log
-//    line lower every night (docs/bugs.md B24). The class is set at the site
-//    that knows and never derived from the wording afterwards; a failure nobody
-//    classified stays `unknown` and the status line then offers no advice at
-//    all rather than a guessed one.
-// The detailed REJECTED/could-not-be-applied warnings stay on top of that
-// line — they carry the reason, the outcome line carries the outcome.
+// Observability (nobody should have to look at the server to know it works):
+// EXACTLY ONE log line per check, whatever its outcome — updated / unchanged /
+// failed; three sources once a day = three lines a day, and silence means "not
+// running". The detailed REJECTED/could-not-be-applied warnings carry the
+// reason on top of it. The last SUCCESSFUL check per source is persisted in
+// state.json and handed out via status(); a source that missed several ticks
+// becomes a status-line note (server.mjs `data-status`, frontend/shell.js).
+// The REASON of the last failure is persisted with it, plus its CLASS
+// (check-failure.mjs; docs/bugs.md B24). The class is set at
+// the site that knows, never derived from the wording; an unclassified failure
+// stays `unknown` and the status line then offers no advice at all.
 
 import { readFile, writeFile, mkdir, rename, readdir, rm, copyFile, stat } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
@@ -67,6 +57,7 @@ import { buildBaseNames as realBuildBaseNames, URLS as SEED_URLS } from './base-
 import {
   generate as realGenerateLangData,
   resolvePatchVersion as realResolvePatchVersion,
+  generatorVersion as realGeneratorVersion,
   buildFingerprint, buildRunSummary, BUILD_INFO_FILE
 } from './lang-data-gen.mjs'
 import { DEFAULT_MAX_COVERAGE_LOSS_RATIO } from './lang-derive.mjs'
@@ -76,6 +67,9 @@ import {
 import { TEXT_PAIRS_FILE } from './mod-text-pairs.mjs'
 import { configuredLanguages } from './user-langs.mjs'
 import { withConsumer, CONSUMER } from './trade-audit.mjs'
+import { jsonErrorSummary } from './json-error.mjs'
+import { moveAside } from './store-file.mjs'
+import { AGENT_BASE } from './version.mjs'
 
 export const DEFAULT_INTERVAL_MS = 24 * 60 * 60 * 1000 // one look per day
 
@@ -111,7 +105,8 @@ const DEFAULT_INITIAL_DELAYS_MS = {
   baseNames: 7 * 60 * 1000,
 }
 
-const UA = 'poe-price-tool/0.1 (data refresher, personal LAN tool)'
+// Tool name and version (version.mjs), then the purpose.
+const UA = `${AGENT_BASE} (data refresher, personal LAN tool)`
 
 // A refreshed file must not shrink dramatically: upstream data only ever
 // grows or gets trimmed lightly. Anything below this ratio of the previous
@@ -244,10 +239,18 @@ export function createDataRefresher ({
   fetchImpl = fetch,
   buildBaseNames = realBuildBaseNames,
   generateLangData = realGenerateLangData,
+  // Which derivation the localized sets have to have been built by: a hash over
+  // the generator's own files (lang-data-gen.mjs), null when one is missing.
+  // Injectable so a test can stand for a release that changed them.
+  generatorVersion = realGeneratorVersion,
   resolvePatch = realResolvePatchVersion,
   timers = { setTimeout, clearTimeout },
   now = () => Date.now(),
-  log = console
+  log = console,
+  // Test seams only, for state.json at boot: how it is read (a permission
+  // error without chmod or root) and how a broken one is moved aside.
+  readStateImpl = readFile,
+  stateRenameImpl = rename
 } = {}) {
   if (!vendored?.publicDir || !vendored?.baseNamesPath) {
     throw new Error('createDataRefresher: vendored { publicDir, baseNamesPath } is required')
@@ -292,6 +295,46 @@ export function createDataRefresher ({
 
   async function readJsonIfPresent (p) {
     try { return JSON.parse(await readFile(p, 'utf8')) } catch { return null }
+  }
+
+  /**
+   * Reads state.json at boot, like every other /config store reads its file
+   * (store-file.mjs, docs/bugs.md B31). Returns the state, or null for "do not
+   * run": the file is there but cannot be read, or is broken and cannot be
+   * moved aside. The auto-update then stays off, because its first save would
+   * write over a file this process never saw.
+   *
+   *   missing          {} without a word (the normal first start)
+   *   not JSON, or     moved to state.json.broken-<timestamp> with one warning,
+   *   not an object    and {}: the image's baked-in data until the next check
+   *                    adopts a snapshot again
+   */
+  async function loadState () {
+    const emptyMeans = 'starting with an empty state: the image\'s baked-in data stays live until the next check fetches the sources again'
+    let raw
+    try {
+      raw = await readStateImpl(STATE_PATH, 'utf8')
+    } catch (e) {
+      if (e?.code === 'ENOENT') return {}
+      log.warn(`[data-refresh] could not read ${STATE_PATH} (${e?.code || e?.message}) — data auto-update off and not writing over it, using the baked-in data; fix or remove it and restart`)
+      return null
+    }
+    let reason = null
+    try {
+      const doc = JSON.parse(raw)
+      if (doc && typeof doc === 'object' && !Array.isArray(doc)) return doc
+      throw new Error('not a JSON object')
+    } catch (e) {
+      reason = jsonErrorSummary(e)
+    }
+    try {
+      const to = await moveAside(STATE_PATH, { label: 'broken', now, renameImpl: stateRenameImpl })
+      log.warn(`[data-refresh] ${STATE_PATH} is not usable (${reason}) — moved to ${to}; ${emptyMeans}`)
+      return {}
+    } catch (e) {
+      log.warn(`[data-refresh] ${STATE_PATH} is not usable (${reason}) and could not be moved aside (${e?.code || e?.message}) — data auto-update off and leaving the file untouched, using the baked-in data; fix or remove it and restart`)
+      return null
+    }
   }
 
   async function saveState () {
@@ -471,13 +514,10 @@ export function createDataRefresher ({
   /**
    * The same comparison, made against the ENGLISH SET THAT IS LIVE, and stored.
    *
-   * Called at boot, and that is the point of it. The comparison used to be made
-   * in one place only — the branch that adopts a NEW English snapshot — so the
-   * report outlived its own remedy: it says "closing this needs a container
-   * update", and after that update it kept saying so, unchanged, until upstream
-   * happened to move the English file again. The advice was sound and following
-   * it produced no visible effect, which is the same defect as a status line
-   * that reports a duration and no cause.
+   * Called at boot, and that is the point of it: the report says "closing this
+   * needs a container update", so after that update it has to reflect the
+   * container's English set, not wait until upstream moves the English file
+   * again (only the branch that adopts a NEW snapshot would compare otherwise).
    *
    * A boot is exactly when the answer can have changed without upstream doing
    * anything: the localized files come out of the image, and a new image is a
@@ -614,7 +654,13 @@ export function createDataRefresher ({
       return
     }
 
-    state = (await readJsonIfPresent(STATE_PATH)) || {}
+    const loaded = await loadState()
+    if (!loaded) {
+      writable = false
+      await refreshActiveLangs()
+      return
+    }
+    state = loaded
     refilterPersistedText()
     // First time this /config dir is used: remember when. A source that has
     // never been checked successfully is aged against this instead of against
@@ -879,10 +925,10 @@ export function createDataRefresher ({
   // --- source 3: the LOCALIZED data set (generated, no upstream) ------------
   //
   // THE TRIGGER IS A SOLL/IST COMPARISON, NOT AN EVENT. The localized set
-  // records what it was built from — the patch version AND the identity of the
-  // English snapshot (build-info.json, written next to the data). Every tick
-  // recomputes both and compares; a difference means "generate", equality means
-  // "nothing to do".
+  // records what it was built from — the patch version, the identity of the
+  // English snapshot AND the generator version (build-info.json, written next
+  // to the data). Every tick recomputes all three and compares; a difference
+  // means "generate", equality means "nothing to do".
   //
   // Why a level and not an edge, because this is the easy thing to get wrong:
   // after a generation run that FAILED, the next tick of an event-driven
@@ -913,7 +959,7 @@ export function createDataRefresher ({
   }
 
   /** Which configured languages are out of date, and in one word why. */
-  async function staleLangs (root, patch, enFingerprint) {
+  async function staleLangs (root, patch, enFingerprint, generator) {
     const out = []
     for (const lang of genLangs) {
       const complete = await langComplete(root, lang, LANG_FILES)
@@ -924,6 +970,12 @@ export function createDataRefresher ({
       else if (!info) out.push({ lang, why: 'no build-info — unknown provenance' })
       else if (info.patch !== patch) out.push({ lang, why: `patch ${info.patch ?? 'unknown'} -> ${patch}` })
       else if (info.enFingerprint !== enFingerprint) out.push({ lang, why: 'the English snapshot moved on' })
+      // A set built before the field existed has `undefined` here and is
+      // rebuilt once, like one without build-info. An unknown CURRENT version
+      // (null) is recorded as null, so it matches itself on the next tick.
+      else if ((info.generator ?? null) !== generator || !('generator' in info)) {
+        out.push({ lang, why: `generator version ${info.generator ?? 'unknown'} -> ${generator ?? 'unknown'}` })
+      }
     }
     return out
   }
@@ -943,13 +995,15 @@ export function createDataRefresher ({
     const warning = mismatch || null
     // Soll, part two.
     const enFingerprint = await englishFingerprint(active.publicDir)
+    // Soll, part three: which derivation this image carries.
+    const generator = (await generatorVersion()) ?? null
     // Ist.
-    const stale = await staleLangs(active.publicDir, patch, enFingerprint)
+    const stale = await staleLangs(active.publicDir, patch, enFingerprint, generator)
     if (!stale.length) {
       const from = pinned
         ? `pinned patch ${patch} (POE_PATCH_VERSION${lookedUp ? `; the lookup reports ${lookedUp}` : '; the lookup did not answer'})`
         : `patch ${patch}`
-      return UNCHANGED(`data/${genLangs.join(', data/')} built from ${from} and the current English snapshot`, warning)
+      return UNCHANGED(`data/${genLangs.join(', data/')} built from ${from} and the current English snapshot, generator version ${generator ?? 'unknown'}`, warning)
     }
 
     // A generated set has to end up in a snapshot dir that also holds data/en
@@ -1014,13 +1068,15 @@ export function createDataRefresher ({
         // Provenance written by the side that did the COMPARING, over the
         // generator's own copy. Not redundancy for its own sake — it is what
         // makes the level logic terminate: the next tick has to read back
-        // exactly the pair THIS run was triggered by, otherwise a successful
+        // exactly the values THIS run was triggered by (patch, English
+        // fingerprint, generator version), otherwise a successful
         // run could still look stale and the comparison would regenerate
         // forever.
         await writeFile(path.join(outDir, BUILD_INFO_FILE), JSON.stringify({
           lang,
           patch,
           enFingerprint,
+          generator,
           builtAt: new Date(now()).toISOString(),
           // The run's own numbers, in the generator's shape (buildRunSummary):
           // when, from which patch, how much carries a matcher, what was lost and
@@ -1073,7 +1129,7 @@ export function createDataRefresher ({
     // still describe the upstream fetch, and `updatedAt` is the age of the
     // ENGLISH data, which this run did not change.
     state.apt = { ...state.apt, version, langs: newLangs }
-    state[LANG_JOB] = { updatedAt: now(), patch, enFingerprint, version }
+    state[LANG_JOB] = { updatedAt: now(), patch, enFingerprint, generator, version }
     await saveState()
     await pruneAptVersions([version, previousVersion].filter(Boolean))
     return UPDATED(`data/${built.join(', data/')} generated from patch ${patch} (${patchSource}) into ${version}`, warning)

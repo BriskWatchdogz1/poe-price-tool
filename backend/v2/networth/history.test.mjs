@@ -375,6 +375,17 @@ test('foldSources: one name priced from two feeds names both, sorted', () => {
   assert.equal(foldSources(null).size, 0)
 })
 
+test('foldSources: an uncertain row names its doubt next to its feed', () => {
+  // The brake's log line is the next trace for docs/bugs.md B1: it now says
+  // whether the number was one the valuation already doubted.
+  const m = foldSources([
+    { name: 'Imperial Legacy', source: 'faustus', uncertain: 'thin-market' },
+    { name: 'Divine Orb', source: 'exchange', uncertain: null }
+  ])
+  assert.equal(m.get('Imperial Legacy'), 'faustus [uncertain: thin-market]')
+  assert.equal(m.get('Divine Orb'), 'exchange')
+})
+
 // --- a withheld arrival is released as STOCK, not as a price move ------------
 // Driven against the real price guard, not a stub: these two are the whole
 // point of the withholding, and both of them were broken by it.
@@ -438,4 +449,41 @@ test('a real find the guard held back is not deleted as a spike on the next star
   const again = createNetworthHistory(file, { now: c.now, priceGuard: realGuard(c.now) })
   await again.load()
   assert.equal(again.points.length, 6, 'pruneSpikes deleted points a real find explains')
+})
+
+// ---- latest(): the point and its breakdown, for farm sessions ----------------
+
+test('latest() returns the newest point together with the breakdown it was recorded with', async () => {
+  const c = clock()
+  const h = createNetworthHistory(await tmpFile(), { now: c.now, priceGuard: false })
+  await h.load()
+  assert.equal(h.latest('player1'), null, 'nothing recorded yet')
+  await h.append('player1', { totalChaos: 100, cdRatio: 200, items: [{ name: 'Chaos Orb', qty: 100, chaosTotal: 100 }] })
+  c.advance(60_000)
+  await h.append('player1', {
+    totalChaos: 150,
+    cdRatio: 210,
+    items: [{ name: 'Chaos Orb', qty: 150, chaosTotal: 150 }],
+    unpriced: [{ name: 'Odd Card', count: 2 }]
+  })
+  const l = h.latest('player1')
+  assert.equal(l.at, h.lastAt('player1'))
+  assert.equal(l.c, 150)
+  assert.equal(l.cd, 210)
+  assert.deepEqual(l.items.get('Chaos Orb'), [150, 150])
+  assert.deepEqual(l.items.get('Odd Card'), [2, 0], 'unpriced names are in it at zero')
+  assert.equal(h.latest('player2'), null, 'unknown user')
+})
+
+test('latest() is null after a tab-set change and for an append without items', async () => {
+  const c = clock()
+  const h = createNetworthHistory(await tmpFile(), { now: c.now, priceGuard: false })
+  await h.load()
+  await h.append('player1', { totalChaos: 100, cdRatio: 200, items: [{ name: 'Chaos Orb', qty: 100, chaosTotal: 100 }] })
+  assert.notEqual(h.latest('player1'), null)
+  await h.append('player1', { totalChaos: 100, cdRatio: 200, tabsChanged: true })
+  assert.equal(h.latest('player1'), null, 'the breakdown was dropped with the tab-set change')
+  c.advance(60_000)
+  await h.append('player1', { totalChaos: 120, cdRatio: 200 })
+  assert.equal(h.latest('player1'), null, 'a point without items has no breakdown to go with it')
 })

@@ -1,5 +1,5 @@
 import { buildHighlight, highlightInputs, HIGHLIGHT_MAX_DEFAULT } from './highlight.js'
-import { syncStatusLine, autosyncSummary } from './networth-sync.js'
+import { syncStatusLine, syncLineText, autosyncSummary } from './networth-sync.js'
 import { tabLabel, orderedTabs, migrateTabNames, tabState, nextTabState } from './tabs.js'
 
 /* Net Worth — Vanilla frontend, standalone page.
@@ -16,6 +16,8 @@ import { tabLabel, orderedTabs, migrateTabNames, tabState, nextTabState } from '
  *                       (sorted by index = in-game order)
  *   snapshot.categories = { kind: { chaos, items } }
  *   snapshot.unpriced[] = { name, kind, count, tabIndex }  (one row per name+tab)
+ *   snapshot.belowMarket = { rows: [...], more: n, notCompared: { reason: n } }
+ *                       ("Listed below market", see PROTOCOL.md)
  * Units are NOT interchangeable: `items` counts grouped display ROWS,
  * `priced`/`unpriced`/`skipped` count GGG stash ENTRIES, and `count`/`qty`/
  * `unpricedPieces` count PIECES (summed stack sizes). Never print two of them
@@ -29,6 +31,7 @@ const shellEl        = document.getElementById('shell')
 const sideBoxEl      = document.getElementById('sideBox')   // rail R6 block (tab picker)
 const totalDivEl     = document.getElementById('totalDiv')
 const totalChaosEl   = document.getElementById('totalChaos')
+const totalUncEl     = document.getElementById('totalUncertain')
 const conn           = document.getElementById('conn')
 const connlbl        = document.getElementById('connlbl')
 const autosyncEl     = document.getElementById('autosync')
@@ -46,6 +49,7 @@ const barsEl         = document.getElementById('bars')
 
 const viewSeg        = document.getElementById('viewSeg')
 const chipsEl        = document.getElementById('kindChips')
+const uncBtn         = document.getElementById('uncOnly')
 const searchInput    = document.getElementById('q')
 const threshSel      = document.getElementById('threshSel')
 
@@ -63,6 +67,10 @@ const wrapEl         = document.getElementById('wrap')
 const unpricedBox     = document.getElementById('unpricedBox')
 const unpricedSummary = document.getElementById('unpricedSummary')
 const unpricedList     = document.getElementById('unpricedList')
+const belowBox        = document.getElementById('belowBox')
+const belowBody       = document.querySelector('#belowList tbody')
+const belowSkippedEl  = document.getElementById('belowSkipped')
+const belowMoreEl     = document.getElementById('belowMore')
 const historyBox      = document.getElementById('historyBox')
 const historyList      = document.getElementById('historyList')
 
@@ -291,7 +299,7 @@ function itemTabLabel (it, labels) {
 }
 
 // ---- App state (transient — resets on reload except where persisted) -------
-const st = { view: loadView(), q: '', kinds: new Set(), sortK: 'chaosTotal', sortDir: -1 }
+const st = { view: loadView(), q: '', kinds: new Set(), uncOnly: false, sortK: 'chaosTotal', sortDir: -1 }
 let currentSnapshot = null
 let dragSrc = null
 
@@ -306,12 +314,12 @@ updateTabModeButtons()
 const TAB_STATE_MARK = { on: '✓', off: '', ignored: '✕' }
 const tabStateHint = st => T({ on: 'nw.tabHintOn', off: 'nw.tabHintOff', ignored: 'nw.tabHintIgnored' }[st])
 
-// What actually came out of this tab, for the row's tooltip. A tab worth 0c
-// used to read the same whether GGG returned nothing at all or returned a full
-// tab that the classifier dropped (rare gear, non-unique maps) — the whole
-// reason the empty map stash could not be judged from this page. The three
-// counts come straight from the per-tab store (backend counts.*), so "0
-// priced · 0 unpriced · 0 skipped" now says "nothing arrived" outright.
+// What actually came out of this tab, for the row's tooltip. Without it a tab
+// worth 0c reads the same whether GGG returned nothing at all or returned a
+// full tab that the classifier dropped (rare gear, non-unique maps), and an
+// empty map stash cannot be judged from this page. The three counts come
+// straight from the per-tab store (backend counts.*), so "0 priced · 0
+// unpriced · 0 skipped" says "nothing arrived" outright.
 // All three are GGG ENTRY counts and have to stay comparable. `t.priced` is the
 // stored one; `t.items` beside it counts grouped display ROWS (thirty Divine
 // Orbs from three stash entries are one row), and printing that next to two
@@ -475,6 +483,22 @@ function tabScoped (s) {
   return { totalChaos, totalDivine: cd ? totalChaos / cd : 0, categories }
 }
 
+// How much of the headline rests on rows marked uncertain. Scoped exactly like
+// the headline — by the tab selection only, not by kind, search or threshold —
+// so the two numbers stay comparable ("incl. X uncertain" is a part OF the
+// total above it). Nothing is subtracted: the total counts these rows as well.
+function uncertainScoped (s) {
+  const on = onTabIndexSet(s)
+  let c = 0
+  for (const it of (s.items || [])) if (it.uncertain && on.has(it.tabIndex)) c += Number(it.chaosTotal) || 0
+  return c
+}
+function renderUncertainTotal (s) {
+  const u = uncertainScoped(s)
+  totalUncEl.hidden = !(u > 0)
+  totalUncEl.innerHTML = u > 0 ? T('nw.uncertainTotal_html', { value: money(u, s.cdRatio) }) : ''
+}
+
 function renderBars () {
   const s = currentSnapshot
   if (!s) { barsEl.innerHTML = ''; return }
@@ -491,6 +515,16 @@ function renderBars () {
     : `<div class="empty">${esc(T('nw.nothingPriced'))}</div>`
 }
 ovToggle.addEventListener('click', () => overviewEl.classList.toggle('closed'))
+
+// ---- "Uncertain only" -------------------------------------------------------
+// Narrows the table — and with it Stash Highlight — to the rows to check in
+// game before selling. The unpriced block is not touched: it has no price to
+// doubt.
+uncBtn.addEventListener('click', () => {
+  st.uncOnly = !st.uncOnly
+  uncBtn.classList.toggle('on', st.uncOnly)
+  render()
+})
 
 // ---- Kind filter chips -------------------------------------------------------
 function renderChips () {
@@ -545,6 +579,7 @@ function passesTabKindSearch (it, tabIdxOn) {
   if (!tabIdxOn.has(it.tabIndex)) return false
   if (st.kinds.size && !st.kinds.has(it.kind)) return false
   if (st.q && !nameHit(it.name, st.q)) return false
+  if (st.uncOnly && !it.uncertain) return false
   return true
 }
 function filteredItems () {
@@ -574,9 +609,23 @@ function hiddenBelowThreshold () {
 // the string itself is an identifier, not display text, so it is not
 // translated (see nw.colSource in i18n.js).
 const srcLabel = it => (typeof it.source === 'string' && it.source ? it.source : '—')
+// The CONFIDENCE column answers "can I trust this number when I sell?": a row
+// the valuation knows to rest on a guess or on thin trading names its reason
+// (networth/valuator.mjs UNCERTAIN, explained in docs/pricing-logic.md), and
+// its amounts take the warning colour. A row without a reason stays blank —
+// that is "no KNOWN doubt", not a check, so nothing here ever says "ok". A
+// code from a newer backend that this list does not know is shown raw, like
+// kindLabel does with an unknown kind: visible, not hidden.
+const UNC_CODES = ['thin-market', 'gem-guessed', 'variant-guessed', 'links-guessed', 'few-listings']
+const uncLabel = c => UNC_CODES.includes(c) ? T('nw.unc.' + c) : c
+const uncWhy = c => UNC_CODES.includes(c) ? T('nw.uncWhy.' + c) : ''
+const uncCell = it => `<td class="unccell">${it.uncertain
+  ? `<span class="unc" title="${esc(uncWhy(it.uncertain))}">${esc(uncLabel(it.uncertain))}</span>`
+  : ''}</td>`
+const uncV = it => (it.uncertain ? ' uncv' : '')
 const COLS = [['name', 'nw.colItem', ''], ['tab', 'nw.colTab', ''], ['qty', 'nw.colQty', 'r'],
   ['chaosEach', 'nw.colEach', 'r'], ['chaosTotal', 'nw.colTotal', 'r'],
-  ['source', 'nw.colSource', '']]
+  ['uncertain', 'nw.colTrust', ''], ['source', 'nw.colSource', '']]
 function renderList (rows) {
   const s = currentSnapshot
   const labels = tabLabelMap()
@@ -587,8 +636,9 @@ function renderList (rows) {
         `<td><span class="iname"><span class="kb ${esc(it.kind)}">${esc(kindLabel(it.kind))}</span>${esc(INAME(it.name))}${tradeBtn(it.name, it.kind, s.league)}</span></td>` +
         `<td class="tabcell">${esc(itemTabLabel(it, labels))}</td>` +
         `<td class="r">${fmtC(it.qty)}</td>` +
-        `<td class="r">${money(it.chaosEach, s.cdRatio)}</td>` +
-        `<td class="r">${money(it.chaosTotal, s.cdRatio)}</td>` +
+        `<td class="r${uncV(it)}">${money(it.chaosEach, s.cdRatio)}</td>` +
+        `<td class="r${uncV(it)}">${money(it.chaosTotal, s.cdRatio)}</td>` +
+        uncCell(it) +
         `<td class="srccell">${esc(srcLabel(it))}</td>` +
       `</tr>`).join('')
     : `<tr><td colspan="${COLS.length}" class="empty">${esc(T('nw.noMatch'))}</td></tr>`
@@ -617,8 +667,9 @@ function renderGrouped (rows) {
       `<td><span class="iname">${esc(INAME(it.name))}${tradeBtn(it.name, it.kind, s.league)}</span></td>` +
       `<td class="tabcell">${esc(itemTabLabel(it, labels))}</td>` +
       `<td class="r">${fmtC(it.qty)}</td>` +
-      `<td class="r">${money(it.chaosEach, s.cdRatio)}</td>` +
-      `<td class="r">${money(it.chaosTotal, s.cdRatio)}</td>` +
+      `<td class="r${uncV(it)}">${money(it.chaosEach, s.cdRatio)}</td>` +
+      `<td class="r${uncV(it)}">${money(it.chaosTotal, s.cdRatio)}</td>` +
+      uncCell(it) +
       `<td class="srccell">${esc(srcLabel(it))}</td>` +
     `</tr>`).join('')
     return `<div class="grp ${isGroupClosed(k, idx) ? 'closed' : ''}" data-kind="${esc(k)}"><div class="grph">` +
@@ -767,10 +818,16 @@ function render () {
   // compares as empty, not as the string "null": `source` is absent on rows
   // written by a backend from before it was carried, and localeCompare(null)
   // would have sorted those between "item:…" and "ninja:currency".
-  const rows = filteredItems().sort((a, b) =>
-    (typeof a[k] === 'number' && typeof b[k] === 'number')
-      ? (a[k] - b[k]) * dir
-      : String(a[k] ?? '').localeCompare(String(b[k] ?? '')) * (-dir))
+  // The Confidence column sorts as a number (marked 1, unmarked 0), so the
+  // first click puts the uncertain rows on top; Array.sort is stable, so each
+  // half keeps the order it had.
+  const sv = it => (k === 'uncertain' ? (it.uncertain ? 1 : 0) : it[k])
+  const rows = filteredItems().sort((a, b) => {
+    const x = sv(a); const y = sv(b)
+    return (typeof x === 'number' && typeof y === 'number')
+      ? (x - y) * dir
+      : String(x ?? '').localeCompare(String(y ?? '')) * (-dir)
+  })
   const shownTotal = rows.reduce((sum, it) => sum + it.chaosTotal, 0)
   statEl.innerHTML = T('nw.stat_html', { n: fmtC(rows.length), value: money(shownTotal, s.cdRatio) })
   const hidden = hiddenBelowThreshold()
@@ -785,16 +842,17 @@ function render () {
   const scoped = tabScoped(s)
   totalDivEl.innerHTML = `${fmt(scoped.totalDivine)}<u>div</u>`
   totalChaosEl.textContent = `${fmt(scoped.totalChaos)} c`
+  renderUncertainTotal(s)
   renderBars()
 }
 
 // ---- Unpriced (grouped by name, collapsed by default via <details>) -------------
 // Follows the SAME filters as the table, tab selection included: unchecking a
-// tab used to leave its unpriced items on screen, because the block was fed a
-// name-merged list with no tab membership. Each snapshot row now belongs to
-// exactly one tab (`tabIndex`, like items[]); the rows that survive the filter
-// are re-merged by name for the display. Rows served by an older backend carry
-// no tabIndex — those stay visible rather than silently vanishing.
+// tab removes its unpriced items too, which a name-merged list with no tab
+// membership could not do. Each snapshot row belongs to exactly one tab
+// (`tabIndex`, like items[]); the rows that survive the filter are re-merged by
+// name for the display. Rows served by an older backend carry no tabIndex —
+// those stay visible rather than silently vanishing.
 function unpricedRows (s) {
   const tabIdxOn = onTabIndexSet(s)
   const byName = new Map()
@@ -848,6 +906,49 @@ function renderUnpriced (s) {
     `<li>${esc(T('nw.unpricedRow', { name: INAME(u.name), n: fmtC(u.count), kind: kindLabel(u.kind) }))}</li>`).join('')
 }
 
+// ---- Listed below market (snapshot.belowMarket, networth/listing-audit.mjs) ----
+// The player's own price notes under this tool's market value, already decided
+// and sorted by the server (the whisper verdict's rule and threshold). Not
+// filtered by the tab selection, the kind chips or the search: the decision it
+// serves is whether to reprice an item that is up for sale, and an item is up
+// for sale whether or not its tab is counted above. Hidden when there is
+// nothing to say; a snapshot from an older backend has no belowMarket at all.
+const BELOW_SKIPS = ['rate-unknown', 'uncertain-price', 'unknown-currency']
+// A price in this block is compared, not summed: fmtC's whole chaos from 1 c up
+// would show 4.6 c against 5.45 c as "5 c | 5 c | 0.84". One decimal below
+// 100 c keeps the two prices as far apart as the ratio says they are.
+const fmtPrice = n => {
+  const v = Number(n) || 0
+  if (v === 0 || Math.abs(v) < 1 || Math.abs(v) >= 100) return fmtC(v)
+  return v.toLocaleString(I18n.locale(), { maximumFractionDigits: 1 })
+}
+function renderBelowMarket (s) {
+  const b = s && s.belowMarket
+  const rows = (b && Array.isArray(b.rows)) ? b.rows : []
+  const skipped = (b && b.notCompared) || {}
+  const skipParts = BELOW_SKIPS.filter(k => Number(skipped[k]) > 0)
+    .map(k => T('nw.below.skip.' + k, { n: fmtC(skipped[k]) }))
+  belowBox.hidden = rows.length === 0 && skipParts.length === 0
+  if (belowBox.hidden) return
+  const num = n => Number(n).toLocaleString(I18n.locale(), { maximumFractionDigits: 2 })
+  belowBody.innerHTML = rows.map(r => {
+    const name = esc(INAME(r.name)) + (Number(r.qty) > 1 ? ` ×${esc(fmtC(r.qty))}` : '')
+    const tab = r.fromTab ? T('nw.below.tabPrice', { tab: r.tab ?? '' }) : (r.tab ?? '')
+    const where = r.left != null && r.top != null ? T('nw.below.where', { left: r.left, top: r.top }) : '—'
+    return `<tr><td>${name}</td><td>${esc(tab)}</td><td>${esc(where)}</td>` +
+      `<td class="r" title="${esc(r.note)}">${esc(fmtPrice(r.listedChaos))} c</td>` +
+      `<td class="r">${esc(fmtPrice(r.marketChaos))} c</td>` +
+      `<td class="r">${esc(num(r.ratio))} (−${esc(num(r.pct))} %)</td></tr>`
+  }).join('')
+  // The server sends the biggest losses only (BELOW_MAX in listing-audit.mjs)
+  // and counts the rest.
+  const more = Number(b && b.more) || 0
+  belowMoreEl.hidden = more <= 0
+  belowMoreEl.textContent = more > 0 ? T('nw.below.more', { n: fmtC(more), max: fmtC(rows.length) }) : ''
+  belowSkippedEl.hidden = skipParts.length === 0
+  belowSkippedEl.textContent = skipParts.length ? T('nw.below.skipped', { list: skipParts.join('; ') }) : ''
+}
+
 // ---- Top-level snapshot rendering -----------------------------------------------
 function showNoResult (msg) {
   shellEl.hidden = true
@@ -864,6 +965,11 @@ function renderSnapshot (s) {
   if (sideBoxEl) sideBoxEl.hidden = false
   totalDivEl.innerHTML = `${fmt(s.totalDivine)}<u>div</u>`
   totalChaosEl.textContent = `${fmt(s.totalChaos)} c`
+  // The filter is offered only while something is marked; a snapshot without
+  // a marked row also drops a filter that would now show nothing.
+  const anyUnc = (s.items || []).some(i => i.uncertain)
+  uncBtn.hidden = !anyUnc
+  if (!anyUnc && st.uncOnly) { st.uncOnly = false; uncBtn.classList.remove('on') }
 
   // Name-keyed leftovers from before the index switch — needs a tab list to
   // resolve, so it happens here and not at module init.
@@ -876,6 +982,7 @@ function renderSnapshot (s) {
   renderBars()
   renderChips()
   render()
+  renderBelowMarket(s)
   renderAutoSync(s)
 }
 
@@ -915,9 +1022,9 @@ function renderError (message) {
 // refresher's state for this user changes (auth pause, cooldown, renewal).
 // The stored POESESSID never travels in any of these messages.
 //
-// The credential FORM is no longer here. It used to be a modal on this page;
-// it lives on the settings page now, together with the admin area, so there is
-// exactly one place where something gets configured. What stays here is the
+// The credential FORM is not here: it lives on the settings page, together with
+// the admin area, so there is exactly one place where something gets
+// configured. What stays here is the
 // status line and its one job: naming the state and pointing at the page that
 // fixes it.
 const appStatusEl = document.getElementById('appStatus')
@@ -926,13 +1033,13 @@ let syncStatus = null       // last networth-sync-status message from the server
 let cooldownTimer = null    // clears the "rate-limited" line once `until` passes
 
 function statusLineText (st) {
-  const line = syncStatusLine(st)
-  if (!line) return ''
-  if (!line.timed) return T(line.key)
-  return T(line.key, { at: line.until ? new Date(line.until).toLocaleTimeString(I18n.locale()) : T('nw.syncSoon') })
+  return syncLineText(st, T, I18n.locale())
 }
 
 function applySyncStatus (st) {
+  // The shell's blind summary needs to know about an expired cookie; this
+  // page writes its own, richer sync line and must not write the shared one.
+  if (window.Shell) window.Shell.noteSyncState(st && st.state)
   syncStatus = st
   if (cooldownTimer) { clearTimeout(cooldownTimer); cooldownTimer = null }
   const text = statusLineText(st)
@@ -943,18 +1050,22 @@ function applySyncStatus (st) {
   // on its own once `until` elapses (the next real status still overrides).
   if (st && st.state === 'cooldown' && st.until) {
     const wait = Math.max(1000, st.until - Date.now() + 1000)
-    cooldownTimer = setTimeout(() => { if (syncStatus && syncStatus.state === 'cooldown') applySyncStatus({ state: 'ok' }) }, wait)
+    // The rest of the message stays: a pace (sync follows the game) is
+    // still the server's word after the cooldown.
+    cooldownTimer = setTimeout(() => { if (syncStatus && syncStatus.state === 'cooldown') applySyncStatus({ ...syncStatus, state: 'ok', until: null }) }, wait)
   }
 }
 
-// Clicking the SYNC message goes to the settings page — every state it can show
-// ("expired", "no credentials") is fixed there. The data auto-update note in
+// Clicking the SYNC message goes to the settings page — every fault it can show
+// ("expired", "no credentials") is fixed there; a pace line is not a fault. The data auto-update note in
 // the same slot is informational and must not navigate anywhere.
 if (appStatusEl) {
   appStatusEl.addEventListener('click', e => {
     const hit = e.target && e.target.closest ? e.target.closest('[data-status-key]') : null
     if (hit && hit.dataset.statusKey !== 'sync') return
-    if (statusLineText(syncStatus)) location.href = '/settings.html'
+    // A pace line (sync follows the game) is information, nothing to fix there.
+    const line = syncStatusLine(syncStatus)
+    if (line && !line.info) location.href = '/settings.html'
   })
 }
 
@@ -1055,6 +1166,8 @@ function connect () {
       case 'league-state': window.Shell.applyLeagueState(msg); break // global rail slot
       case 'data-status':  window.Shell.applyDataStatus(msg); break  // M2 data freshness
       case 'release-status': window.Shell.applyReleaseStatus(msg); break // newer release -> status line
+      case 'networth-session': window.Shell.applySessionStatus(msg); break // running farm session -> status line
+      case 'source-status': window.Shell.applySourceStatus(msg); break // price sources' age -> status line
       case 'need-identity':
         if (Array.isArray(msg.users) && msg.users.length) USERS = msg.users
         if (whoami) whoami.hidden = true

@@ -6,10 +6,11 @@
 // server.mjs) — this module only writes down what happened.
 //
 // The question it answers: "who spent the budget?" Four consumers share ONE
-// anonymous trade quota — the user's price checks, the corpse pricer (one name
-// every 2min) and the data refresher's daily catalogue
-// call. When a 429 arrives, nothing in the log used to say which of them had
-// been busy, so a banner could not be explained after the fact.
+// anonymous trade quota (CONSUMER below) — the user's price checks, the corpse
+// pricer (one name every 2min), the data refresher's daily catalogue call and
+// the stat catalogue behind the unknown-mod repair (at most one request per
+// TTL). When a 429 arrives, the log says which of them had been busy, so a
+// banner can be explained after the fact.
 //
 // How the attribution travels: an AsyncLocalStorage context, not a parameter
 // on every signature. The server tags a job ONCE where it is dispatched
@@ -36,9 +37,8 @@
 //     requests EACH of our consumers made inside the offending window.
 
 import { AsyncLocalStorage } from 'node:async_hooks'
-// The header parser only — NOT out of networth/stash-client.mjs, where it used
-// to come from: that made the trade path import the whole net-worth stack, and
-// once the stash client learnt to read a numeric setting it closed an import
+// The header parser only — NOT out of networth/stash-client.mjs: that would
+// make the trade path import the whole net-worth stack and close an import
 // cycle through data-refresher.mjs. See rate-limit-headers.mjs.
 import { parseRateLimitHeaders } from './rate-limit-headers.mjs'
 

@@ -1,55 +1,35 @@
 // "German is running behind English" — the one question the data refresher
-// cannot answer.
+// cannot answer: `status()` in data-refresher.mjs reports each source by
+// itself, and a source that says "checked, unchanged, fine" is fine BY ITSELF
+// even while the language it feeds has drifted a patch behind English (design
+// doc, section 2, Skew-Policy, which files the comparison as this module).
 //
-// `status()` in data-refresher.mjs reports, per source, when that source last
-// succeeded and what its last outcome was. It never puts two sources next to
-// each other, and it cannot: a source that says "checked, unchanged, fine" is
-// fine BY ITSELF even while the language it feeds has drifted a whole patch
-// behind the English one. The design doc says so explicitly (section 2,
-// Skew-Policy) and files the comparison as new work. This is that work.
-//
-// WHAT IS COMPARED, and why these four numbers. The German set is built as a
-// copy of the English skeleton with the display texts replaced (design doc,
-// section 2), so English is the yardstick in every row and the question is
-// always the same: how much of it did the localized set fail to carry?
-//
+// WHAT IS COMPARED. The German set is a copy of the English skeleton with the
+// display texts replaced (design doc, section 2), so English is the yardstick
+// in every row: how much of it did the localized set fail to carry?
 //   items      English `refName`s with no line in the localized items file.
 //   stats      English stat `ref`s with no line in the localized stats file.
-//   matchers   English `ref`s whose localized entry has NO matcher at all.
-//              This is the coverage check the generator's validation runs, seen
-//              from the outside: a stat without a matcher can never be parsed
-//              out of an item text, so the mod is simply invisible.
+//   matchers   English `ref`s whose localized entry has NO matcher at all (the
+//              generator's coverage check seen from outside): such a mod can
+//              never be parsed out of an item text.
 //   advanced   English matchers carrying an `advanced` form whose localized
 //              stat has none. The extended clipboard form (Ctrl+Alt+C) is the
-//              NORMAL case for the German user, and it reads exactly this
-//              field — a gap here fails silently and only on some items, which
-//              is the worst failure shape this project knows.
+//              NORMAL case for the German user and reads exactly this field —
+//              a gap fails silently and only on some items.
+// Plus `extra`: localized refs that do not exist in English. Always zero by
+// construction, so it is a regression barrier and warns from the first
+// occurrence regardless of the threshold. THE THRESHOLD is a ratio against the
+// English count (POE_LANG_SKEW_WARN_RATIO), since "12 missing" means something
+// else in 8 000 stats than in 40. A language that is CONFIGURED but has no data
+// set at all warns on its own, without a ratio.
 //
-// Plus one asymmetric check, `extra`: localized refs that do not exist in
-// English at all. Under the copy-the-skeleton construction that number is
-// always zero, so any other value means the generator left its own design —
-// a regression barrier, not a gradual measure, and therefore it warns from the
-// first occurrence regardless of the threshold.
-//
-// THE THRESHOLD is a ratio against the English count, not an absolute number:
-// "12 missing" means something different in a set of 8 000 stats than in one of
-// 40. It is configuration (POE_LANG_SKEW_WARN_RATIO), not a constant in here.
-//
-// A language that is CONFIGURED but has no data set at all is the loudest case
-// and does not need a ratio: it warns on its own.
-//
-// THIS VIEW DOES NOT DECIDE ANYTHING, and after docs/bugs.md B23 that is worth
-// saying out loud rather than leaving to be inferred. Whether a freshly
-// generated set may go live is a question about ONE RUN — did it lose coverage
-// the live set already had — and it is answered where the run happens
-// (lang-derive.mjs, validate()). What is answered here is the other half: how
-// far the set that IS being served has drifted from English, continuously, for
-// as long as it stays that way. The two numbers even sit in different rows
-// depending on which side is behind: a localized set that was CARRIED FORWARD
-// past an English update is short of whole refs and shows up under `stats`,
-// while one that was regenerated carries every ref and shows its gap under
-// `matchers`. Same distance, and the second shape is the one to expect now that
-// a run with an honest source gap is adopted instead of thrown away.
+// THIS VIEW DECIDES NOTHING (docs/bugs.md B23). Whether a freshly generated set
+// may go live is a question about ONE RUN, answered where the run happens
+// (lang-derive.mjs, validate()). Here: how far the set being served has drifted
+// from English, continuously. A localized set CARRIED FORWARD past an English
+// update is short of whole refs and shows under `stats`; a regenerated one
+// carries every ref and shows its gap under `matchers` — the shape to expect,
+// since a run with an honest source gap is adopted instead of thrown away.
 
 import { readFile } from 'node:fs/promises'
 

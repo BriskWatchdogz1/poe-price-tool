@@ -1,11 +1,10 @@
 // Browser test (headless Chrome, same setup as shell-load.test.mjs): the
 // settings page — both halves of it.
 //
-// The sync credentials used to be a modal on the net-worth page. They are a
-// section of this page now, so the net-worth status line no longer opens
-// anything, it LINKS here; the rest of the promise is unchanged and still
-// checked: saving writes the file, the status line clears itself, and the
-// POESESSID is nowhere in the DOM afterwards.
+// The sync credentials are a section of this page, so the net-worth status
+// line opens nothing, it LINKS here; and the promise is checked: saving writes
+// the file, the status line clears itself, and the POESESSID is nowhere in the
+// DOM afterwards.
 //
 // The second half is new: the admin area and its state model. The password goes
 // out as a header on every request, lives in sessionStorage and nowhere else,

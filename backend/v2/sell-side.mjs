@@ -8,30 +8,19 @@
 //
 // `chaosPerDivine` MUST be the tool's single shared C:D source (the
 // currency-exchange divine rate, see chaosPerDivineFallback in
-// networth/faustus.mjs) — never a second, private ratio.
+// networth/faustus.mjs) — never a second, private ratio. The rates come from
+// MATCHED trade volumes, not asks or bids: the absolute numbers are estimates,
+// but the chaos-vs-divine COMPARISON is sound (same procedure, same bias on
+// both sides). Do not read more into the per-side numbers than that.
 //
-// These rates come from MATCHED trade volumes (what the hour actually filled),
-// not from asks or bids. The absolute numbers are therefore estimates — but
-// the chaos-vs-divine COMPARISON is sound, because both sides are estimated by
-// the exact same procedure and carry the same bias. Do not read more into the
-// per-side numbers than that.
-//
-// ---------------------------------------------------------------------------
-// The outlier case (mandatory, not optional): a side can pass the pricer's
-// quote-volume floor and still be far too thin to compare against — one lone
-// 10-divine trade "prices" the divine side and the rail would then claim a
-// +118 % edge that no real seller can collect. Same disease chooseBulkSlice in
-// engine.mts treats with BULK_EXTREME_SPLIT: when the numbers scream, follow
-// the evidence, not the price. Here the evidence is the digest's own
-// volume_traded, and the consequence is stricter: a side that is not attested
-// does not get compared at all (we show the attested side and drop the claim),
-// because a displayed percentage IS the product here — a wrong one is worse
-// than none.
-//
-// Attestation thresholds, measured on the live Allflame digest (2026-07-31,
-// 8h union, 187 items with BOTH a chaos and a divine market, C:D 174.4).
-// Sides whose estimate was demonstrably wrong (vs poe.ninja / the other,
-// liquid side) versus the thinnest sides whose estimate held up:
+// The outlier case (mandatory): a side can pass the pricer's quote-volume floor
+// and still be far too thin — one lone 10-divine trade "prices" the divine side
+// and the rail would claim a +118 % edge no real seller can collect (the
+// disease chooseBulkSlice treats with BULK_EXTREME_SPLIT in engine.mts). A side
+// not attested by the digest's own volume_traded is not compared at all: the
+// attested side is shown and the claim dropped, because a wrong percentage is
+// worse than none. Thresholds measured on the live Allflame digest (2026-07-31,
+// 8h union, 187 items with BOTH a chaos and a divine market, C:D 174.4):
 //
 //   item                        thin side   volX   quote-turnover(→c)  claimed gap
 //   The Apothecary              chaos          1       1900c              +277 %  bogus
@@ -45,19 +34,15 @@
 //   Bestiary Scarab o.t. Herd   divine       396       1744c              2.4 %
 //   Outfoxed                    divine         3       1744c              5.6 %
 //
-// Two independent failure modes, two floors (a side must clear BOTH):
-//   - volX >= 10: single/double trades of the item itself say nothing
-//     (Apothecary/Demon/Divine Justice — 1-2 cards traded). 10 mirrors the
-//     divine quote floor QUOTE_VOL_MIN and cleared every bogus card side.
-//   - quote turnover >= 5000 chaos-equivalent: every bogus side above sat at
-//     <= 2441c (mostly exactly the 10-divine floor ~1744c — i.e. potentially
-//     ONE trade), while from 5000c upward no gap beyond 78 % was observed and
-//     from 30000c none beyond 20 %. 5000 sits in the empty band above the
-//     bogus outlier, ~2x its top.
-//   The thin-but-honest rows land below the floors too — they are suppressed
-//   as well, which only costs an "~even" claim nobody needed. Better silent
-//   than confidently wrong.
-// ---------------------------------------------------------------------------
+// Two floors, a side must clear BOTH:
+//   - volX >= 10: one or two trades of the item say nothing (Apothecary, Demon,
+//     Divine Justice). 10 mirrors the divine quote floor QUOTE_VOL_MIN.
+//   - quote turnover >= 5000 chaos-equivalent: every bogus side sat at <= 2441c
+//     (mostly the 10-divine floor ~1744c, potentially ONE trade); from 5000c no
+//     gap beyond 78 % was observed, from 30000c none beyond 20 %. 5000 sits in
+//     the empty band above the bogus sides, ~2x their top.
+// The thin-but-honest rows are suppressed too, which only costs an "~even"
+// claim. Better silent than confidently wrong.
 
 export const SELL_MIN_UNITS = 10 // items traded on that side (volX floor)
 export const SELL_MIN_QUOTE_TURNOVER_C = 5000 // quote turnover in chaos-equivalents
@@ -70,6 +55,25 @@ export const SELL_MIN_QUOTE_TURNOVER_C = 5000 // quote turnover in chaos-equival
 // lower bar to keep it once it already holds it — see compareSellSides below.
 export const CHAOS_TAKEOVER_PCT = 5 // chaos must beat divine by this much to take over
 export const CHAOS_HOLD_PCT = 2 // once chaos is recommended, it holds until its edge drops below this
+
+// Does a quotient worked out from market numbers reach `floor`? A pair of
+// numbers that states exactly the floor can divide to a hair under it in
+// floating point: 200.1 / 20.01 is 9.999999999999998, not 10 (docs/bugs.md
+// B36). A miss of at most FLOAT_SLACK of the floor therefore counts as
+// reaching it. That is far below anything the numbers themselves state
+// (poe.ninja rounds to 2 decimals, a thousandth of a 10-unit floor), so it
+// absorbs arithmetic error only: 9.99 units by the stated numbers stay under
+// a floor of 10, because a line rejected falls back to the next source and a
+// line priced wrongly does not. Callers: both unit floors of
+// exchangeLineValue in networth/valuator.mjs, DEEP_HOUR_DISAGREE_RATIO in
+// networth/faustus.mjs, and the takeover and hold bars of compareSellSides
+// below. Other comparisons on a quotient in those files do not use it;
+// docs/bugs.md B36 names them and why. It lives in this module because both
+// of the others import it already.
+const FLOAT_SLACK = 1e-9
+export function reachesFloor (value, floor) {
+  return value >= floor - Math.abs(floor) * FLOAT_SLACK
+}
 
 // Is one side ({ perItem, volX, volQuote }) attested enough to take part in a
 // comparison? `chaosPerQuote` converts the quote turnover to chaos (1 for the
@@ -170,7 +174,7 @@ export function compareSellSides (sell, chaosPerDivine, prevBetter = null) {
     // once it already has it (CHAOS_HOLD_PCT) — see the constants above.
     const chaosEdge = (viaChaos / viaDivine - 1) * 100
     const threshold = prevBetter === 'chaos' ? CHAOS_HOLD_PCT : CHAOS_TAKEOVER_PCT
-    if (chaosEdge >= threshold) {
+    if (reachesFloor(chaosEdge, threshold)) {
       out.better = 'chaos'
       out.edgePct = chaosEdge
     } else {

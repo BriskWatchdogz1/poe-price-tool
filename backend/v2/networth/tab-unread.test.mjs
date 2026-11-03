@@ -152,10 +152,10 @@ test('a tab that does not answer keeps its stored contents and produces no sync 
 })
 
 test('a tab that keeps failing does not pin the round-robin to itself', async () => {
-  // The attempt stamp used to be read only for a tab with NO stored data, so a
-  // tab that HAD been synced and then started failing kept its old syncedAt,
-  // stayed the stalest tab and was picked again on every single tick — for
-  // ever, while no other tab ever came round again.
+  // With the attempt stamp read only for a tab with NO stored data, a tab that
+  // HAD been synced and then starts failing keeps its old syncedAt, stays the
+  // stalest tab and is picked again on every single tick — for ever, while no
+  // other tab comes round again.
   const { dir, cleanup } = await tmpDir('poison-store')
   const store = createNetworthStore(join(dir, 'nw.json'))
   await store.load()

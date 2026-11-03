@@ -1,0 +1,11 @@
+{
+"core": {"items":[{"id":"chaos","name":"Chaos Orb","image":"/gen/image/WzI1LDE0LHsiZiI6IjJESXRlbXMvQ3VycmVuY3kvQ3VycmVuY3lSZXJvbGxSYXJlIiwic2NhbGUiOjF9XQ/46a2347805/CurrencyRerollRare.png","category":"Currency","detailsId":"chaos-orb"},{"id":"divine","name":"Divine Orb","image":"/gen/image/WzI1LDE0LHsiZiI6IjJESXRlbXMvQ3VycmVuY3kvQ3VycmVuY3lNb2RWYWx1ZXMiLCJzY2FsZSI6MX1d/ec48896769/CurrencyModValues.png","category":"Currency","detailsId":"divine-orb"}],"rates":{"divine":0.002499},"primary":"chaos","secondary":"divine"},
+"lines": [
+{"id":"essence-of-delirium","primaryValue":63.18,"volumePrimaryValue":600.2,"maxVolumeCurrency":"divine","maxVolumeRate":6.33,"sparkline":{"totalChange":7.89,"data":[13.51,12.76,9.62,-8.94,2.63,-11.81,7.89]}},
+{"id":"essence-of-hysteria","primaryValue":35,"volumePrimaryValue":361.7,"maxVolumeCurrency":"chaos","maxVolumeRate":0.02857,"sparkline":{"totalChange":3.56,"data":[-9.45,-13.28,-11.76,-12.36,-15.59,-8.51,3.56]}}
+],
+"items": [
+{"id":"essence-of-delirium","name":"Essence of Delirium","image":"/gen/image/WzI1LDE0LHsiZiI6IjJESXRlbXMvQ3VycmVuY3kvRXNzZW5jZS9NYWRuZXNzMSIsInNjYWxlIjoxfV0/e7a9b32a18/Madness1.png","category":"Essences","detailsId":"essence-of-delirium"},
+{"id":"essence-of-hysteria","name":"Essence of Hysteria","image":"/gen/image/WzI1LDE0LHsiZiI6IjJESXRlbXMvQ3VycmVuY3kvRXNzZW5jZS9UZXJyb3IxIiwic2NhbGUiOjF9XQ/10ab1f6037/Terror1.png","category":"Essences","detailsId":"essence-of-hysteria"}
+]
+}

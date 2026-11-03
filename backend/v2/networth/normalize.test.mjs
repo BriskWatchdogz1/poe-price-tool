@@ -1,7 +1,9 @@
 import { test, before } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFile } from 'node:fs/promises'
-import { loadItemsIndex, normalizeItem } from './normalize.mjs'
+import { readFile, mkdtemp, writeFile, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { loadItemsIndex, normalizeItem, descriptorForName } from './normalize.mjs'
 
 // Minimal but shape-accurate GGG stash item fixtures (legacy get-stash-items).
 const CHAOS_STACK = { frameType: 5, typeLine: 'Chaos Orb', name: '', stackSize: 273, ilvl: 0 }
@@ -213,4 +215,59 @@ test('unique carries the largest linked socket group (for the 5L/6L price row)',
   // No sockets at all (ring/amulet) -> 0, no crash.
   const ring = { frameType: 3, name: 'Y', typeLine: 'Two-Stone Ring', ilvl: 79 }
   assert.equal(normalizeItem(ring, index).links, 0)
+})
+
+// Buyer whispers name an item, they never carry a stash item. descriptorForName
+// must give the name the kind its stash item gets, so a whisper and the Net
+// Worth page take the same valuation route.
+test('descriptorForName gives a name the kind its stash item gets', () => {
+  const cases = [
+    [{ frameType: 5, typeLine: 'Divine Orb', name: '', stackSize: 1 }, 'Divine Orb'],
+    [DIV_CARD, 'The Doctor'],
+    [SCARAB, 'Titanic Scarab'],
+    [BEAST, 'Black Mórrigan'],
+    [CORPSE, 'Blasphemer'],
+    [{ frameType: 0, name: '', typeLine: 'Screaming Invitation', stackSize: 1 }, 'Screaming Invitation'],
+    [VIAL, 'Vial of Awakening'],
+    [CHAOS_STACK, 'Chaos Orb']
+  ]
+  for (const [ggg, name] of cases) {
+    const fromStash = normalizeItem(ggg, index)
+    const fromName = descriptorForName(name, index)
+    assert.ok(fromName, `${name} has a descriptor`)
+    assert.equal(fromName.kind, fromStash.kind, `${name}: same kind as its stash item`)
+    assert.equal(fromName.name, fromStash.name, `${name}: same name`)
+    assert.equal(fromName.stack, 1, 'one unit unless told otherwise')
+  }
+  assert.equal(descriptorForName('Orb of Alchemy', index, { stack: 10 }).stack, 10)
+  assert.equal(descriptorForName('Large Cluster Jewel', index), null, 'a cluster jewel base is never priced by name')
+  assert.equal(descriptorForName('Simple Robe', index), null, 'a plain base is not a fungible')
+  assert.equal(descriptorForName('Summon Ice Golem', index), null, 'a gem without level and quality is not priced')
+  assert.equal(descriptorForName('No Such Thing At All', index), null)
+  // The data carries no incubators today; a stash one is an unknown skip, and
+  // so is the name.
+  assert.equal(normalizeItem(INCUBATOR, index).kind, 'skip')
+  assert.equal(descriptorForName('Abyssal Incubator', index), null)
+})
+
+test('the items index maps trade tags to reference names', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'ppt-bytag-'))
+  try {
+    const path = join(dir, 'items.ndjson')
+    await writeFile(path, [
+      { name: 'Orb of Alchemy', refName: 'Orb of Alchemy', namespace: 'ITEM', tradeTag: 'alch', exchangeable: true },
+      { name: 'Chaos Orb', refName: 'Chaos Orb', namespace: 'ITEM', tradeTag: 'chaos', exchangeable: true },
+      { name: 'Simple Robe', refName: 'Simple Robe', namespace: 'ITEM', craftable: { category: 'Body Armour' } }
+    ].map(e => JSON.stringify(e)).join('\n') + '\n')
+    const idx = await loadItemsIndex(path)
+    assert.equal(idx.byTag.get('alch'), 'Orb of Alchemy')
+    assert.equal(idx.byTag.get('chaos'), 'Chaos Orb')
+    assert.equal(idx.byTag.get('banana'), undefined)
+    assert.equal(idx.byTag.size, 2)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+  // The shipped data carries the tags a trade whisper uses.
+  assert.equal(index.byTag.get('divine'), 'Divine Orb')
+  assert.equal(index.byTag.get('exalted'), 'Exalted Orb')
 })

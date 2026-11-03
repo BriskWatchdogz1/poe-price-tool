@@ -39,8 +39,9 @@ test('user language: read, switch, persist, and tell the open tabs', { timeout: 
   const port = await freePort()
   const storePath = join(tmp, 'user-langs.json')
 
-  // A stored entry for a user who no longer exists plus one for a language
-  // nobody can parse: both have to be dropped without stopping the start.
+  // A stored entry for a user who is not in POE_USERS plus one for a language
+  // nobody can parse. Neither may stop the start: "ghost" is kept out of force
+  // and written back with every save (B33), "kl" is dropped.
   await writeFile(storePath, JSON.stringify({ ghost: 'de', player2: 'kl' }))
 
   const srv = spawn(process.execPath, [join(ROOT, 'backend/v2/server.mjs')], {
@@ -89,7 +90,7 @@ test('user language: read, switch, persist, and tell the open tabs', { timeout: 
   try {
     assert.ok(up, 'server did not come up:\n' + srvLog.join(''))
 
-    // ---- the two unusable stored entries were dropped, not obeyed -----------
+    // ---- the two unusable stored entries are not obeyed ----------------------
     const log = srvLog.join('')
     assert.match(log, /ghost.*POE_USERS/, 'a user that is no longer in POE_USERS is named in the warning')
     assert.match(log, /"kl" for "player2".*not a supported language/, 'and so is the unsupported language')
@@ -146,7 +147,12 @@ test('user language: read, switch, persist, and tell the open tabs', { timeout: 
 
     // On disk BEFORE the answer went out: a switch that is in force but not
     // stored would revert at the next restart with nothing to show for it.
-    assert.equal(JSON.parse(await readFile(storePath, 'utf8')).player1, target)
+    const onDisk = JSON.parse(await readFile(storePath, 'utf8'))
+    assert.equal(onDisk.player1, target)
+    // The entry of the user who is not in POE_USERS survives the save, and the
+    // one with the unsupported language does not come back (B33).
+    assert.equal(onDisk.ghost, 'de', 'a stored choice outside POE_USERS is written back, not lost')
+    assert.equal(onDisk.player2, undefined, 'the dropped entry stays dropped')
 
     await sleep(300)
     const pushed = seen.find(m => m.type === 'league-state')

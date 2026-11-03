@@ -527,7 +527,7 @@ test('a shorter Retry-After never shortens the configured cooldown', async () =>
 //   3. A half-read folder tab NEVER reaches the store. Not as empty, not as
 //      partial; the previous complete contents stand until the walk finishes.
 //   4. The visibility survives: the B7 yield line, and a counterpart to the
-//      `still busy`/`finished after` pair that a walk no longer produces.
+//      `still busy`/`finished after` pair, which a walk does not produce.
 // ---------------------------------------------------------------------------
 
 /**
@@ -758,5 +758,41 @@ test('a completed walk is bracketed in the log, and an empty one still says B7\'
   assert.equal(closed.length, 1, 'the closing bracket, once per folder-tab turn')
   assert.match(closed[0], /folder tab "Maps" \(index 0\) for player1: 3 sub-tabs over 4 steps in \d+s/)
   assert.equal(/not read/.test(closed[0]), false, 'nothing was skipped here, so the line does not mention skipping')
+  await cleanup()
+})
+
+// ---- roundSince: what makes a farm session's balance final -------------------
+
+test('roundSince counts a tab once it was read or attempted after the moment, complete only when every live tab is', async () => {
+  const { s, cleanup } = await freshStore()
+  const client = mockClient({
+    tabs: [{ index: 0, name: 'A' }, { index: 1, name: 'B' }, { index: 2, name: 'C' }],
+    contents: { 0: [item('Chaos Orb', 1)], 2: [item('Divine Orb', 200)] },
+    // Tab 1 never yields a reading: its attempt is what has to count.
+    fail: { 1: () => Object.assign(new Error('HTTP 503'), { kind: 'server' }) }
+  })
+  const { r } = makeRefresher({ store: s, client, users: CREDS })
+  await r.tickOnce() // the tab list
+  const since = Date.now()
+  assert.deepEqual(r.roundSince('player1', since), { done: 0, total: 3, complete: false })
+  await r.tickOnce()
+  assert.deepEqual(r.roundSince('player1', since), { done: 1, total: 3, complete: false })
+  await r.tickOnce()
+  await r.tickOnce()
+  assert.deepEqual(client.fetched.slice().sort(), [0, 1, 2])
+  assert.equal(s.getTab('player1', 1), null, 'the failing tab has no reading')
+  assert.deepEqual(r.roundSince('player1', since), { done: 3, total: 3, complete: true })
+  // A moment after all of that has nothing behind it yet.
+  await new Promise(resolve => setTimeout(resolve, 5))
+  assert.deepEqual(r.roundSince('player1', Date.now()), { done: 0, total: 3, complete: false })
+  await cleanup()
+})
+
+test('roundSince before the first tab list is 0 of 0 and not complete', async () => {
+  const { s, cleanup } = await freshStore()
+  const client = mockClient({ tabs: [{ index: 0, name: 'A' }] })
+  const { r } = makeRefresher({ store: s, client, users: CREDS })
+  assert.deepEqual(r.roundSince('player1', 0), { done: 0, total: 0, complete: false })
+  assert.deepEqual(client.listed, [], 'asking costs no request')
   await cleanup()
 })

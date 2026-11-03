@@ -173,9 +173,9 @@ test('a sub-tab GGG listed but the walk cannot address makes the walk INCOMPLETE
 
 test('a sub-tab that answers 200 without an items array is UNKNOWN, not empty', async () => {
   // B7's measured shape, one level up: the walk finishes, nothing threw, and
-  // the tab it would hand up is a SUBSET. That subset used to be written as the
-  // tab — which is a whole stash tab's worth of items leaving and, on the next
-  // turn that got a real answer, arriving again (docs/bugs.md B2).
+  // the tab it would hand up is a SUBSET. Written as the tab, that subset is a
+  // whole stash tab's worth of items leaving and, on the next turn that gets a
+  // real answer, arriving again (docs/bugs.md B2).
   const api = {
     calls: [],
     async listTabChildren () { return { listed: 2, childIds: ['C0', 'C1'], items: [] } },

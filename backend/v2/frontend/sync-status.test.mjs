@@ -19,7 +19,7 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import vm from 'node:vm'
-import { syncStatusLine, autosyncSummary, SYNCED_RECENTLY_MS } from './networth-sync.js'
+import { syncStatusLine, sessionRoundLine, syncLineText, autosyncSummary, SYNCED_RECENTLY_MS } from './networth-sync.js'
 
 const here = p => fileURLToPath(new URL(p, import.meta.url))
 const MIN = 60_000
@@ -150,4 +150,108 @@ test('A3: the label says "synced in the last N min", not "fresh"', async () => {
   const en = I18n.t('nw.autosync', s)
   assert.match(en, /3\/65 tabs synced in the last 10 min/)
   assert.ok(!/fresh/.test(en))
+})
+
+// ---- Sync follows the game (`pace`) -----------------------------------------
+test('the pace is said only while the sync runs normally', () => {
+  assert.deepEqual(syncStatusLine({ state: 'ok', pace: { mode: 'yields', everyMs: 300_000 } }),
+    { key: 'nw.syncYields', timed: false, until: null, min: 5, info: true })
+  assert.deepEqual(syncStatusLine({ state: 'ok', pace: { mode: 'rests', everyMs: 300_000 } }),
+    { key: 'nw.syncRests', timed: false, until: null, min: 5, info: true })
+  assert.equal(syncStatusLine({ state: 'ok', pace: { mode: 'rests', everyMs: 0 } }).key, 'nw.syncRestsFully')
+  assert.equal(syncStatusLine({ state: 'ok', pace: { mode: 'yields', everyMs: 0 } }).key, 'nw.syncYieldsFully',
+    'with IDLE_REST a yielding user rests because the own game is not running; others still play')
+  assert.equal(syncStatusLine({ state: 'ok', pace: { mode: 'yields', everyMs: 20_000 } }).min, 1, 'never "0 min"')
+  const until = 1_700_000_000_000
+  assert.equal(syncStatusLine({ state: 'cooldown', until, pace: { mode: 'yields', everyMs: 300_000 } }).key, 'nw.syncCooldown',
+    'a cooldown is said, not the pace (no pace applies during one)')
+  assert.equal(syncStatusLine({ state: 'expired', pace: { mode: 'rests', everyMs: 300_000 } }).key, 'nw.syncExpired')
+  assert.equal(syncStatusLine({ state: 'ok' }), null, 'without pace: null as before')
+  assert.equal(syncStatusLine({ state: 'ok', pace: { mode: 'banana', everyMs: 1 } }), null, 'an unknown mode says nothing')
+})
+
+test('the shared status line names the pace on History and Price Check, and drops it with the state', async () => {
+  const { Shell, line } = await loadShell()
+  Shell.applySyncStatus({ type: 'networth-sync-status', state: 'ok', pace: { mode: 'yields', everyMs: 300_000 } })
+  assert.match(line('sync'), /Sync yields: your game is not running — about one tab every 5 min/)
+  Shell.applySyncStatus({ state: 'ok', pace: { mode: 'rests', everyMs: 300_000 } })
+  assert.match(line('sync'), /Sync rests: no game running anywhere — about one tab every 5 min/)
+  Shell.applySyncStatus({ state: 'ok', pace: { mode: 'rests', everyMs: 0 } })
+  assert.match(line('sync'), /Sync rests while nobody plays/)
+  Shell.applySyncStatus({ state: 'ok', pace: { mode: 'yields', everyMs: 0 } })
+  assert.match(line('sync'), /Sync rests while your game is not running/)
+  assert.doesNotMatch(line('sync'), /nobody/)
+  Shell.applySyncStatus({ state: 'cooldown', until: 1, pace: { mode: 'rests', everyMs: 300_000 } })
+  assert.equal(line('sync'), undefined, 'only with state ok')
+  Shell.applySyncStatus({ state: 'ok' })
+  assert.equal(line('sync'), undefined)
+})
+
+test('the pace texts exist in both languages', async () => {
+  const { I18n } = await loadShell()
+  for (const lang of ['en', 'de']) {
+    for (const key of ['nw.syncYields', 'nw.syncRests', 'nw.syncRestsFully', 'nw.syncYieldsFully', 'shell.syncYields', 'shell.syncRests', 'shell.syncRestsFully', 'shell.syncYieldsFully']) {
+      assert.ok(I18n.STRINGS[lang][key], `${lang} ${key}`)
+    }
+  }
+})
+
+test('a pace line keeps its pace when a cooldown ends on the page, and does not open the settings', async () => {
+  for (const f of ['networth.js', 'settings.js']) {
+    const src = await readFile(here(f), 'utf8')
+    assert.match(src, /applySyncStatus\(\{ \.\.\.syncStatus, state: 'ok', until: null \}\)/, `${f} keeps pace after a local cooldown end`)
+  }
+  const nw = await readFile(here('networth.js'), 'utf8')
+  assert.match(nw, /line\.info/, 'networth.js does not navigate for an informational line')
+  const st = await readFile(here('settings.js'), 'utf8')
+  assert.match(st, /import \{[^}]*\bsyncLineText\b[^}]*\} from '\.\/networth-sync\.js'/, 'settings.js uses the same sentence choice')
+})
+
+// ---- session round (`sessionRound`, refresher.prioritize) --------------------
+test('a session round is said while the sync runs normally, with how far it has come', () => {
+  const sessionRound = { done: 3, total: 40, since: 1 }
+  assert.deepEqual(sessionRoundLine({ state: 'ok', sessionRound }), { key: 'nw.syncSessionRound', done: 3, total: 40, info: true })
+  assert.equal(sessionRoundLine({ state: 'ok' }), null, 'no round, no line')
+  assert.equal(sessionRoundLine({ state: 'cooldown', until: 1, sessionRound }), null, 'a cooldown is said instead')
+  assert.equal(sessionRoundLine({ state: 'expired', sessionRound }), null)
+  assert.equal(sessionRoundLine({ state: 'ok', sessionRound: { done: 0, total: 0 } }), null, 'no tab list yet')
+  assert.equal(sessionRoundLine({ state: 'ok', sessionRound: { done: 'x', total: 40 } }), null)
+  assert.equal(sessionRoundLine(null), null)
+})
+
+test('the shared status line names the session round, next to a pace, in both languages', async () => {
+  const { Shell, I18n, line } = await loadShell()
+  Shell.applySyncStatus({ type: 'networth-sync-status', state: 'ok', sessionRound: { done: 3, total: 40, since: 1 } })
+  assert.equal(line('sync'), 'Reading every tab once for the session (3 of 40).')
+  I18n.setLang('de')
+  assert.equal(line('sync'), 'Jeder Tab wird für die Sitzung einmal gelesen (3 von 40).')
+  I18n.setLang('en')
+  Shell.applySyncStatus({ state: 'ok', pace: { mode: 'yields', everyMs: 300_000 }, sessionRound: { done: 5, total: 40, since: 1 } })
+  assert.equal(line('sync'), 'Sync yields: your game is not running — about one tab every 5 min. Reading every tab once for the session (5 of 40).')
+  Shell.applySyncStatus({ state: 'ok' })
+  assert.equal(line('sync'), undefined, 'the round is over: the line goes')
+})
+
+test('Net Worth and settings write the session round on their own sync line, in both languages', async () => {
+  // syncLineText is the whole line both pages write under the `sync` key,
+  // translated with the real i18n.js tables.
+  const { I18n } = await loadShell()
+  const T = (k, p) => I18n.t(k, p)
+  const sessionRound = { done: 3, total: 40, since: 1 }
+  assert.equal(syncLineText({ state: 'ok', sessionRound }, T, 'en'), 'Reading every tab once for the session (3 of 40).')
+  assert.equal(syncLineText({ state: 'ok', pace: { mode: 'yields', everyMs: 300_000 }, sessionRound }, T, 'en'),
+    'Sync yields: your game is not running — about one tab every 5 min. Reading every tab once for the session (3 of 40).')
+  assert.equal(syncLineText({ state: 'ok' }, T, 'en'), '', 'a plain ok leaves the slot empty')
+  assert.doesNotMatch(syncLineText({ state: 'cooldown', until: 1, sessionRound }, T, 'en'), /for the session/,
+    'a cooldown is said instead of the round')
+  assert.doesNotMatch(syncLineText({ state: 'expired', sessionRound }, T, 'en'), /for the session/)
+  I18n.setLang('de')
+  assert.equal(syncLineText({ state: 'ok', sessionRound }, T, 'de'), 'Jeder Tab wird für die Sitzung einmal gelesen (3 von 40).')
+  // Both pages write exactly this line (they cannot run here: browser
+  // modules with DOM at load), so the wiring is pinned at the source.
+  for (const f of ['networth.js', 'settings.js']) {
+    const src = await readFile(here(f), 'utf8')
+    assert.match(src, /function statusLineText \(st\) \{\n\s*return syncLineText\(st, T, I18n\.locale\(\)\)\n\}/, `${f} writes the shared line`)
+    assert.match(src, /setStatus\(statusLineText\(st\)|const text = statusLineText\(st\)/, `${f} puts it on the sync line`)
+  }
 })

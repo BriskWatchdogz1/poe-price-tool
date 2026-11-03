@@ -246,3 +246,69 @@ test('append rejects garbage instead of writing a zero series', async () => {
   assert.equal(h.points.length, 0)
   await rm(dir, { recursive: true, force: true })
 })
+
+test('a feed whose answer is not newer than its last point adds nothing for its rows (B29)', async () => {
+  const { dir, path } = await tmpFile()
+  const c = clock()
+  const h = createReferenceHistory(path, { now: c.now })
+  const feeds = at => ({ exchange: { at, keys: ['c:x'] } })
+  assert.equal(await h.append(LG, { cdRatio: 100, values: { 'c:x': 1 }, feeds: feeds(100) }), true)
+  c.advance(60 * MIN)
+  // The same poe.ninja answer again (served from the last good answer during an
+  // outage): no new point with a new time.
+  assert.equal(await h.append(LG, { cdRatio: 100, values: { 'c:x': 1 }, feeds: feeds(100) }), false)
+  assert.equal(h.points.length, 1)
+  assert.equal(await h.append(LG, { cdRatio: 100, values: { 'c:x': 2 }, feeds: feeds(200) }), true)
+  assert.deepEqual(h.points.at(-1).ob, { exchange: 200 })
+  assert.equal(h.lastObservedAt(LG, 'exchange'), 200)
+  c.advance(60 * MIN)
+  assert.equal(await h.append(LG, { cdRatio: 100, values: { 'c:x': 3 } }), true, 'without feeds it behaves as before')
+  assert.equal('ob' in h.points.at(-1), false)
+  assert.equal(h.lastObservedAt(LG, 'exchange'), 200, 'a point without the feed does not hide its last answer')
+  c.advance(60 * MIN)
+  assert.equal(await h.append(LG, { cdRatio: 100, values: { 'c:x': 4 }, feeds: feeds(200) }), false)
+  const back = createReferenceHistory(path, { now: c.now })
+  await back.load()
+  assert.deepEqual(back.points[1].ob, { exchange: 200 }, 'ob survives a reload')
+  await rm(dir, { recursive: true, force: true })
+})
+
+test('one stale feed drops only its own rows; the other feeds still get their point (B29)', async () => {
+  const { dir, path } = await tmpFile()
+  const c = clock()
+  const h = createReferenceHistory(path, { now: c.now })
+  const values = { 'c:mirror': 100000, 'b:vulture': 1800, 's:vivid': 0.04 }
+  const feeds = (ex, b) => ({ exchange: { at: ex, keys: ['c:mirror'] }, beasts: { at: b, keys: ['b:vulture'] } })
+  assert.equal(await h.append(LG, { cdRatio: 200, values, feeds: feeds(100, 100) }), true)
+  c.advance(60 * MIN)
+  // The exchange answer is the old one, the beast overview is new, and the
+  // Faustus row (no feed) is always written.
+  assert.equal(await h.append(LG, { cdRatio: 200, values: { ...values, 's:vivid': 0.05 }, feeds: feeds(100, 300) }), true)
+  assert.deepEqual(h.points.at(-1).v, { 'b:vulture': 1800, 's:vivid': 0.05 })
+  assert.deepEqual(h.points.at(-1).ob, { beasts: 300 })
+  c.advance(60 * MIN)
+  // Both poe.ninja feeds stale: the Faustus row alone still makes a point.
+  assert.equal(await h.append(LG, { cdRatio: 200, values: { ...values, 's:vivid': 0.06 }, feeds: feeds(100, 300) }), true)
+  assert.deepEqual(h.points.at(-1).v, { 's:vivid': 0.06 })
+  assert.equal('ob' in h.points.at(-1), false)
+  assert.equal(h.series(LG, 's:vivid', 'perC').length, 3, 'the Faustus row keeps moving')
+  assert.equal(h.series(LG, 'c:mirror', 'c').length, 0, 'one Mirror point only: no line yet')
+  c.advance(60 * MIN)
+  // A new exchange answer is compared against the last point that HAD the feed.
+  assert.equal(await h.append(LG, { cdRatio: 200, values, feeds: feeds(400, 300) }), true)
+  assert.deepEqual(h.points.at(-1).ob, { exchange: 400 })
+  await rm(dir, { recursive: true, force: true })
+})
+
+test('a point in the first form (numeric ob) counts as the exchange feed', async () => {
+  const { dir, path } = await tmpFile()
+  const c = clock()
+  await writeFile(path, JSON.stringify({ lg: LG, at: c.now(), cd: 100, v: { 'c:x': 1 }, ob: 100 }) + '\n', 'utf8')
+  const h = createReferenceHistory(path, { now: c.now })
+  await h.load()
+  assert.equal(h.lastObservedAt(LG, 'exchange'), 100)
+  assert.equal(h.lastObservedAt(LG, 'beasts'), null)
+  c.advance(60 * MIN)
+  assert.equal(await h.append(LG, { cdRatio: 100, values: { 'c:x': 1 }, feeds: { exchange: { at: 100, keys: ['c:x'] } } }), false)
+  await rm(dir, { recursive: true, force: true })
+})

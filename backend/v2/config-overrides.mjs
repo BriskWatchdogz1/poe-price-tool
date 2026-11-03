@@ -1,67 +1,46 @@
 // Settings the operator can change from the browser instead of from
 // `docker-compose.override.yml` — a small JSON file in the /config volume that
-// is folded into `process.env` before the server reads any of it.
+// is folded into `process.env` before the server reads any of it. The server
+// reads its configuration in ~50 places as `process.env.POE_…`, at module
+// load; filling `process.env` before the first read is one entry point, and
+// every existing read stays exactly as it is.
 //
-// WHY IT IS DONE THIS WAY. The server reads its configuration in ~50 places as
-// `process.env.POE_…`, at module load. Rewriting all of them into a config
-// object would touch every subsystem for no functional gain. Putting the file
-// INTO `process.env` before the first read gets the same result with one entry
-// point, and every existing read stays exactly as it is.
-//
-// THE OVERRIDE WINS OVER THE REAL ENVIRONMENT, and that is a decision, not an
-// accident. The override file is something a human deliberately submitted
-// through the admin area of the running tool; the compose file is what the box
-// was started with weeks ago. If the environment won, the button in the web UI
-// would silently do nothing whenever the same key happened to be set in
-// compose — the exact failure this module exists to remove. The price is that
-// somebody can stare at a compose value that has no effect, so `GET
-// /config-view` names the source of every value (`override` | `env` |
-// `default`) and says when an override is shadowing the environment. Documented
-// in docs/admin.md and README.md.
+// THE OVERRIDE WINS OVER THE REAL ENVIRONMENT, by decision: it is what a human
+// deliberately submitted through the admin area; the compose file is what the
+// box was started with weeks ago. Otherwise the button would silently do
+// nothing whenever compose set the same key. So that a compose value without
+// effect is visible, `GET /config-view` names the source of every value
+// (`override` | `env` | `default`) and says when an override is shadowing the
+// environment. Documented in docs/admin.md and README.md.
 //
 // BOOT QUARANTINE. An override that kills the process at startup would restart
-// forever (`restart: unless-stopped`) and there would be no web UI left to undo
-// it — the one way this feature could lock an operator out of their own tool.
-// So applying the file is bracketed: a marker file is written BEFORE the values
-// go into the environment and deleted once the server is listening.
-//
-//   THE MARKER COUNTS, IT DOES NOT SWITCH. What it can actually observe is "the
-//   last start did not reach `listen`" — never "the overrides were to blame".
-//   The whole expensive boot sits inside that window: the serial engine loads,
-//   the refresher init, plus everything from outside that can end a process in
-//   it (a `docker compose restart` typed at the wrong second, a host reboot, an
-//   OOM kill). Meanwhile only validated values reach the file through the UI and
-//   none of the allow-listed keys can realistically kill a boot, so a one-strike
-//   rule would have thrown away a WORKING configuration far more often than a
-//   poisonous one. The marker therefore carries a COUNT of consecutive failed
-//   starts and the file is only rejected once that count reaches
-//   `QUARANTINE_AFTER_FAILED_STARTS`. A restart loop still ends after a bounded
-//   number of attempts; one unlucky restart costs nothing.
-//
-// Reaching the threshold moves the file aside to `…rejected.json` and the
-// process starts on the compose/default configuration. Nothing is lost; the
-// rejected file can be inspected and put back by hand.
-//
-// ONE /config VOLUME BELONGS TO ONE INSTANCE. Two containers sharing one would
-// share this marker and count each other's boots as their own failures. That is
-// not defended against with a lock — a lock brings its own stale-holder problem,
-// for a case that is a deployment mistake to begin with. It is documented in
-// docs/admin.md instead.
+// forever (`restart: unless-stopped`) with no web UI left to undo it. So a
+// marker file is written BEFORE the values go into the environment and deleted
+// once the server is listening. THE MARKER COUNTS, IT DOES NOT SWITCH: it can
+// only observe "the last start did not reach `listen`", never "the overrides
+// were to blame" — the whole boot (engine loads, refresher init, a `docker
+// compose restart` at the wrong second, a host reboot, an OOM kill) sits in
+// that window, while only validated values reach the file. It carries a COUNT
+// of consecutive failed starts, and the file is rejected only once that count
+// reaches `QUARANTINE_AFTER_FAILED_STARTS`: a restart loop ends after a bounded
+// number of attempts, one unlucky restart costs nothing. Rejecting moves the
+// file aside to `…rejected.json` and the process starts on the compose/default
+// configuration; the rejected file can be inspected and put back by hand.
+// ONE /config VOLUME BELONGS TO ONE INSTANCE: two containers sharing one would
+// count each other's boots as failures. Not defended with a lock (a deployment
+// mistake to begin with); documented in docs/admin.md.
 //
 // NOTHING SECRET GOES IN HERE. The allow-list below is the only set of keys the
-// UI can write, and no POESESSID, account name, password or path is in it. And
-// `SECRET_KEY_RE` is applied a second time on the way out, to BOTH halves of
+// UI can write, and no POESESSID, account name, password or path is in it.
+// `SECRET_KEY_RE` is applied again on the way out, to BOTH halves of
 // `configView()` — the settings built from the allow-list and the read-only
-// runtime block — so a key added carelessly to either one is dropped from the
-// answer and reported as the programming error it is. `config-override.test.mjs`
+// runtime block — so a key added carelessly to either is dropped from the
+// answer and reported as a programming error. `config-override.test.mjs`
 // smuggles a secret key into the allow-list and proves it does not reach the
-// view; `config-override-endpoint.test.mjs` walks a whole real answer.
-//
-// NOTHING SECRET LEAKS OUT OF AN ERROR MESSAGE EITHER. V8 quotes an EXCERPT of
-// the file in its `JSON.parse` SyntaxError, so the parser's own message must
-// never travel into `state.problems`, which `GET /config-view` publishes:
-// somebody who hand-writes a secret into a file that then fails to parse would
-// otherwise get a fragment of it back over HTTP. See `json-error.mjs`.
+// view; `config-override-endpoint.test.mjs` walks a whole real answer. Nor out
+// of an error message: V8 quotes an EXCERPT of the file in its `JSON.parse`
+// SyntaxError, so the parser's own message never travels into
+// `state.problems`, which `GET /config-view` publishes (see `json-error.mjs`).
 
 import { readFileSync, writeFileSync, renameSync, unlinkSync, mkdirSync, existsSync } from 'node:fs'
 import { readFile, writeFile, rename, unlink, mkdir } from 'node:fs/promises'
@@ -119,7 +98,7 @@ export const HIDDEN_KEYS = new Set(['POE_NETWORTH_CONFIG'])
 // and pre-dates this list: the allow-list is the path a human clicks through in
 // a moment of curiosity, the environment is what a deployment writes once.
 //
-// The eight request-volume rows are nonetheless bounded in the TABLE and not
+// The nine request-volume rows are nonetheless bounded in the TABLE and not
 // here. A one-millisecond interval is not safer for coming out of a compose
 // file, and a ban has been reported to reach the whole address rather than the
 // account that earned it — so the floor belongs where both paths read it. See
@@ -319,6 +298,28 @@ export const SETTABLE = Object.freeze([
     description: 'How stale the stored Faustus prices may get before the valuator stops using them and falls through to poe.ninja. A read-side bar: it does not change how often the store is refreshed.',
     apply: 'restart'
   }),
+  // The uncertainty marker's two bars. `restart`: the valuator is built once
+  // per league with its bars fixed (server.mjs valuatorByLeague).
+  numeric('POE_NETWORTH_THIN_TURNOVER_C', {
+    description: 'Net Worth marks a price "thin market" when the trading behind it moved less than this many chaos (Faustus: the hour the price came from; poe.ninja exchange: the line\'s own volume, and a line without one counts as thin). It only marks: no price, total or history point changes. 0 marks nothing.',
+    apply: 'restart'
+  }),
+  numeric('POE_NETWORTH_CORPSE_MIN_LISTINGS', {
+    description: 'Net Worth marks a corpse price "few listings" when it was averaged from fewer trade offers than this. It only marks. 0 marks nothing.',
+    apply: 'restart'
+  }),
+  numeric('POE_SOURCE_STALE_MS', {
+    // Read through envNum each time a source-status or cd-ratio message is
+    // built, and server.mjs sends both again right after this setting changes
+    // (broadcastStaleBars), so open pages get the new bar at once — live for
+    // real.
+    description: 'How old the last successful update of a price source (Faustus, poe.ninja) may get before the status line on every page and the Sources block on this page call it stale. Display only: it changes no request.',
+    apply: 'live'
+  }),
+  numeric('POE_NINJA_MAX_AGE_MS', {
+    description: 'How long a poe.ninja answer is still served after poe.ninja stopped answering. Past it the item is unpriced and falls through to the next source instead of keeping an old price.',
+    apply: 'restart'
+  }),
   numeric('POE_DATA_STALE_TICKS', {
     description: 'How many missed checks make a data source "stale" in the status line. Counted in refresh intervals, not in days.',
     apply: 'restart'
@@ -335,6 +336,25 @@ export const SETTABLE = Object.freeze([
     description: 'How old the host updater’s heartbeat may get before this page says no updater is installed. Raise it if the script runs less often than every few minutes.',
     apply: 'restart'
   }),
+  // Farm sessions (networth/sessions.mjs): display thresholds only. The two
+  // that shape stored data — POE_SESSIONS_KEEP and POE_SESSION_FINALIZE_MAX_MS —
+  // stay environment-only on purpose.
+  numeric('POE_SESSION_RATE_MIN_MS', {
+    description: 'Shortest farm session that gets a loot-per-hour figure. Shorter sessions show their totals and say they were too short. 0 gives every session a figure.',
+    apply: 'restart'
+  }),
+  numeric('POE_SESSION_TOP_N', {
+    description: 'How many of the biggest additions and removals a farm-session balance names. 0 names none; the totals are unaffected.',
+    apply: 'restart'
+  }),
+  numeric('POE_SESSION_LIST_MAX', {
+    description: 'How many past farm sessions the History page lists, newest first.',
+    apply: 'restart'
+  }),
+  numeric('POE_SESSION_BASELINE_MAX_AGE_MS', {
+    description: 'How old the newest net-worth reading may be when a farm session is started. Older means the background sync is not running, and the start is refused rather than measured from a stale stash.',
+    apply: 'restart'
+  }),
 
   // ---- Everything that decides how often somebody else's server is asked ---
   // Every entry below carries `traffic`, and the settings page draws them in a
@@ -345,12 +365,11 @@ export const SETTABLE = Object.freeze([
     description: 'Delay between net-worth refresher ticks. One tick is one request against GGG’s stash API, shared round-robin between all configured users.',
     apply: 'restart',
     traffic: 'lower',
-    // The `min` that used to sit here (5000, "the browser path stops there")
-    // is gone because it stopped nowhere useful: five seconds is 720 stash
-    // reads an hour. The floor is 30s now and it lives in numeric-settings.mjs,
-    // where the compose path is bound by it too — see the range note in that
-    // file's header. What stays is the ceiling: an hour between ticks is the
-    // slowest setting that is still a background refresher, and it is a
+    // No `min` here: the floor is 30s and lives in numeric-settings.mjs, where
+    // the compose path is bound by it too (see the range note in that file's
+    // header); a browser-only floor of five seconds would allow 720 stash
+    // reads an hour. What this row adds is the ceiling: an hour between ticks
+    // is the slowest setting that is still a background refresher, and it is a
     // narrowing (the table has no maximum) rather than something the reader
     // would refuse.
     max: 3600000
@@ -389,6 +408,11 @@ export const SETTABLE = Object.freeze([
     description: 'How often the data auto-update checks its sources (item and stat data, base names). Conditional requests, so an unchanged day transfers nothing — but it is still a request.',
     apply: 'restart',
     traffic: 'lower'
+  }),
+  numeric('POE_NINJA_MAP_TTL_MS', {
+    description: 'How long the net-worth valuation keeps its merged poe.ninja exchange map (14 overview types) before it reads them again. Shorter means more poe.ninja requests: 14 per rebuild.',
+    apply: 'restart',
+    traffic: 'lower'
   })
 ])
 
@@ -420,6 +444,9 @@ export const SETTABLE_BY_NAME = new Map(SETTABLE.map(s => [s.name, s]))
 //     normal state. The page could not answer "what do I get if I clear this",
 //     which is the one thing every other row can. It also multiplies the CDN
 //     fetches of every refresh run, so leaving it in compose is the safe side.
+//   POE_NINJA_FAIL_LOG_MS — how often a failing poe.ninja key is logged again.
+//     It shapes the container log and nothing a page shows; that is an
+//     operator setting for the compose file, not for a form.
 
 // ---------------------------------------------------------------------------
 // Validation

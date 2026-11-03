@@ -1,6 +1,7 @@
-// The gap log is the only place a failure of the German path ever surfaces
-// (design doc, section 6): the user will not report it and nobody reads the
-// container log. So the properties the admin view depends on are pinned here —
+// The gap log is the only place a failure of the German path surfaces with
+// the text that failed (design doc, section 6): the daemon journal and the
+// empty Price Check page only say THAT an item was refused, the user will not
+// report it, and nobody reads the container log. So the properties the admin view depends on are pinned here —
 // aggregation, separation by language, order by frequency, and the memory bound
 // that keeps a months-running server from turning user input into a leak.
 import { test } from 'node:test'
