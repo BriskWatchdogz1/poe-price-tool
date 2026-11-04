@@ -618,8 +618,9 @@ def bodies():
 // session: the session for POST /daemon/session (answered 200 and put into the
 // feed with this instance, like server.mjs does); sessionAfter: feed events
 // added after that answer (a later state, the game detection's own).
-async function withDaemonBackend ({ old = false, whisper = null, session = null, sessionAfter = [] }, fn) {
-  const seen = { items: [], beats: [], polls: [], whispers: [], sessions: [] }
+// grid: the answer of GET /daemon/stash-grid ({ tabs, tab: index -> body }).
+async function withDaemonBackend ({ old = false, whisper = null, session = null, sessionAfter = [], grid = null }, fn) {
+  const seen = { items: [], beats: [], polls: [], whispers: [], sessions: [], grids: [] }
   const events = []
   let seq = 0
   const server = createServer((req, res) => {
@@ -667,6 +668,13 @@ async function withDaemonBackend ({ old = false, whisper = null, session = null,
         events.push({ seq: ++seq, kind: 'session', by, session })
         for (const e of sessionAfter) events.push({ seq: ++seq, ...e })
         json(200, { ok: true, v: 1, action: 'start', session }); return
+      }
+      if (req.method === 'GET' && u.pathname === '/daemon/stash-grid' && grid) {
+        seen.grids.push({ url: req.url, headers: req.headers })
+        const tab = u.searchParams.get('tab')
+        if (tab === null) { json(200, { v: 1, tabs: grid.tabs }); return }
+        if (!grid.tab[tab]) { json(404, { error: 'no such tab' }); return }
+        json(200, { v: 1, tabs: grid.tabs, ...grid.tab[tab] }); return
       }
       if (req.method === 'GET' && u.pathname === '/daemon/events') {
         seen.polls.push(u.search)
@@ -912,9 +920,10 @@ with open(os.path.join(daemon_dir, 'config.example.toml'), 'rb') as fh:
 app = make(**{k: v for k, v in cfg.items() if k not in ('macros',)})
 print(json.dumps({'features': app.features(), 'hold': app.downlink.hold_s, 'gap': app.downlink.min_gap_s,
                   'wait': app.results.wait_s, 'overlay': app.overlay_setting, 'expire': app.display.notifier.expire_ms,
-                  'grid': app.grid, 'highlight': app.highlight_code, 'session': [app.session_code, app.session_cards]}))
+                  'grid': app.grid, 'highlight': app.highlight_code, 'session': [app.session_code, app.session_cards],
+                  'value': [app.value_code, app.value_cfg]}))
 `)
-    assert.deepEqual(out, { features: { downlink: 'starting', notify: 'ok', overlay: 'no-focus-check', whispers: 'off', game: 'starting' }, hold: 25, gap: 2, wait: 120, overlay: 'auto', expire: 8000, grid: { mode: 'auto', folders: 'none', rect: null }, highlight: null, session: [null, true] })
+    assert.deepEqual(out, { features: { downlink: 'starting', notify: 'ok', overlay: 'no-focus-check', whispers: 'off', game: 'starting' }, hold: 25, gap: 2, wait: 120, overlay: 'auto', expire: 8000, grid: { mode: 'auto', folders: 'none', rect: null }, highlight: null, session: [null, true], value: [null, { key: '', min_c: 5, hold_s: 20, tabs: [] }] })
   } finally { sc.cleanup() }
 })
 
@@ -1257,6 +1266,126 @@ app.display.close(); app.pool.close()
       assert.equal(seen.sessions[0].headers['x-user'], 'player1')
       assert.ok(seen.sessions[0].headers['x-ppt-daemon'])
       assert.equal(out.lang, 'de', 'the number format follows the language the server reads the user\'s items in')
+    } finally { sc.cleanup() }
+  })
+})
+
+// --- the value key ([stash_grid] value_key, ppt_value_grid) ---------------------
+
+test('the value key is optional, its keys are checked, and it has a key of its own', async () => {
+  const sc = scenario()
+  try {
+    const out = await wiring(sc, `
+r = {}
+app = make()
+r['default'] = [app.value_grid, app.value_code, sorted(app.watched_keys())]
+on = make(stash_grid={'value_key': 'F9'}, macros={'keys': {'F5': '/hideout'}})
+r['on'] = [on.value_code == ppd.keycode('F9'), sorted(on.watched_keys()) == sorted([ppd.keycode('F5'), ppd.keycode('F9')]),
+           on.value_grid.min_c, on.value_grid.hold_s, on.value_grid.names]
+off = make(stash_grid={'value_key': 'F9', 'mode': 'off'})
+r['off'] = [off.value_grid, off.value_code, off.watched_keys() == set()]
+errs = []
+for kw in ({'stash_grid': {'value_key': 9}}, {'stash_grid': {'value_key': 'NOPE_KEY!'}},
+           {'stash_grid': {'value_key': 'F5'}, 'macros': {'keys': {'F5': '/hideout'}}},
+           {'stash_grid': {'value_key': 'F10'}, 'whispers': {'highlight_key': 'F10'}},
+           {'stash_grid': {'value_key': 'F11'}, 'session': {'key': 'F11'}},
+           {'stash_grid': {'value_min_c': -1}}, {'stash_grid': {'value_hold_s': 0}}, {'stash_grid': {'value_tabs': [3]}},
+           {'stash_grid': {'value_key': '  '}}):
+    try:
+        make(**kw); errs.append(None)
+    except SystemExit as ex:
+        errs.append(str(ex))
+r['errs'] = errs
+r['lines'] = lines
+print(json.dumps(r))
+`)
+    assert.deepEqual(out.default, [null, null, []], 'no key: nothing is watched, no device is opened for it')
+    assert.deepEqual(out.on, [true, true, 5, 20, []])
+    assert.deepEqual(out.off, [null, null, true], '[stash_grid] mode off: no grid, the key is not watched')
+    assert.match(out.errs[0], /^\[poe-price-daemon\] \[stash_grid\] value_key must be a text \(got 9\)/)
+    assert.equal(out.errs[1], null, 'the stand-in evdev of this test knows every name; a real unknown one is the next line')
+    assert.match(out.errs[2], /^\[poe-price-daemon\] \[stash_grid\] value_key F5 is also a key in \[macros\.keys\]; one key cannot do both/)
+    assert.match(out.errs[3], /^\[poe-price-daemon\] \[stash_grid\] value_key F10 is also \[whispers\] highlight_key; one key cannot do both/)
+    assert.match(out.errs[4], /^\[poe-price-daemon\] \[stash_grid\] value_key F11 is also \[session\] key; one key cannot do both/)
+    assert.match(out.errs[5], /^\[poe-price-daemon\] \[stash_grid\] value_min_c must be a number of at least 0 \(got -1\)/)
+    assert.match(out.errs[6], /^\[poe-price-daemon\] \[stash_grid\] value_hold_s must be a positive number \(got 0\)/)
+    assert.match(out.errs[7], /^\[poe-price-daemon\] \[stash_grid\] value_tabs must be a list of non-empty texts \(got \[3\]\)/)
+    assert.equal(out.errs[8], null, 'blank is off')
+    assert.deepEqual(out.lines, [], 'nothing is written before the start-up check')
+  } finally { sc.cleanup() }
+})
+
+test('a value key name evdev does not know stops the daemon with the names it takes', async () => {
+  const sc = scenario()
+  try {
+    const out = await wiring(sc, `
+ec.__getattr__ = lambda name: (_ for _ in ()).throw(AttributeError(name)) if name == 'KEY_NOPE' else sum(map(ord, name))
+try:
+    make(stash_grid={'value_key': 'nope'}); print(json.dumps(None))
+except SystemExit as ex:
+    print(json.dumps(str(ex)))
+`)
+    assert.match(out, /^\[poe-price-daemon\] \[stash_grid\] value_key 'nope' is not a key name evdev knows \(names like "F9", "KP1", "DOT"\)/)
+  } finally { sc.cleanup() }
+})
+
+test('a press of the value key in the game shows the tab\'s values; the start names the key and a value_tabs name no tab has', async () => {
+  const tabs = [{ index: 0, name: 'Sale', type: 'PremiumStash', grid: true }, { index: 1, name: 'Currency', type: 'CurrencyStash', grid: false }]
+  const tab = {
+    0: {
+      tab: { index: 0, name: 'Sale', type: 'PremiumStash', quad: false, grid: true, syncedAt: 1793606400000 },
+      cells: [{ x: 4, y: 2, w: 1, h: 1, c: 360, n: 'Headhunter' }, { x: 0, y: 0, w: 1, h: 1, c: 12, n: 'Chaos Orb' }, { x: 1, y: 0, w: 1, h: 1, c: 2, n: 'Cheap' }],
+      totalChaos: 374,
+      chaosPerDivine: 180
+    }
+  }
+  await withDaemonBackend({ grid: { tabs, tab } }, async (url, seen) => {
+    const sc = scenario()
+    try {
+      const out = await wiring(sc, LOOP + `
+class Ev:
+    def __init__(self, code, value=1): self.type, self.code, self.value = 1, code, value
+put('clip', 'before')
+app = make(backend_url='${url}', stash_grid={'mode': 'manual', 'x': 15, 'y': 125, 'w': 634, 'h': 634,
+                                             'value_key': 'F9', 'value_tabs': ['Sale', 'Elsewhere']},
+           results={'overlay': 'off'})
+app.startup_checks()
+r = {}
+r['start'] = [l for l in lines if l.startswith('[poe-price-daemon] Value grid')]
+r['said'] = run_until(lambda: any('which no stored stash tab has' in l for l in lines))
+r['unknown'] = [l for l in lines if 'which no stored stash tab has' in l]
+focused = [False]
+app.is_poe_focused = lambda: focused[0]
+F9 = ppd.keycode('F9')
+r['idle_before'] = not app.value_grid._busy()
+app.handle(Ev(F9))
+r['unfocused_sent'] = [j.tag for j in [app.value_grid._list_job, app.value_grid._cells_job, app.value_grid._geo_job] if j is not None]
+run_until(lambda: False, 0.3)
+r['unfocused'] = calls()
+focused[0] = True
+app.handle(Ev(F9, 0))
+app.handle(Ev(F9))
+r['got'] = run_until(lambda: len(calls()) >= 1)
+app.handle(Ev(F9, 2))
+run_until(lambda: False, 0.3)
+r['toasts'] = [c[-2:] for c in calls()]
+print(json.dumps(r))
+app.display.close(); app.pool.close()
+`)
+      assert.equal(out.start.length, 1, out.start.join('\n'))
+      assert.match(out.start[0], /Value grid: key F9, pressed while the game has focus: what each item of a stash tab is worth, over the grid manual \(x 15, y 125, 634x634 px\); from 5 c, 20 s a tab, tabs: "Sale", "Elsewhere"; but the overlay is off \(\[results\] overlay = "off"\), so it comes as a notification of the 5 dearest items\./)
+      assert.equal(out.said, true)
+      assert.equal(out.unknown.length, 1, 'the start\'s tab list names the unknown value_tabs entry once')
+      assert.match(out.unknown[0], /value_tabs names "Elsewhere", which no stored stash tab has/)
+      assert.equal(out.idle_before, true, 'the start\'s list request is answered before the press')
+      assert.deepEqual(out.unfocused_sent, [], 'outside the game the press asks the server nothing')
+      assert.deepEqual(out.unfocused, [], 'outside the game the key does nothing, like the macro keys')
+      assert.equal(out.got, true)
+      assert.deepEqual(out.toasts, [['Value grid · tab "Sale"', 'left 5, top 3: 2d Headhunter\nleft 1, top 1: 12c Chaos Orb']])
+      const asked = seen.grids.map(g => g.url)
+      assert.deepEqual(asked, ['/daemon/stash-grid', '/daemon/stash-grid?tab=0'], 'the list once at the start, the cells once at the press; a release and a repeat send none')
+      assert.equal(seen.grids[1].headers['x-user'], 'player1')
+      assert.ok(seen.grids[1].headers['x-ppt-daemon'])
     } finally { sc.cleanup() }
   })
 })

@@ -155,3 +155,44 @@ print(json.dumps(r))
   assert.deepEqual(out.after, ['item:a'], 'the frame does not touch the item card')
   assert.deepEqual(out.forgot, [], 'a frame the daemon hid is not hidden twice')
 })
+
+test('the value grid stays its own hold time, apart from the frame and the cards', () => {
+  const out = py(`
+r = {}
+c = Cards(item_hold_ms=8000, pending_hold_ms=60000, hide_distance_px=220, whisper_hold_ms=20000, max_whispers=3)
+c.frame('frame', 0, 3000)
+c.grid('grid', 0, 20000)
+r['frame_only'] = c.tick(3000, (0, 0))
+c.grid('grid', 10000, 20000)          # the next press: the hold starts again
+r['renewed'] = c.tick(25000, (0, 0))
+r['gone'] = c.tick(30000, (0, 0))
+c.grid('grid', 40000, 20000)
+c.forget('grid')
+r['forgot'] = c.tick(70000, (0, 0))
+print(json.dumps(r))
+`)
+  assert.deepEqual(out.frame_only, ['frame'])
+  assert.deepEqual(out.renewed, [])
+  assert.deepEqual(out.gone, ['grid'])
+  assert.deepEqual(out.forgot, [], 'a grid the daemon hid is not hidden twice')
+})
+
+test('value grid cells are taken in the grid\'s own pixels with their uncertain flag; a cell off the grid or malformed is dropped', () => {
+  const out = py(`
+grid = (15, 125, 634, 634)
+cells = [{'x': 121, 'y': 178, 'w': 52, 'h': 78, 'label': '5d?', 'u': True}, {'x': 15, 'y': 125, 'w': 26, 'h': 26, 'label': '12c'},
+         {'x': 640, 'y': 125, 'w': 26, 'h': 26, 'label': 'off'}, {'x': 15, 'y': 125, 'w': 0, 'h': 26, 'label': 'flat'},
+         {'x': 'a', 'y': 1, 'w': 1, 'h': 1, 'label': 'x'}, {'x': 15, 'y': 125, 'w': 26, 'h': 26, 'label': 7},
+         {'x': 41, 'y': 125, 'w': 26, 'h': 26, 'label': '3c', 'u': 'yes'}, 'junk']
+print(json.dumps({'cells': grid_cells(grid, cells), 'many': len(grid_cells(grid, [cells[1]] * 900)),
+                  'font12': grid_font_px([(0, 0, 53, 53, '', False)], 634), 'font24': grid_font_px([(0, 0, 26, 26, '', False)], 634),
+                  'font_big': grid_font_px([(0, 0, 106, 159, '', True)], 634), 'font_none': grid_font_px([], 634)}))
+`)
+  assert.deepEqual(out.cells, [[106, 53, 52, 78, '5d?', true], [0, 0, 26, 26, '12c', false], [0, 0, 26, 26, '7', false],
+    [26, 0, 26, 26, '3c', false]], 'u passes as the 6th element, true only for u: true')
+  assert.equal(out.many, 600, 'at most as many cells as the server sends')
+  assert.ok(out.font24 < out.font12, `a 24x24 grid gets the smaller font (${out.font24} < ${out.font12})`)
+  assert.ok(out.font24 >= 7, 'never below 7 px')
+  assert.equal(out.font_big, out.font12, 'a large item does not get a larger font than a 1x1 cell would')
+  assert.equal(out.font_none, out.font12, 'no cell: the 12x12 cell size')
+})

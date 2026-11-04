@@ -12,6 +12,9 @@ Standard library only.
 import math
 
 ELLIPSIS = "…"
+GRID_MAX_CELLS = 600   # the server sends at most this many (networth/scan.mjs CELLS_MAX)
+GRID_FONT_SHARE = 0.3  # a cell's number is this share of a 1x1 cell's height
+GRID_FONT_MIN_PX = 7
 
 
 def screen_of(cursor, screens):
@@ -97,11 +100,48 @@ def fit_lines(lines, max_chars=48, max_lines=4):
     return out
 
 
+def _whole(v):
+    return isinstance(v, int) and not isinstance(v, bool)
+
+
+def grid_cells(grid, cells, max_cells=GRID_MAX_CELLS):
+    """The value grid's cells, from screen pixels to the grid's own: [(x, y,
+    w, h, label, uncertain)] relative to the grid's top-left corner;
+    uncertain is True only for a cell with u: true (its price is uncertain).
+    A cell that is not whole numbers with w and h above 0, or does not lie
+    inside the grid, is dropped; at most max_cells."""
+    gx, gy, gw, gh = grid
+    out = []
+    for c in cells if isinstance(cells, list) else []:
+        if len(out) >= max_cells:
+            break
+        if not isinstance(c, dict):
+            continue
+        x, y, w, h = (c.get(k) for k in ("x", "y", "w", "h"))
+        if not all(_whole(v) for v in (x, y, w, h)) or w <= 0 or h <= 0:
+            continue
+        rx, ry = x - gx, y - gy
+        if rx < 0 or ry < 0 or rx + w > gw or ry + h > gh:
+            continue
+        out.append((rx, ry, w, h, str(c.get("label") if c.get("label") is not None else ""), c.get("u") is True))
+    return out
+
+
+def grid_font_px(cells, grid_h):
+    """The pixel size of the cells' numbers: a share of a 1x1 cell, which is
+    a twelfth of the grid, or a twenty-fourth when a cell is that small (a quad
+    tab); never below GRID_FONT_MIN_PX."""
+    unit = grid_h / 12
+    if any(min(c[2], c[3]) < unit * 0.75 for c in cells):
+        unit = grid_h / 24
+    return max(GRID_FONT_MIN_PX, int(round(unit * GRID_FONT_SHARE)))
+
+
 class Cards:
     """What is visible: ONE item card (the newest hotkey wins), up to
-    max_whispers whisper cards and ONE stash cell frame (the newest press
-    wins; it leaves its own hold_ms after it was shown). Time (ms) and cursor
-    are passed in.
+    max_whispers whisper cards, ONE stash cell frame and ONE value grid (for
+    each the newest press wins; each leaves its own hold_ms after it was
+    shown). Time (ms) and cursor are passed in.
 
     The item card leaves when the cursor is more than hide_distance_px from
     where it was shown, item_hold_ms after its result, or pending_hold_ms after
@@ -125,6 +165,8 @@ class Cards:
         self.whispers = []         # [(key, since_ms)], oldest first
         self.frame_key = None      # the stash cell frame, while shown
         self.frame_until_ms = 0
+        self.grid_key = None       # the value grid, while shown
+        self.grid_until_ms = 0
 
     def item(self, key, card, now_ms, cursor):
         """'show' (new key, replaces the item card) | 'update' (same key,
@@ -163,6 +205,11 @@ class Cards:
         self.frame_key = key
         self.frame_until_ms = now_ms + max(1, int(hold_ms))
 
+    def grid(self, key, now_ms, hold_ms):
+        """The value grid is shown (again) at now_ms."""
+        self.grid_key = key
+        self.grid_until_ms = now_ms + max(1, int(hold_ms))
+
     def visible_whispers(self):
         """Whisper keys, newest first (the order of the stack)."""
         return [k for k, _ in reversed(self.whispers)]
@@ -173,6 +220,8 @@ class Cards:
             self.item_visible = False
         if key == self.frame_key:
             self.frame_key = None
+        if key == self.grid_key:
+            self.grid_key = None
         self.whispers = [(k, t) for k, t in self.whispers if k != key]
 
     def tick(self, now_ms, cursor):
@@ -193,6 +242,9 @@ class Cards:
         if self.frame_key is not None and now_ms >= self.frame_until_ms:
             out.append(self.frame_key)
             self.frame_key = None
+        if self.grid_key is not None and now_ms >= self.grid_until_ms:
+            out.append(self.grid_key)
+            self.grid_key = None
         keep = []
         for k, t in self.whispers:
             if now_ms - t >= self.whisper_hold_ms:

@@ -723,9 +723,9 @@ print(json.dumps(r))
   assert.deepEqual(out.none, [])
   assert.deepEqual(out.before_answer, [], 'the position is the server\'s reading of the template')
   assert.deepEqual(out.all, [
-    { wid: 'w2', label: 'buyer 2', tab: 'Sale', left: 14, top: 3, quad: true },
-    { wid: 'w1', label: 'buyer 1', tab: 'Sale', left: 5, top: 3, quad: null }
-  ], 'a pending one has its position already; a bulk whisper names none')
+    { wid: 'w2', label: 'buyer 2', tab: 'Sale', left: 14, top: 3, quad: true, at: 1 },
+    { wid: 'w1', label: 'buyer 1', tab: 'Sale', left: 5, top: 3, quad: null, at: 1 }
+  ], 'a pending one has its position already; a bulk whisper names none; at: when it was read')
   assert.doesNotMatch(JSON.stringify(out), /Zxqvname|Otherbuyer|Bulkbuyer/)
 })
 

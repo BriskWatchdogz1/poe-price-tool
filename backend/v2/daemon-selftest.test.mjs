@@ -229,7 +229,8 @@ test('a scenario PATH holds stand-ins for the optional tools, never the machine\
 })
 
 /** A backend that answers /health, /users and POST /item like server.mjs does. */
-async function withBackend ({ users = ['player1'], langs = { player1: 'en' }, item = { code: 200, body: '{"id":"x","user":"player1"}' }, events = null, seen = null }, fn) {
+// grid: what GET /daemon/stash-grid answers ({ code, body }); without it the 404 below.
+async function withBackend ({ users = ['player1'], langs = { player1: 'en' }, item = { code: 200, body: '{"id":"x","user":"player1"}' }, events = null, grid = null, seen = null }, fn) {
   const server = createServer((req, res) => {
     const p = req.url.split('?')[0]
     if (req.method === 'GET' && p === '/health') { res.writeHead(200).end('ok'); return }
@@ -238,6 +239,9 @@ async function withBackend ({ users = ['player1'], langs = { player1: 'en' }, it
     if (seen) seen.push({ method: req.method, url: req.url, headers: req.headers })
     if (events && req.method === 'GET' && p === '/daemon/events') {
       res.writeHead(events.code, { 'content-type': 'application/json' }).end(events.body); return
+    }
+    if (grid && req.method === 'GET' && p === '/daemon/stash-grid') {
+      res.writeHead(grid.code, { 'content-type': 'application/json' }).end(grid.body); return
     }
     if (req.method === 'GET' && p === '/users') {
       res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ users, langs })); return
@@ -1090,8 +1094,10 @@ test('--overlay shows a frame at cell 1,1 after the test card when the grid is k
   const { status, out, overlayCalls } = await overlayRun({ args: ['--overlay'], extra: MANUAL_GRID, stubs: sleep })
   assert.match(out, /13\. Stash cell frame/)
   assert.match(out, /Open your stash in the game: after the card, a frame marks cell 1,1 of it for 3 seconds\./)
-  assert.deepEqual(overlayCalls, ['QT_QPA_PLATFORM=xcb --probe', 'QT_QPA_PLATFORM=xcb --demo', 'QT_QPA_PLATFORM=xcb --session', 'QT_QPA_PLATFORM=xcb --frame'])
+  assert.deepEqual(overlayCalls, ['QT_QPA_PLATFORM=xcb --probe', 'QT_QPA_PLATFORM=xcb --demo', 'QT_QPA_PLATFORM=xcb --session', 'QT_QPA_PLATFORM=xcb --frame', 'QT_QPA_PLATFORM=xcb --grid'])
   assert.match(out, /Did the frame sit on the top-left cell of your stash\?/)
+  assert.match(out, /Then a sample value grid of 3 cells covers the stash for 5 seconds; the one with a dashed border and a \? shows how an uncertain price looks\./)
+  assert.match(out, /Did the three numbers sit in cells of your stash grid\?/)
   assert.equal(status, 0)
   const unknown = await overlayRun({ args: ['--overlay'], stubs: sleep })
   assert.match(lineWith(unknown.out, '] test frame'), /\[ -- \].*not shown — the grid is not known \(see section 13\)/)
@@ -1128,7 +1134,7 @@ test('section 3 points to section 13 when only the highlight key needs the input
 
 const FAKE_EVDEV = {
   'pylib/evdev/__init__.py': 'from . import ecodes\n',
-  'pylib/evdev/ecodes.py': 'KEY_F5 = 63\nKEY_F10 = 68\nKEY_F11 = 87\n'
+  'pylib/evdev/ecodes.py': 'KEY_F5 = 63\nKEY_F9 = 67\nKEY_F10 = 68\nKEY_F11 = 87\n'
 }
 const NO_EVDEV = { 'pylib/evdev/__init__.py': 'raise ImportError("no evdev in this test")\n' }
 const IN_INPUT = { id: '#!/usr/bin/env bash\ncase "$1" in -nG) echo users input ;; *) echo tester ;; esac\n' }
@@ -1195,4 +1201,101 @@ test('--overlay shows a session card after the test card', async () => {
   assert.match(out, /Then a session card appears where whisper cards stack \(left edge\) for 5 seconds\./)
   assert.match(out, /Did the session card appear\?/)
   assert.equal(status, 0)
+})
+
+// --- 15. value key ----------------------------------------------------------------
+// [stash_grid] value_key is read like the session key (evdev, the input group,
+// xdotool and xprop for the focus gate); its other keys with the daemon's own
+// code (ppt_value_grid.read_value_config). GET /daemon/stash-grid without a
+// tab is asked once when the backend answered in step 6.
+
+const GRID_TABS = JSON.stringify({ v: 1, tabs: [{ index: 0, name: 'Sale', type: 'PremiumStash', grid: true }, { index: 1, name: 'Currency', type: 'CurrencyStash', grid: false }] })
+
+test('the value key section names the key, the input group, the focus tools and the settings', async () => {
+  const { status, out } = await withEvdev({ stubs: IN_INPUT, extra: '[stash_grid]\nvalue_key = "F9"\nvalue_min_c = 10' })
+  assert.match(out, /15\. Value key/)
+  assert.match(lineWith(out, '] value key '), /\[ ok \].*F9 \(pressed while the game has focus: what each item of a stash tab is worth\)/)
+  assert.match(lineWith(out, '] value input'), /\[ ok \].*tester is in the 'input' group/)
+  assert.match(lineWith(out, '] value focus'), /\[ ok \].*xdotool and xprop present/)
+  assert.match(lineWith(out, '] value settings'), /\[ ok \].*from 10 c, 20 s a tab, every tab with a grid/)
+  assert.match(lineWith(out, '] value server'), /\[ -- \].*--offline/)
+  assert.match(lineWith(out, 'group input'), /\[ -- \].*no \[macros\] section — section 15 checks it for the value key/)
+  assert.equal(status, 0, out)
+})
+
+test('without a value key the section says it is off and asks nothing', async () => {
+  const { out } = await withEvdev()
+  assert.match(lineWith(out, '] value key '), /\[ -- \].*off \(\[stash_grid\] value_key is empty\)/)
+  assert.equal(lineWith(out, '] value input'), '')
+  assert.equal(lineWith(out, '] value server'), '')
+  const off = await withEvdev({ stubs: NOT_IN_INPUT, extra: '[stash_grid]\nmode = "off"\nvalue_key = "F9"' })
+  assert.match(lineWith(off.out, '] value input'), /\[ -- \].*\[stash_grid\] mode = "off": the daemon does not watch F9/)
+  assert.doesNotMatch(off.out, /\[FAIL\].*value/)
+})
+
+test('a value key the daemon would refuse, or one it can never see, is a failure', async () => {
+  const cases = [
+    ['[stash_grid]\nvalue_key = 9', /\[FAIL\].*\[stash_grid\] value_key must be a text \(got 9\) — the daemon will not start/, '] value key '],
+    ['[stash_grid]\nvalue_key = "f5"', /\[FAIL\].*f5 is also a key in \[macros\.keys\] — the daemon will not start/, '] value key ', true],
+    ['[whispers]\nhighlight_key = "F10"\n[stash_grid]\nvalue_key = "f10"', /\[FAIL\].*f10 is also \[whispers\] highlight_key — the daemon will not start/, '] value key '],
+    ['[session]\nkey = "F11"\n[stash_grid]\nvalue_key = "f11"', /\[FAIL\].*f11 is also \[session\] key — the daemon will not start/, '] value key '],
+    ['[stash_grid]\nvalue_key = "F99"', /\[FAIL\].*F99 is not a key name evdev knows \(names like F9, KP1, DOT\) — the daemon will not start/, '] value key '],
+    ['[stash_grid]\nvalue_min_c = -1', /\[FAIL\].*\[stash_grid\] value_min_c must be a number of at least 0 \(got -1\) — the daemon will not start/, '] value settings']
+  ]
+  for (const [extra, re, needle, macros] of cases) {
+    const r = await withEvdev({ macros: !!macros, stubs: IN_INPUT, extra })
+    assert.match(lineWith(r.out, needle), re, extra)
+    assert.equal(r.status, 1, extra)
+  }
+  const group = await withEvdev({ stubs: NOT_IN_INPUT, extra: '[stash_grid]\nvalue_key = "F9"' })
+  assert.match(lineWith(group.out, '] value input'), /\[FAIL\].*tester is not in the 'input' group — the value key will never be seen/)
+  const nofocus = await withEvdev({ stubs: IN_INPUT, tools: ['curl', 'xsel', 'wl-paste'], extra: '[stash_grid]\nvalue_key = "F9"' })
+  assert.match(lineWith(nofocus.out, '] value focus'), /\[FAIL\].*xdotool\/xprop missing — the key works only while the game has focus/)
+  const nooverlay = await withEvdev({ stubs: IN_INPUT, extra: '[results]\noverlay = "off"\n[stash_grid]\nvalue_key = "F9"' })
+  assert.match(lineWith(nooverlay.out, '] value overlay'), /\[warn\].*the overlay is off .* a notification of the 5 dearest items/)
+})
+
+test('the value grid route is asked with the daemon headers, and its answer names the tabs', async () => {
+  const seen = []
+  const extra = '[stash_grid]\nvalue_key = "F9"\nvalue_tabs = ["Sale", "Nope"]'
+  await withBackend({ grid: { code: 200, body: GRID_TABS }, seen }, async url => {
+    const { out } = await withEvdev({ url, args: [], tools: ['curl', 'xsel', 'wl-paste', 'xdotool', 'xprop'], stubs: IN_INPUT, extra })
+    assert.match(lineWith(out, '] value server'), /\[ ok \].*2 stored tab\(s\), 1 with a grid/)
+    assert.match(lineWith(out, '] value tabs'), /\[warn\].*value_tabs names "Nope", which no stored tab has — the key skips it/)
+  })
+  const asked = seen.find(r => r.url.startsWith('/daemon/stash-grid'))
+  assert.ok(asked, 'the self-test asked GET /daemon/stash-grid')
+  assert.equal(asked.url, '/daemon/stash-grid', 'the list only, never a tab')
+  assert.equal(asked.headers['x-user'], 'player1')
+  assert.ok(asked.headers['x-ppt-daemon'])
+})
+
+test('a server without the route is a warning; an empty store a warning; anything else a failure', async () => {
+  const extra = '[stash_grid]\nvalue_key = "F9"'
+  const tools = ['curl', 'xsel', 'wl-paste', 'xdotool', 'xprop']
+  await withBackend({}, async url => {
+    const { out } = await withEvdev({ url, args: [], tools, stubs: IN_INPUT, extra })
+    assert.match(lineWith(out, '] value server'), /\[warn\].*server older than this daemon — the value key does nothing/)
+  })
+  await withBackend({ grid: { code: 200, body: '{"v":1,"tabs":[]}' } }, async url => {
+    const { out } = await withEvdev({ url, args: [], tools, stubs: IN_INPUT, extra })
+    assert.match(lineWith(out, '] value server'), /\[warn\].*no stored stash tab yet — the net-worth sync has not read your stash/)
+  })
+  // Tabs stored, none with a grid (only special tabs, or all written before
+  // the server kept the tab type): the sync has read the stash, so the line
+  // must not say it has not.
+  const noGrid = '{"v":1,"tabs":[{"index":0,"name":"Cur","type":null,"grid":false},{"index":1,"name":"Frag","type":"FragmentStash","grid":false}]}'
+  await withBackend({ grid: { code: 200, body: noGrid } }, async url => {
+    const { out } = await withEvdev({ url, args: [], tools, stubs: IN_INPUT, extra })
+    const line = lineWith(out, '] value server')
+    assert.match(line, /\[warn\].*2 stored tab\(s\), none with a grid yet — each gets its type and cells with its next sync read/)
+    assert.doesNotMatch(line, /has not read your stash/)
+  })
+  for (const grid of [{ code: 502, body: 'Bad Gateway' }, { code: 200, body: '<html>login</html>' }]) {
+    await withBackend({ grid }, async url => {
+      const { status, out } = await withEvdev({ url, args: [], tools, stubs: IN_INPUT, extra })
+      assert.match(lineWith(out, '] value server'), /\[FAIL\].*GET \/daemon\/stash-grid answered/, String(grid.code))
+      assert.equal(status, 1)
+    })
+  }
 })

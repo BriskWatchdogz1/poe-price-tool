@@ -45,9 +45,14 @@
 #  14. the session key and the session cards ([session]: a key name evdev
 #      knows, not a macro key or the highlight key, the input group, xdotool
 #      and xprop for its focus gate; whether session cards show and whether
-#      the back channel brings them).
+#      the back channel brings them),
+#  15. the value key ([stash_grid] value_key: a key name evdev knows, no
+#      other key's, the input group, xdotool and xprop for its focus gate;
+#      value_min_c, value_hold_s and value_tabs read with the daemon's own
+#      code; GET /daemon/stash-grid without a tab: does the server offer it,
+#      which tabs it stores, and whether value_tabs names one it has not).
 #
-# The price check works without sections 8 to 14, so most of what they find
+# The price check works without sections 8 to 15, so most of what they find
 # is a warning: an older server without the back channel (404/405), anything
 # about the notification, no PySide6 for the overlay. Section 8 fails only when
 # the server answers the back channel with something else (an error status, a
@@ -69,7 +74,12 @@
 # Section 14 fails for what would stop the daemon ([session] that is no table,
 # a key that is no text, one it does not know or that another key uses, cards
 # that are not true or false) and for a key the daemon could never act on
-# (no input group, no xdotool or xprop for the focus gate).
+# (no input group, no xdotool or xprop for the focus gate). Section 15 fails
+# the same way for the value key and its settings, and when the server
+# answers GET /daemon/stash-grid with an error status or a page that is not
+# the tab list, or not at all; a server without the route (404, 405), too
+# many requests (429), a store without a tab with a grid, a value_tabs name
+# no stored tab has and the overlay switched off are warnings.
 #
 # What it does NOT do: install anything, edit anything, enable anything. Where
 # it knows a fix, it prints the command; running it stays your decision.
@@ -93,9 +103,11 @@
 #                                     mouse for 5 s, a session card where
 #                                     whisper cards stack for 5 s and, when
 #                                     section 13 found the grid, a frame at
-#                                     cell 1,1 of the stash for 3 s; switch to
-#                                     the game, open the stash and watch for
-#                                     all three
+#                                     cell 1,1 of the stash for 3 s and a
+#                                     sample value grid of 3 cells (one marked
+#                                     uncertain) for 5 s;
+#                                     switch to the game, open the stash and
+#                                     watch for all four
 #
 # Exit: 0 = nothing broken, 1 = at least one FAIL, 2 = bad usage.
 set -uo pipefail
@@ -185,6 +197,7 @@ CFG_HIGHLIGHT=0      # [whispers] highlight_key set and [stash_grid] not off
 CFG_MARKERS=()
 CFG_REPORT_GAME=1    # [presence] report_game, on when the section is missing
 CFG_SESSION=0        # [session] key set (a text that is not blank)
+CFG_VALUE=0          # [stash_grid] value_key set and [stash_grid] not off
 
 read_config() {
   python3 - "$1" <<'PY'
@@ -219,6 +232,8 @@ highlight_key = whispers.get('highlight_key', '')
 grid_sec = cfg.get('stash_grid') if isinstance(cfg.get('stash_grid'), dict) else {}
 watched = isinstance(highlight_key, str) and highlight_key.strip() and grid_sec.get('mode', 'auto') != 'off'
 emit('highlight', '1' if watched else '0')
+value_key = grid_sec.get('value_key', '')
+emit('value', '1' if isinstance(value_key, str) and value_key.strip() and grid_sec.get('mode', 'auto') != 'off' else '0')
 # [session] key: the daemon watches it whenever it is a text that is not blank.
 session_sec = cfg.get('session') if isinstance(cfg.get('session'), dict) else {}
 session_key = session_sec.get('key', '')
@@ -264,6 +279,7 @@ else
       marker)           CFG_MARKERS+=("$value") ;;
       report_game)      CFG_REPORT_GAME="$value" ;;
       session)          CFG_SESSION="$value" ;;
+      value)            CFG_VALUE="$value" ;;
     esac
   done <"$TMP/cfg"
 
@@ -369,6 +385,7 @@ overlay_demo() {
   printf '  Switch to the game now — in 5 seconds a test card appears at the mouse for 5 seconds.\n'
   printf '  Then a session card appears where whisper cards stack (left edge) for 5 seconds.\n'
   [ -n "$GRID_CELL" ] && printf '  Open your stash in the game: after the card, a frame marks cell 1,1 of it for 3 seconds.\n'
+  [ -n "$GRID_RECT" ] && printf '  Then a sample value grid of 3 cells covers the stash for 5 seconds; the one with a dashed border and a ? shows how an uncertain price looks.\n'
   sleep 5
   QT_QPA_PLATFORM=xcb run 20 python3 "$DIR/ppt_overlay.py" --demo >/dev/null 2>"$TMP/overlay-demo.err"
   local rc=$?
@@ -396,8 +413,10 @@ overlay_demo() {
 # largest window of poe_window_class that `xdotool search --class` finds (the
 # daemon takes the focused window when the key is pressed). Prints sizes and
 # positions, never a window id. GRID_CELL is cell 1,1 as x,y,w,h for the test
-# frame of --overlay; empty when the grid is not known.
+# frame of --overlay, GRID_RECT the grid for its sample value grid; both empty
+# when the grid is not known.
 GRID_CELL=''
+GRID_RECT=''
 grid_section() {
   section "13. Stash cell frame"
   if [ "$CFG_READ" != 1 ]; then
@@ -448,6 +467,7 @@ def where(r):
 def cell(r):
     c = cell_rect(r, 1, 1, False)
     emit("cell", ",".join(str(v) for v in c))
+    emit("rect", ",".join(str(v) for v in r))
     return f"cell 1,1 is {c[2]}x{c[3]} at {c[0]},{c[1]}"
 if grid["mode"] == "off":
     emit("grid", "off")
@@ -487,6 +507,7 @@ PY
       key)  k_state="$a"; k_name="$b" ;;
       grid) g_state="$a"; g_text="$b" ;;
       cell) GRID_CELL="$a" ;;
+      rect) GRID_RECT="$a" ;;
     esac
   done <"$TMP/grid"
   if [ -z "$k_state" ] && [ -z "$g_state" ]; then
@@ -548,6 +569,15 @@ grid_demo() {
   fi
   printf '  Did the frame sit on the top-left cell of your stash? If not, set folders, or mode = "manual"\n'
   printf '  with x, y, w, h, in [stash_grid] (README, Buyer whispers).\n'
+  [ -n "$GRID_RECT" ] || return
+  QT_QPA_PLATFORM=xcb run 20 python3 "$DIR/ppt_overlay.py" --grid "$GRID_RECT" >/dev/null 2>"$TMP/overlay-grid.err"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    bad "test grid" "ppt_overlay.py --grid exited $rc: $(head -n 1 "$TMP/overlay-grid.err" | cut -c1-160)"
+    return
+  fi
+  printf '  Did the three numbers sit in cells of your stash grid? Can you read them at your\n'
+  printf '  resolution? The value grid uses the same grid as the frame.\n'
 }
 
 result() {
@@ -676,9 +706,10 @@ fi
 
 # ---- 3. input group ---------------------------------------------------------
 # evdev needs read access to /dev/input/event* — but only the macros, the
-# highlight key and the session key ever open a device. Without [macros] this
-# section does not apply; section 13 checks the group for the highlight key,
-# section 14 for the session key. Without any of them the daemon watches no
+# highlight key, the session key and the value key ever open a device. Without
+# [macros] this section does not apply; section 13 checks the group for the
+# highlight key, section 14 for the session key, section 15 for the value key.
+# Without any of them the daemon watches no
 # keys at all, so the group is genuinely not applicable rather than quietly
 # optional.
 section "3. Input group (evdev)"
@@ -701,6 +732,8 @@ elif [ "$CFG_HIGHLIGHT" = 1 ]; then
   na "group input" "no [macros] section — section 13 checks it for the highlight key"
 elif [ "$CFG_SESSION" = 1 ]; then
   na "group input" "no [macros] section — section 14 checks it for the session key"
+elif [ "$CFG_VALUE" = 1 ]; then
+  na "group input" "no [macros] section — section 15 checks it for the value key"
 else
   na "group input" "no [macros] section — the daemon opens no input devices"
 fi
@@ -1470,6 +1503,190 @@ PY
         ok "session cards" "on: game and farm sessions show in the game (overlay or notification)"
       fi ;;
   esac
+fi
+
+# ---- 15. value key ----------------------------------------------------------
+# [stash_grid] value_key shows over the stash what each item of a tab is
+# worth (GET /daemon/stash-grid: the server's store, never the stash API). The
+# daemon reads the key through evdev like the macro keys and acts on a press
+# only while the game has focus (xdotool and xprop). value_min_c, value_hold_s
+# and value_tabs are read with the daemon's own code
+# (ppt_value_grid.read_value_config). The route is asked once, without a tab,
+# with the daemon headers, when the backend answered in step 6.
+section "15. Value key"
+if [ "$CFG_READ" != 1 ]; then
+  na "value key" "config not readable (see section 0)"
+elif ! have python3; then
+  na "value key" "python3 missing (see section 1)"
+else
+  run 10 python3 -B - "$DIR" "$CFG" >"$TMP/value" 2>"$TMP/value.err" <<'PY'
+import sys, tomllib
+sys.path.insert(0, sys.argv[1])
+from ppt_value_grid import read_value_config
+with open(sys.argv[2], "rb") as fh:
+    cfg = tomllib.load(fh)
+def emit(*a):
+    print("\t".join(str(x) for x in a))
+sec = cfg.get("stash_grid", {})
+if not isinstance(sec, dict):
+    emit("key", "table", "")
+    sys.exit(0)
+emit("mode", "off" if sec.get("mode", "auto") == "off" else "on", "")
+key = sec.get("value_key", "")
+if not isinstance(key, str):
+    emit("key", "bad", repr(key)[:40])
+elif not key.strip():
+    emit("key", "empty", "")
+else:
+    key = key.strip()
+    macros = cfg.get("macros")
+    keys = macros.get("keys") if isinstance(macros, dict) else None
+    w = cfg.get("whispers") if isinstance(cfg.get("whispers"), dict) else {}
+    hk = w.get("highlight_key", "")
+    s = cfg.get("session") if isinstance(cfg.get("session"), dict) else {}
+    sk = s.get("key", "")
+    try:
+        from evdev import ecodes
+        known = hasattr(ecodes, "KEY_" + key.upper())
+    except Exception:
+        known = None
+    if isinstance(keys, dict) and any(str(k).upper() == key.upper() for k in keys):
+        emit("key", "macro", key)
+    elif isinstance(hk, str) and hk.strip().upper() == key.upper():
+        emit("key", "highlight", key)
+    elif isinstance(sk, str) and sk.strip().upper() == key.upper():
+        emit("key", "session", key)
+    elif known is None:
+        emit("key", "no-evdev", key)
+    else:
+        emit("key", "ok" if known else "unknown", key)
+v, err = read_value_config({k: val for k, val in sec.items() if k != "value_key"})
+if err:
+    emit("settings", "bad", err)
+else:
+    tabs = ", ".join(f'"{t}"' for t in v["tabs"]) if v["tabs"] else "every tab with a grid"
+    emit("settings", "ok", f"from {v['min_c']:g} c, {v['hold_s']:g} s a tab, {tabs}")
+    for t in v["tabs"]:
+        if "\t" not in t and "\n" not in t:
+            emit("tab", t, "")
+PY
+  V_KEY=''; V_NAME=''; V_SET=''; V_SET_TEXT=''; V_MODE=''; V_TABS=()
+  while IFS=$'\t' read -r kind a b; do
+    case "$kind" in
+      key)      V_KEY="$a"; V_NAME="$b" ;;
+      settings) V_SET="$a"; V_SET_TEXT="$b" ;;
+      mode)     V_MODE="$a" ;;
+      tab)      V_TABS+=("$a") ;;
+    esac
+  done <"$TMP/value"
+  [ -n "$V_KEY" ] || warn "value key" "the check itself failed: $(head -n 1 "$TMP/value.err" | cut -c1-160)"
+  case "$V_KEY" in
+    table)     na "value key" "[stash_grid] is no table (section 13 names it)" ;;
+    empty)     na "value key" "off ([stash_grid] value_key is empty)" ;;
+    bad)       bad "value key" "[stash_grid] value_key must be a text (got $V_NAME) — the daemon will not start" ;;
+    macro)     bad "value key" "$V_NAME is also a key in [macros.keys] — the daemon will not start" ;;
+    highlight) bad "value key" "$V_NAME is also [whispers] highlight_key — the daemon will not start" ;;
+    session)   bad "value key" "$V_NAME is also [session] key — the daemon will not start" ;;
+    unknown)   bad "value key" "$V_NAME is not a key name evdev knows (names like F9, KP1, DOT) — the daemon will not start" ;;
+    no-evdev)  warn "value key" "$V_NAME cannot be checked: python-evdev is missing (see section 1); without it the daemon does not start at all" ;;
+    ok)        ok "value key" "$V_NAME (pressed while the game has focus: what each item of a stash tab is worth)" ;;
+  esac
+  case "$V_SET" in
+    bad) bad "value settings" "$V_SET_TEXT — the daemon will not start" ;;
+    ok)  { [ "$V_KEY" = ok ] || [ "$V_KEY" = no-evdev ]; } && ok "value settings" "$V_SET_TEXT" ;;
+  esac
+  V_ON=0
+  if { [ "$V_KEY" = ok ] || [ "$V_KEY" = no-evdev ]; } && [ "$V_MODE" = off ]; then
+    na "value input" "[stash_grid] mode = \"off\": the daemon does not watch $V_NAME"
+  elif [ "$V_KEY" = ok ] || [ "$V_KEY" = no-evdev ]; then
+    V_ON=1
+    if id -nG 2>/dev/null | grep -qw input; then
+      ok "value input" "$WHOAMI is in the 'input' group"
+    else
+      bad "value input" "$WHOAMI is not in the 'input' group — the value key will never be seen"
+      hint "Arch/Garuda:  sudo usermod -aG input $WHOAMI    (then log out and back in)"
+    fi
+    if have xdotool && have xprop; then
+      ok "value focus" "xdotool and xprop present (the key works only while the game has focus)"
+    else
+      bad "value focus" "xdotool/xprop missing — the key works only while the game has focus, and that cannot be checked; the key does nothing"
+      hint "Arch: xdotool xorg-xprop; Debian/Ubuntu: xdotool x11-utils."
+    fi
+    if [ "$CFG_OVERLAY" = off ]; then
+      warn "value overlay" "the overlay is off ([results] overlay = \"off\") — the value grid comes as a notification of the 5 dearest items"
+    fi
+  fi
+  if [ "$V_ON" = 1 ]; then
+    if [ "$MODE" = offline ]; then
+      na "value server" "--offline"
+    elif [ "$BACKEND_UP" != 1 ]; then
+      na "value server" "backend not reachable (see step 6)"
+    else
+      resp="$(run 5 curl -sS -H "X-User: $CFG_USER" -H 'X-PPT-Daemon: selftest' \
+        -w '\n%{http_code}' "$BASE/daemon/stash-grid" 2>"$TMP/grid-route.err")"
+      rc=$?
+      code="${resp##*$'\n'}"
+      printf '%s' "${resp%$'\n'*}" >"$TMP/grid-route.json"
+      if [ "$rc" -ne 0 ]; then
+        bad "value server" "GET /daemon/stash-grid: no answer (curl exit $rc): $(head -n 1 "$TMP/grid-route.err")"
+      else
+        case "$code" in
+          200)
+            if run 5 python3 -B - "$TMP/grid-route.json" "${V_TABS[@]}" >"$TMP/grid-route" 2>/dev/null <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as fh:
+    data = json.load(fh)
+tabs = data.get("tabs") if isinstance(data, dict) else None
+if not isinstance(tabs, list):
+    sys.exit(1)
+tabs = [t for t in tabs if isinstance(t, dict)]
+names = {t.get("name") for t in tabs}
+print(f"count\t{len(tabs)}\t{sum(1 for t in tabs if t.get('grid') is True)}")
+for n in sys.argv[2:]:
+    if n not in names:
+        print(f"unknown\t{n}\t")
+PY
+            then
+              G_COUNT=''; G_GRID=''; G_UNKNOWN=()
+              while IFS=$'\t' read -r kind a b; do
+                case "$kind" in
+                  count)   G_COUNT="$a"; G_GRID="$b" ;;
+                  unknown) G_UNKNOWN+=("$a") ;;
+                esac
+              done <"$TMP/grid-route"
+              if [ "${G_GRID:-0}" -gt 0 ]; then
+                ok "value server" "$G_COUNT stored tab(s), $G_GRID with a grid"
+              elif [ "${G_COUNT:-0}" -gt 0 ]; then
+                warn "value server" "$G_COUNT stored tab(s), none with a grid yet — each gets its type and cells with its next sync read"
+                hint "Only normal, premium and quad tabs have a grid; the Net Worth page shows the sync."
+              else
+                warn "value server" "no stored stash tab yet — the net-worth sync has not read your stash"
+                hint "The Net Worth page shows the sync; a tab gets its cells with its next read."
+              fi
+              if [ "${#G_UNKNOWN[@]}" -gt 0 ]; then
+                names="$(printf '"%s", ' "${G_UNKNOWN[@]}")"
+                names="${names%, }"
+                if [ "${#G_UNKNOWN[@]}" -eq 1 ]; then
+                  warn "value tabs" "value_tabs names $names, which no stored tab has — the key skips it"
+                else
+                  warn "value tabs" "value_tabs names $names, which no stored tab has — the key skips them"
+                fi
+              fi
+            else
+              bad "value server" "GET /daemon/stash-grid answered 200 with something else: $(head -n 1 "$TMP/grid-route.json" | cut -c1-120)"
+              hint "A reverse proxy's page? backend_url must point at the backend itself."
+            fi ;;
+          404|405)
+            warn "value server" "server older than this daemon — the value key does nothing"
+            hint "Whoever runs the server: update it (docs/runbooks.md, \"Update procedure\")." ;;
+          429)
+            warn "value server" "the server took too many value grid requests of $CFG_USER this minute — run this again in a minute" ;;
+          *)
+            bad "value server" "GET /daemon/stash-grid answered $code: $(head -n 1 "$TMP/grid-route.json" | cut -c1-120)" ;;
+        esac
+      fi
+    fi
+  fi
 fi
 
 # ---- result -----------------------------------------------------------------

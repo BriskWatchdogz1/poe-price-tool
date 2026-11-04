@@ -144,7 +144,8 @@ poll_s = 0.5                    # how often the log is read, in seconds
 highlight_key = ""
 
 [stash_grid]
-# Where the stash grid lies on the screen, for the stash cell frame above.
+# Where the stash grid lies on the screen, for the stash cell frame above and
+# the value grid below.
 # "auto": from the game window's size (xdotool), as SlimTrade computes it: on a
 # 1920x1080 window the grid is 634x634 px at x 15, y 125, scaled with the
 # window. "manual": you give the grid's top-left corner and size in screen
@@ -161,6 +162,26 @@ folders = "none"
 # y = 125
 # w = 634
 # h = 634
+# Value grid: a key that shows, over the stash, what each item of a stash tab
+# is worth (a border and the value in each cell, the tab under the grid), so
+# you can decide what to sell, keep or move to a sale tab. The values come
+# from the server's last net-worth sync of that tab, not from a new read of
+# your stash. The game does not tell the tool which tab you have open, so the
+# key steps through the tabs: the first press shows the tab of the newest
+# buyer whisper (within whisper_hold_s), else the tab shown last (when its
+# grid went because value_hold_s ran out), else the first; each further press
+# within value_hold_s shows the next tab, and after the last the grid goes
+# and the next press starts afresh (the newest whisper's tab, else the
+# first). Without the overlay (no PySide6, overlay = "off") it comes as a
+# notification of the 5 dearest items, for [results] notify_timeout_ms.
+# Only while the game has focus, read like the macro keys (evdev: your user
+# must be in the 'input' group); not one of [macros.keys], not highlight_key,
+# not [session] key. Empty = off; mode = "off" above switches it off too.
+# Not tried with a running game yet (README, Known issues).
+value_key = ""                  # e.g. "F4"
+value_min_c = 5                 # items worth less (in chaos, the whole stack) get no border and no number
+value_hold_s = 20               # how long the grid stays on the overlay, and how long a further press goes to the next tab
+value_tabs = []                 # tab names the key steps through, in this order; empty = every tab with a grid, in stash order
 
 [presence]
 # Tells the server whether the game is running on this machine (it looks for

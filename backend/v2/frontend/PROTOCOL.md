@@ -1474,9 +1474,9 @@ history point younger than `POE_SESSION_BASELINE_MAX_AGE_MS` for this user),
 requests of this user in any minute → `429 { "v": 1, "error":
 "too-many-session-requests", "action" }`; a malformed one is refused before
 it counts. A server without this route answers
-`404 {"error":"unknown daemon route"}`. It never sends a request to GGG; the
-read it asks for comes out of the user's own ticks (`sessionRound` under
-`networth-sync-status`).
+`404 {"error":"unknown daemon route","path":"…"}`. It never sends a request to
+GGG; the read it asks for comes out of the user's own ticks (`sessionRound`
+under `networth-sync-status`).
 
 ## `POST /daemon/whisper` — a buyer's whisper, checked against the market (HTTP)
 
@@ -1590,6 +1590,73 @@ never its text, item or label. A failure is `[whisper] valuation failed: …`,
 `[whisper] delivery failed: …` (handing the entry to the page or the feed) or
 `[whisper] handler failed: …`, at most one line a minute for each, the next
 one counting those left out.
+
+## `GET /daemon/stash-grid` — what each item in a stash tab is worth (HTTP)
+
+For the daemon's value key, which draws over the open stash tab what each item
+there is worth (same headers and caller rule as the other `/daemon/*` routes;
+the user is `X-User`). It reads the user's stored stash tabs only, never the
+stash API, poe.ninja or Faustus: the cells come from the read the background
+sync makes anyway (`networth/scan.mjs`), so a tab shows what its last sync
+saw. The stash API does not say which tab is open in the game; the daemon
+steps through the list.
+
+**`GET /daemon/stash-grid`** →
+`200 { "v": 1, "tabs": [ { "index": 0, "name": "Dump", "type": "QuadStash", "grid": true } ] }`,
+the user's stored tabs in stash order (an empty list when none is stored).
+`type` is the stash API's tab type, `null` for a tab stored before the type
+was kept; `grid` is `true` for `NormalStash` and `PremiumStash` (12×12 cells)
+and `QuadStash` (24×24), `false` for every other type, whose items do not sit
+on cells.
+
+**`GET /daemon/stash-grid?tab=<index>`** → the same, plus that tab:
+```json
+{ "v": 1, "tabs": [ … ],
+  "tab": { "index": 0, "name": "Dump", "type": "QuadStash", "quad": true, "grid": true, "syncedAt": 1793606400000 },
+  "cells": [ { "x": 3, "y": 7, "w": 2, "h": 2, "c": 900, "n": "Headhunter" },
+             { "x": 0, "y": 0, "w": 1, "h": 1, "c": 12, "n": "Stacked Deck", "u": true } ],
+  "totalChaos": 912, "chaosPerDivine": 180 }
+```
+- `cells` — one per priced stash entry worth at least 1 c for the whole entry
+  (a stack is one entry), dearest first, at most 600. `x`/`y` the 0-based cell
+  from the stash API (the trade site's `left`/`top` are `x + 1`/`y + 1`),
+  `w`/`h` the item's size in cells, `c` the entry's market value in chaos to
+  one decimal, as the Net Worth page values it, `n` the item's name. `u` —
+  optional, only ever `true`: this entry's own valuation is uncertain (what
+  `items[].uncertain` of the snapshot marks); the Net Worth row it folds into
+  is uncertain when any of its entries is, so a cell without `u` can belong to
+  a marked row. The reason itself is not sent. An entry without a numeric cell
+  from the stash API has no cell. A tab with `grid: false` has an empty list.
+- `cells: null` with `reason: "not-read-since-update"` — the tab was stored
+  before cells were kept; it has them after the sync reads it again.
+  `totalChaos` is `null` then.
+- `totalChaos` — the sum of `c`, to one decimal. `chaosPerDivine` — the
+  Chaos:Divine rate the sync last stored for the user (poe.ninja's, or
+  `POE_CD_RATIO` while there is none), `null` when none is stored.
+- `quad` — `type` is `QuadStash`. `syncedAt` — when the sync last stored the
+  tab (server clock, ms).
+
+Refusals: `400 {"error":"bad tab index"}` when `tab` is not a whole number from
+0 up; `404 {"error":"no such tab"}` for an index the store does not hold for
+this user; more than 60 requests of this user in any minute →
+`429 { "v": 1, "error": "too-many-grid-requests" }` (a malformed one is refused
+before it counts; a fixed number, not a setting). A server without this route
+answers `404 {"error":"unknown daemon route","path":"…"}`: a client tells an
+old server from a tab that is gone (removed since it fetched the list) by
+`error`, not by the status.
+
+The daemon (`daemon/ppt_value_grid.py`) turns `x`/`y`/`w`/`h` into screen
+rectangles on the stash cell frame's grid and hands them to its overlay
+process as one `grid` command (`{"cmd":"grid","key":"grid","x","y","w","h",
+"cells":[{"x","y","w","h","label","u"}],"label","hold_ms"}`, all in screen
+pixels; `u` is optional and `true` for a cell with `u` here, whose `label`
+ends in `?` and whose border the overlay draws dashed, and the grid's `label`
+then has ` · N uncertain` (N of the cells drawn) after their count and before
+the tab total (the overlay drops a cell's `?` before it cuts the value short,
+and cuts a `label` wider than the grid, or than its `max_width_px` when that
+is wider, at its end); the overlay's
+line protocol is in the head comment of `daemon/ppt_overlay.py`), or, without
+the overlay, into one notification of the dearest cells, with the same `?`.
 
 ## `POST /admin/data-check` — run the data auto-update now (HTTP)
 

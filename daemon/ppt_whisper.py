@@ -585,7 +585,7 @@ class Whispers:
         self._n += 1
         text, truncated = cut_body(body)
         rec = {"name": name, "label": label, "body": text, "note": None, "entry": None, "job": None,
-               "sig": None, "repeats": 0, "pending_since": None, "failure": None, "closed": None}
+               "sig": None, "repeats": 0, "pending_since": None, "failure": None, "closed": None, "at": now}
         self.recs[wid] = rec
         while len(self.recs) > self.keep:
             self.recs.popitem(last=False)
@@ -689,9 +689,10 @@ class Whispers:
 
     def positions(self):
         """The whispers of this run whose server entry names a stash cell,
-        newest first: [{wid, label, tab, left, top, quad}] for the stash cell
-        frame (ppt_stash_grid). quad is the entry's (True, False or None).
-        The buyer's name is not part of it."""
+        newest first: [{wid, label, tab, left, top, quad, at}] for the stash
+        cell frame (ppt_stash_grid) and the value key (ppt_value_grid). quad
+        is the entry's (True, False or None); at is when the whisper was read
+        (the daemon's monotonic clock). The buyer's name is not part of it."""
         out = []
         for wid, rec in reversed(self.recs.items()):
             e = rec.get("entry")
@@ -702,7 +703,7 @@ class Whispers:
                 continue
             quad = e.get("quad")
             out.append({"wid": wid, "label": rec["label"], "tab": tab, "left": left, "top": top,
-                        "quad": quad if isinstance(quad, bool) else None})
+                        "quad": quad if isinstance(quad, bool) else None, "at": rec.get("at")})
         return out
 
     def close(self):

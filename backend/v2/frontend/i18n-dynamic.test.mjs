@@ -745,6 +745,7 @@ test('the English user still gets English — the language comes from the mappin
     await S('Page.navigate', { url: base + '/networth.html' })
     await waitFor('window.I18n && window.I18n.lang() === "en"', 'the net-worth page did not resolve to English')
     assert.equal(await text('.mhead h1'), 'Net Worth')
+    await waitFor('!document.getElementById("appStatus").hidden', 'the sync status line never appeared')
     assert.equal(await text('#appStatus'), 'No credentials configured — open settings to add them.')
 
     await S('Page.navigate', { url: base + '/settings.html' })

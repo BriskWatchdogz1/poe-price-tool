@@ -10,6 +10,62 @@ and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-04
+
+### Added
+
+- **Value grid over the stash.** With `value_key` set under `[stash_grid]` in
+  the daemon's `config.toml`, a press while the game has focus draws over the
+  open stash tab what each item there is worth (from `value_min_c`, default
+  5 c), with the tab and its total under the grid, for `value_hold_s` (20 s);
+  each further press within that time shows the next tab (`value_tabs`, or
+  every normal, premium and quad tab in stash order), because the game does
+  not say which tab is open. Without the overlay it is a notification of the 5
+  dearest items. An item whose price is uncertain (the Net Worth page's
+  Confidence mark) has a dashed border and a `?` after its value (`12c?`),
+  and the line under the grid counts them. The values are the Net Worth
+  page's: the server keeps, for every such tab, where each priced item lies
+  and what it is worth (1 c and up, the dearest 600 per tab), from the stash
+  read the background sync makes anyway, and serves it at
+  `GET /daemon/stash-grid` (at most 60 requests per player and minute). A
+  press reads the server's store: no extra request to GGG, poe.ninja or
+  Faustus. `./daemon/selftest.sh` checks the key (section 15), `--overlay`
+  shows a sample grid. Not tried over a running game yet. See
+  [Value grid over the stash](README.md#value-grid-over-the-stash-optional)
+  and [Value grid](docs/admin.md#value-grid).
+
+### Upgrade notes
+
+**Server**
+
+- No setting has to change; the route's limit is a fixed number, not a new
+  environment variable. `networth-store.json` keeps `schema_version: 2`.
+- After the update, each stash tab needs one read by the background sync
+  before the value grid can show it; until then the server answers
+  `not-read-since-update` for that tab and the daemon's card says *read again
+  with the next sync*. A tab stored before the server kept the tab type (and
+  not read since) is listed with `grid: false` until that read: the key skips
+  it, says *no stash tab with a grid stored* when no other tab is left, and
+  *no value grid for this tab type* when `value_tabs` names it. Nothing to do:
+  the sync reaches every tab within one pass through the stash.
+- **Own frontends:** a new daemon route `GET /daemon/stash-grid`, whose
+  cells carry an optional `u: true` for an uncertain price; nothing else
+  changes ([PROTOCOL.md](backend/v2/frontend/PROTOCOL.md)).
+
+**Daemon**
+
+- Restart the daemon after `git pull` (`systemctl --user restart
+  poe-price-daemon`) and run `./daemon/selftest.sh`. An older daemon with this
+  server works as before; this daemon with an older server says *server too
+  old for the value grid* on a press and prices as before.
+- `[stash_grid]` gains four optional keys; a file without them runs with these
+  defaults (all in `daemon/config.example.toml`): `value_key = ""`, which
+  means off, `value_min_c = 5`, `value_hold_s = 20`, `value_tabs = []` (every
+  tab with a grid). A value key that is not a text or not a key name evdev
+  knows, one that is also a macro key, the `highlight_key` or the `[session]
+  key`, or a wrong value in the other three stops the daemon and names the
+  key.
+
 ## [0.3.0] - 2026-11-03
 
 ### Added
@@ -367,7 +423,8 @@ The first release, with everything since the first public tree
   `item_prefixes`. Each player can also switch his language himself on the
   settings page; that choice wins over `POE_USER_LANGS`.
 
-[Unreleased]: https://github.com/BriskWatchdogz1/poe-price-tool/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/BriskWatchdogz1/poe-price-tool/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/BriskWatchdogz1/poe-price-tool/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/BriskWatchdogz1/poe-price-tool/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/BriskWatchdogz1/poe-price-tool/compare/07e01da...v0.2.1
 [0.2.0]: https://github.com/BriskWatchdogz1/poe-price-tool/compare/48cc3b0...07e01da

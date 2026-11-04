@@ -5,8 +5,10 @@ Started by poe-price-daemon.py as a child (ppt_display.OverlayLink); by hand
 only with --probe (say which Qt it found and whether a window can be created,
 without showing one, then exit), --demo (a test card at the mouse for 5 s),
 --session (a sample session card, ppt_results.session_card, where whisper
-cards stack, for 5 s) or --frame X,Y,W,H (the stash cell frame at that
-rectangle for 3 s); ./daemon/selftest.sh --overlay runs the last three.
+cards stack, for 5 s), --frame X,Y,W,H (the stash cell frame at that
+rectangle for 3 s) or --grid X,Y,W,H (a value grid of 3 sample cells, one
+marked uncertain, over that rectangle for 5 s); ./daemon/selftest.sh --overlay
+runs the last four.
 Written for this project; only the technique (an X11 window that bypasses the
 window manager, on XWayland, above a game that is itself an X11 client) is
 common knowledge.
@@ -31,17 +33,24 @@ daemon -> overlay (stdin):
   {"cmd":"item","key":"item:<id>","title":"Mageblood","lines":[["Mageblood","name"],["140 div (125–170)","price"]],"final":true,"again":false}
   {"cmd":"whisper","key":"whisper:<id>","title":"…","lines":[…]}
   {"cmd":"frame","key":"frame","x":226,"y":231,"w":53,"h":53,"label":"1/2 buyer 1 · tab \"Sale\" · left 5, top 3","hold_ms":20000}
+  {"cmd":"grid","key":"grid","x":15,"y":125,"w":634,"h":634,"cells":[{"x":121,"y":178,"w":53,"h":79,"label":"5d?","u":true}],"label":"1/3 tab \"Dump\" · 1 item from 5c · 1 uncertain","hold_ms":20000}
   {"cmd":"hide","key":"…"}   {"cmd":"style", …}   {"cmd":"ping","n":7}   {"cmd":"quit"}
 overlay -> daemon (stdout):
   {"type":"hello","binding":"PySide6","qt":"6.12.0","platform":"xcb","screens":1}
   {"type":"shown","key":"…","x":812,"y":440}   {"type":"hidden","key":"…"}
+  {"type":"shown","key":"grid","x":15,"y":125,"cells":1}
   {"type":"pong","n":7}   {"type":"error","message":"…"}
 One item card at a time (the newest key wins), whisper cards stacked at a fixed
 anchor, one stash cell frame (a border around the cell x, y, w, h in
 screen pixels, its label under it, for hold_ms; ppt_stash_grid computes the
-cell); where they go and when they leave is ppt_overlay_model. "hidden" is
+cell), one value grid (the grid x, y, w, h in screen pixels; a border and a
+number in each of its cells, given in screen pixels too, the border dashed for
+a cell with "u":true (its price is uncertain), the tab line under the grid,
+for hold_ms; ppt_value_grid computes them); where they go and when
+they leave is ppt_overlay_model. "hidden" is
 said once for a window that goes while visible (its hold time, the cursor, a
-hide command); the frame window answers to the key it was last shown with.
+hide command); the frame and grid windows answer to the key they were last
+shown with.
 Exit: 0 quit or end of stdin (the daemon is gone), 3 PySide6 cannot be
 imported, 4 the platform cannot start (no DISPLAY, no X server, no xcb plugin),
 5 anything else. Every exit but 0 writes one line to stderr.
@@ -59,7 +68,7 @@ import time
 PLATFORM = os.environ.get("PPT_OVERLAY_PLATFORM") or "xcb"
 os.environ["QT_QPA_PLATFORM"] = PLATFORM
 
-from ppt_overlay_model import Cards, anchor_point, fit_lines, place, stack  # noqa: E402
+from ppt_overlay_model import Cards, anchor_point, fit_lines, grid_cells, grid_font_px, place, stack  # noqa: E402
 
 EXIT_OK, EXIT_NO_QT, EXIT_NO_DISPLAY, EXIT_OTHER = 0, 3, 4, 5
 
@@ -94,6 +103,8 @@ FRAME_PEN = 3       # the border's width in pixels, drawn inside the cell
 FRAME_GAP = 4       # between the cell and the label under it
 FRAME_TONE = "price"
 FRAME_MAX = 20000   # a frame side beyond any screen is refused
+GRID_PEN = 2        # a value grid cell's border, drawn inside the cell
+GRID_TONE = "price"
 TONES = {
     "name": (236, 236, 236),
     "price": (232, 196, 104),
@@ -330,7 +341,93 @@ def build(QtCore, QtGui, QtWidgets):
                 p.drawText(PAD, h + FRAME_GAP + PAD // 2 + fm.ascent(), self.label)  # plain text, never markup
             p.end()
 
-    return CardWindow, FrameWindow
+    class GridWindow(OverWindow):
+        """The value grid: a border and a number in each cell, the tab line
+        under the grid. A cell whose price is uncertain (u) has a dashed
+        border, same colour and width; its '?' comes in its text from the
+        daemon. When the text does not fit its cell, the '?' is dropped
+        first and the value cut as it would be without it; the dashes
+        still mark the cell then.
+        Only those are painted; the rest of the window is transparent, and
+        every click goes through all of it."""
+
+        def __init__(self, style):
+            super().__init__(style)
+            self.size_ = (0, 0)
+            self.cells = []        # (x, y, w, h, text, uncertain) in the window's pixels, text elided
+            self.raw = ([], "")    # the cells and label as given, for a style change
+            self.cell_font = None
+            self.label = ""
+            self.font_ = None
+            self.label_size = (0, 0)
+
+        def set_grid(self, w, h, cells, label, style):
+            self.style_ = style
+            self.size_ = (int(w), int(h))
+            self.raw = (list(cells), label)
+            font = QtGui.QFont(self.font())
+            font.setPixelSize(grid_font_px(cells, h))
+            font.setBold(True)
+            fm = QtGui.QFontMetrics(font)
+            self.cell_font = font
+            def fit(text, u, width):
+                shown = fm.elidedText(text, Qt.TextElideMode.ElideRight, width)
+                if shown == text or not (u and text.endswith("?")):
+                    return shown
+                # Drop the '?' whole before a digit or the unit goes: the
+                # dashed border still marks the cell.
+                return fm.elidedText(text[:-1], Qt.TextElideMode.ElideRight, width)
+
+            self.cells = [(x, y, cw, ch, fit(text, u, max(1, cw - 4)), u) for x, y, cw, ch, text, u in cells]
+            lfont = QtGui.QFont(self.font())
+            lfont.setPointSizeF(float(style["font_pt"]))
+            lfm = QtGui.QFontMetrics(lfont)
+            max_text = max(40, max(int(w), int(style["max_width_px"])) - 2 * PAD)
+            self.label = lfm.elidedText(str(label or ""), Qt.TextElideMode.ElideRight, max_text) if label else ""
+            self.font_ = lfont
+            self.label_size = ((lfm.horizontalAdvance(self.label) + 2 * PAD, lfm.height() + PAD)
+                               if self.label else (0, 0))
+            lw, lh = self.label_size
+            self.resize(max(int(w), lw), int(h) + (FRAME_GAP + lh if lh else 0))
+            self.update()
+
+        def paintEvent(self, event):  # noqa: N802 (Qt's name)
+            p = QtGui.QPainter(self)
+            p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
+            alpha = int(255 * float(self.style_["opacity"]))
+            pen = QtGui.QPen(QtGui.QColor(*TONES[GRID_TONE]))
+            pen.setWidth(GRID_PEN)
+            dashed = QtGui.QPen(pen)
+            dashed.setStyle(Qt.PenStyle.DashLine)
+            half = GRID_PEN / 2
+            fm = QtGui.QFontMetrics(self.cell_font) if self.cell_font is not None else None
+            for x, y, cw, ch, text, uncertain in self.cells:
+                p.setPen(dashed if uncertain else pen)
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.drawRect(QtCore.QRectF(x + half, y + half, max(0.0, cw - GRID_PEN), max(0.0, ch - GRID_PEN)))
+                if not text or fm is None:
+                    continue
+                tw, th = fm.horizontalAdvance(text) + 4, fm.height()
+                box = QtCore.QRectF(x + (cw - tw) / 2, y + ch - th - GRID_PEN, tw, th)
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QtGui.QColor(22, 22, 26, alpha))
+                p.drawRoundedRect(box, 3, 3)
+                p.setFont(self.cell_font)
+                p.setPen(QtGui.QColor(*TONES["name"]))
+                p.drawText(box, int(Qt.AlignmentFlag.AlignCenter), text)  # plain text, never markup
+            w, h = self.size_
+            lw, lh = self.label_size
+            if self.label and self.font_ is not None:
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QtGui.QColor(22, 22, 26, alpha))
+                p.drawRoundedRect(QtCore.QRectF(0, h + FRAME_GAP, lw, lh), 4, 4)
+                p.setFont(self.font_)
+                p.setPen(QtGui.QColor(*TONES["name"]))
+                lfm = QtGui.QFontMetrics(self.font_)
+                p.drawText(PAD, h + FRAME_GAP + PAD // 2 + lfm.ascent(), self.label)  # plain text, never markup
+            p.end()
+
+    return CardWindow, FrameWindow, GridWindow
 
 
 class Overlay:
@@ -340,13 +437,15 @@ class Overlay:
         self.QtGui = QtGui
         self.app = app
         self.emit = emit
-        self.CardWindow, self.FrameWindow = build(QtCore, QtGui, QtWidgets)
+        self.CardWindow, self.FrameWindow, self.GridWindow = build(QtCore, QtGui, QtWidgets)
         self.style = default_style()
         self.cards = Cards(**self._card_params())
         self.item_win = None
         self.whisper_wins = {}
         self.frame_win = None
         self.frame_win_key = None  # the key the frame window was last shown with
+        self.grid_win = None
+        self.grid_win_key = None   # the key the grid window was last shown with
 
     def _card_params(self):
         s = self.style
@@ -377,6 +476,8 @@ class Overlay:
             self.whisper(msg)
         elif cmd == "frame":
             self.frame(msg)
+        elif cmd == "grid":
+            self.grid(msg)
         elif cmd == "hide":
             self.hide(str(msg.get("key") or ""))
         elif cmd == "style":
@@ -388,6 +489,8 @@ class Overlay:
                     win.set_card(win.lines, self.style)
             if self.frame_win is not None:
                 self.frame_win.set_frame(*self.frame_win.cell, self.frame_win.label, self.style)
+            if self.grid_win is not None:
+                self.grid_win.set_grid(*self.grid_win.size_, *self.grid_win.raw, self.style)
             self._layout_whispers()
         elif cmd == "ping":
             self.emit({"type": "pong", "n": msg.get("n")})
@@ -444,6 +547,26 @@ class Overlay:
         self._put(self.frame_win, (x, y))
         self.emit({"type": "shown", "key": key, "x": self.frame_win.x(), "y": self.frame_win.y()})
 
+    def grid(self, msg):
+        rect = frame_rect(msg)
+        if rect is None:
+            self.emit({"type": "error", "message": "grid needs whole numbers x, y and w, h above 0"})
+            return
+        key = str(msg.get("key") or "grid")
+        try:
+            hold_ms = int(msg.get("hold_ms") or self.style["whisper_hold_ms"])
+        except (TypeError, ValueError):
+            hold_ms = self.style["whisper_hold_ms"]
+        cells = grid_cells(rect, msg.get("cells"))
+        if self.grid_win is None:
+            self.grid_win = self.GridWindow(self.style)
+        x, y, w, h = rect
+        self.grid_win.set_grid(w, h, cells, msg.get("label"), self.style)
+        self.cards.grid(key, self.now_ms(), hold_ms)
+        self.grid_win_key = key
+        self._put(self.grid_win, (x, y))
+        self.emit({"type": "shown", "key": key, "x": self.grid_win.x(), "y": self.grid_win.y(), "cells": len(cells)})
+
     def _layout_whispers(self):
         keys = [k for k in self.cards.visible_whispers() if k in self.whisper_wins]
         if not keys:
@@ -470,6 +593,9 @@ class Overlay:
         if self.frame_win is not None and key == self.frame_win_key:
             self.frame_win_key = None
             self._gone(self.frame_win, key)
+        if self.grid_win is not None and key == self.grid_win_key:
+            self.grid_win_key = None
+            self._gone(self.grid_win, key)
         win = self.whisper_wins.pop(key, None)
         if win is not None:
             self._gone(win, key)
@@ -488,20 +614,40 @@ class Overlay:
             self._hide_window(key)
 
 
+def demo_grid(frame):
+    """The self-test's value grid over frame (x, y, w, h): three sample cells
+    of a 12x12 grid, cell 1,1, a 2x2 item at 3,2 marked uncertain (as a price
+    the Net Worth page doubts is drawn) and a 1x3 item at 6,1
+    (ppt_value_grid computes the cells as the daemon does)."""
+    from ppt_value_grid import span_rect
+    cells = []
+    for left, top, w, h, label, uncertain in ((1, 1, 1, 1, "12c", False), (3, 2, 2, 2, "1.5d?", True),
+                                              (6, 1, 1, 3, "240c", False)):
+        cx, cy, cw, ch = span_rect(frame, left, top, w, h, False)
+        cell = {"x": cx, "y": cy, "w": cw, "h": ch, "label": label}
+        if uncertain:
+            cell["u"] = True
+        cells.append(cell)
+    x, y, w, h = frame
+    return {"key": "grid", "x": x, "y": y, "w": w, "h": h, "cells": cells, "hold_ms": DEMO_S * 1000,
+            "label": "poe-price-tool: a sample value grid over your stash · 1 uncertain"}
+
+
 def main(argv=None):
     args = sys.argv[1:] if argv is None else list(argv)
     mode = ("probe" if "--probe" in args else "demo" if "--demo" in args
-            else "session" if "--session" in args else "frame" if "--frame" in args else "run")
+            else "session" if "--session" in args else "frame" if "--frame" in args
+            else "grid" if "--grid" in args else "run")
     frame = None
-    if mode == "frame":
-        i = args.index("--frame")
+    if mode in ("frame", "grid"):
+        i = args.index(f"--{mode}")
         parts = args[i + 1].split(",") if i + 1 < len(args) else []
         try:
             frame = tuple(int(v) for v in parts)
         except ValueError:
             frame = None
         if frame is None or len(frame) != 4 or frame_rect(dict(zip("xywh", frame))) is None:
-            say("--frame needs x,y,w,h: four whole numbers, w and h above 0")
+            say(f"--{mode} needs x,y,w,h: four whole numbers, w and h above 0")
             return EXIT_OTHER
     # SIGTERM and SIGINT end the process at once; the X server removes its windows.
     signal.signal(signal.SIGTERM, signal.SIG_DFL)
@@ -544,10 +690,14 @@ def run(mode, QtCore, QtGui, QtWidgets, frame=None):
         win.winId()  # creates the native window without showing it
         fwin = overlay.FrameWindow(overlay.style)
         fwin.winId()
+        gwin = overlay.GridWindow(overlay.style)
+        gwin.winId()
         emit({**hello, "flags": win.flag_names(), "attrs": win.attr_names(),
-              "frame_flags": fwin.flag_names(), "frame_attrs": fwin.attr_names()})
+              "frame_flags": fwin.flag_names(), "frame_attrs": fwin.attr_names(),
+              "grid_flags": gwin.flag_names(), "grid_attrs": gwin.attr_names()})
         win.deleteLater()
         fwin.deleteLater()
+        gwin.deleteLater()
         return EXIT_OK
 
     emit(hello)
@@ -579,6 +729,11 @@ def run(mode, QtCore, QtGui, QtWidgets, frame=None):
         overlay.frame({"key": "frame", "x": x, "y": y, "w": w, "h": h, "hold_ms": FRAME_DEMO_S * 1000,
                        "label": "poe-price-tool: cell 1,1 of your stash"})
         QtCore.QTimer.singleShot(FRAME_DEMO_S * 1000, lambda: app.exit(EXIT_OK))
+        return app.exec()
+
+    if mode == "grid":
+        overlay.grid(demo_grid(frame))
+        QtCore.QTimer.singleShot(DEMO_S * 1000, lambda: app.exit(EXIT_OK))
         return app.exec()
 
     buf = bytearray()

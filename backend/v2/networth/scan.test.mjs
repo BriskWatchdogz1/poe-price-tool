@@ -6,18 +6,19 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createNetworthStore } from './store.mjs'
 import { aggregate } from './aggregate.mjs'
-import { scanTabs } from './scan.mjs'
+import { scanTabs, valueTab, CELLS_MIN_CHAOS, CELLS_MAX } from './scan.mjs'
 import { round1 } from '../ninja.mjs'
 
-// Raw "GGG" item: { kind, name, stack, c }. c==null -> unpriced.
+// Raw "GGG" item: { kind, name, stack, c }. c==null -> unpriced; an extra
+// `u` is the valuation's uncertain marker (valuator.mjs UNCERTAIN).
 const item = (kind, name, c, stack = 1) => ({ kind, name, stack, c })
-const normalize = ggg => ({ kind: ggg.kind, name: ggg.name, stack: ggg.stack ?? 1, _c: ggg.c })
+const normalize = ggg => ({ kind: ggg.kind, name: ggg.name, stack: ggg.stack ?? 1, _c: ggg.c, _u: ggg.u })
 // Rounds like the real one (valuator.mjs value()): chaosEach and chaosTotal to
-// 0.1 c for display, `each` unrounded.
+// 0.1 c for display, `each` unrounded; `uncertain` a marker or null.
 const valuator = {
   async value (desc) {
     if (desc._c == null) return null
-    return { chaosEach: round1(desc._c), chaosTotal: round1(desc._c * desc.stack), each: desc._c, source: 'mock' }
+    return { chaosEach: round1(desc._c), chaosTotal: round1(desc._c * desc.stack), each: desc._c, source: 'mock', uncertain: desc._u ?? null }
   }
 }
 
@@ -208,5 +209,95 @@ test('a scanned tab keeps its stash tab type, so a whisper can tell a quad tab',
   await scanTabs(base(client, s))
   assert.equal(s.getTab('player1', 0).type, 'QuadStash')
   assert.equal(s.getTab('player1', 1).type, null, 'a tab list without a type stores null, not a guess')
+  await cleanup()
+})
+
+// The value grid (GET /daemon/stash-grid): one cell per priced stash entry
+// with its position, kept from the read the sync makes anyway.
+const placed = (kind, name, c, x, y, w, h, stack = 1) => ({ ...item(kind, name, c, stack), x, y, w, h })
+const gridTab = { index: 0, name: 'Dump', type: 'PremiumStash' }
+const cellsOf = async items => (await valueTab({ items, tab: gridTab, valuator, normalize, cdRatio: 200, league: 'L', accountName: 'acc' })).cells
+
+test('a valued tab keeps one cell per priced entry from 1 c up, with its position, dearest first', async () => {
+  assert.equal(CELLS_MIN_CHAOS, 1)
+  const cells = await cellsOf([
+    placed('stackable', 'Chaos Orb', 1, 0, 0, 1, 1, 10),     // 10 c for the stack
+    placed('unique', 'Headhunter', 900, 3, 7, 2, 2),
+    placed('unique', 'Cheap', 0.5, 1, 1, 1, 1),              // under 1 c: left out
+    placed('unique', 'Exactly One', 1, 5, 5, 1, 3),          // 1 c counts
+    placed('unique', 'Unpriced', null, 2, 2, 1, 1),          // no value: left out
+    placed('stackable', 'Shards', 0.04, 4, 4, 1, 1, 33),     // 1.32 c for the stack, shown as 1.3
+    { ...placed('unique', 'Skipped', 50, 6, 6, 1, 1), kind: 'skip' }
+  ])
+  assert.deepEqual(cells, [
+    { x: 3, y: 7, w: 2, h: 2, c: 900, n: 'Headhunter' },
+    { x: 0, y: 0, w: 1, h: 1, c: 10, n: 'Chaos Orb' },
+    { x: 4, y: 4, w: 1, h: 1, c: 1.3, n: 'Shards' },
+    { x: 5, y: 5, w: 1, h: 3, c: 1, n: 'Exactly One' }
+  ])
+})
+
+test('an entry without a numeric cell has no cell; a missing size reads as one cell', async () => {
+  const cells = await cellsOf([
+    { ...item('unique', 'No Position', 50) },                          // no x/y at all
+    { ...item('unique', 'Half Position', 50), x: 2 },
+    { ...item('unique', 'Negative', 50), x: -1, y: 0, w: 1, h: 1 },
+    { ...item('unique', 'String Cell', 50), x: '1', y: '1', w: 1, h: 1 },
+    { ...item('unique', 'No Size', 40), x: 7, y: 8 }
+  ])
+  assert.deepEqual(cells, [{ x: 7, y: 8, w: 1, h: 1, c: 40, n: 'No Size' }])
+})
+
+test('only a tab whose items sit on cells keeps cells; every other type stores an empty list', async () => {
+  // A folder tab's read merges the items of all its sub-tabs, so their x/y
+  // overlap; the route marks such a tab grid=false and the daemon never draws
+  // it. Keeping cells there would only grow the store file.
+  const items = [placed('unique', 'Headhunter', 900, 3, 7, 2, 2)]
+  const cellsFor = async type => (await valueTab({ items, tab: { index: 0, name: 'T', type }, valuator, normalize, cdRatio: 200, league: 'L', accountName: 'acc' })).cells
+  for (const type of ['NormalStash', 'PremiumStash', 'QuadStash']) {
+    assert.deepEqual(await cellsFor(type), [{ x: 3, y: 7, w: 2, h: 2, c: 900, n: 'Headhunter' }], type)
+  }
+  for (const type of ['CurrencyStash', 'FragmentStash', 'MapStash', 'UniqueStash', 'Folder', null, undefined]) {
+    assert.deepEqual(await cellsFor(type), [], String(type))
+  }
+})
+
+test('a cell whose value carries an uncertain marker says u: true; any other cell has no u', async () => {
+  // The grid marks the price the Net Worth page marks; which marker it is
+  // stays on that page, so the cell carries only the flag.
+  const cells = await cellsOf([
+    { ...placed('stackable', 'Stacked Deck', 4, 0, 0, 1, 1, 10), u: 'thin-market' },
+    { ...placed('unique', 'Headhunter', 900, 3, 7, 2, 2), u: 'variant-guessed' },
+    placed('unique', 'Kaom', 30, 5, 5, 2, 3),
+    { ...placed('unique', 'Marked Null', 20, 8, 8, 1, 1), u: null }
+  ])
+  assert.deepEqual(cells, [
+    { x: 3, y: 7, w: 2, h: 2, c: 900, n: 'Headhunter', u: true },
+    { x: 0, y: 0, w: 1, h: 1, c: 40, n: 'Stacked Deck', u: true },
+    { x: 5, y: 5, w: 2, h: 3, c: 30, n: 'Kaom' },
+    { x: 8, y: 8, w: 1, h: 1, c: 20, n: 'Marked Null' }
+  ])
+  for (const c of cells.slice(2)) assert.equal('u' in c, false, `${c.n}: no u: false, the field is left out`)
+})
+
+test('a tab keeps at most CELLS_MAX cells, the cheapest ones are cut', async () => {
+  assert.equal(CELLS_MAX, 600)
+  const items = []
+  for (let i = 0; i < CELLS_MAX + 50; i++) items.push(placed('unique', `U${i}`, 1 + i, i % 24, Math.floor(i / 24) % 24, 1, 1))
+  const cells = await cellsOf(items)
+  assert.equal(cells.length, CELLS_MAX)
+  assert.equal(cells[0].c, CELLS_MAX + 50)
+  assert.equal(cells.at(-1).c, 51, 'the 50 cheapest are the ones left out')
+})
+
+test('a scanned tab stores its cells, and an empty tab stores an empty list', async () => {
+  const { s, cleanup } = await freshStore()
+  const client = mockClient({
+    tabs: [{ index: 0, name: 'Dump', type: 'PremiumStash' }, { index: 1, name: 'Empty', type: 'NormalStash' }],
+    contents: { 0: [placed('unique', 'Headhunter', 900, 3, 7, 2, 2)], 1: [] }
+  })
+  await scanTabs(base(client, s))
+  assert.deepEqual(s.getTab('player1', 0).cells, [{ x: 3, y: 7, w: 2, h: 2, c: 900, n: 'Headhunter' }])
+  assert.deepEqual(s.getTab('player1', 1).cells, [])
   await cleanup()
 })

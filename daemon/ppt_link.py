@@ -16,7 +16,8 @@ channel"):
              the daemon work, so the browser can show it.
   POST /daemon/whisper goes through post_json too; its state machine lives in
   ppt_whisper.Whispers. So does POST /daemon/session (the session key), in
-  ppt_session.SessionKey.
+  ppt_session.SessionKey. GET /daemon/stash-grid (the value key) goes through
+  get_json; its state lives in ppt_value_grid.ValueGrid.
 
 Processes: CurlPool starts curl (and other short commands) as children with
 non-blocking pipes and a deadline; reap() is called once per loop round and
@@ -459,6 +460,13 @@ class Downlink:
             self._job = self.pool.start(["--max-time", f"{self.hold_s + 10:g}", "-w", "\n%{http_code}",
                                          *self.hdrs, self._url()],
                                         timeout_s=self.hold_s + 12, tag="downlink")
+
+
+def get_json(pool, base_url, path, hdrs, timeout_s=5, tag=None):
+    """GET a small JSON answer through the pool, with the daemon headers -> the job."""
+    return pool.start(["--max-time", f"{timeout_s:g}", *hdrs, "-w", "\n%{http_code}",
+                       f"{str(base_url).rstrip('/')}{path}"],
+                      timeout_s=timeout_s + 2, tag=tag)
 
 
 def post_json(pool, base_url, path, body, hdrs, timeout_s=5, tag=None, ensure_ascii=True):

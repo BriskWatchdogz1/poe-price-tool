@@ -1,6 +1,6 @@
 {
   "name": "poe-price-tool",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Self-hosted one-key item price checks for Path of Exile 1, plus a net-worth tracker — headless Awakened PoE Trade engine, browser UI, Docker.",
   "license": "MIT",
   "private": true,

@@ -243,15 +243,17 @@ def users_report(rc, out, user, url, config_path):
 # --- the way back: ppt_link.py's channels and the notification -------------
 
 LINK_ROUTES = {"downlink": "GET /daemon/events", "heartbeat": "POST /daemon/heartbeat",
-               "whisper": "POST /daemon/whisper", "session": "POST /daemon/session"}
+               "whisper": "POST /daemon/whisper", "session": "POST /daemon/session",
+               "valuegrid": "GET /daemon/stash-grid"}
 LINK_NAMES = {"downlink": "Back channel", "heartbeat": "Heartbeat", "whisper": "Whisper check",
-              "session": "Session key"}
+              "session": "Session key", "valuegrid": "Value grid"}
 # What the player loses while the server is older than the daemon.
 LINK_MISSING = {
     "downlink": "Prices stay in the browser; the game only shows that an item was sent",
     "heartbeat": "The server cannot see which parts of this daemon work",
     "whisper": "Whispers are shown without a market comparison",
     "session": "The session key does nothing",
+    "valuegrid": "The value key does nothing",
 }
 DETAIL_MAX = 300
 

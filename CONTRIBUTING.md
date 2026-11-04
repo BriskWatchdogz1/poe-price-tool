@@ -65,7 +65,11 @@ in [`SECURITY.md`](SECURITY.md), not in a public issue. Pull requests: see
   `daemon-overlay-model.test.mjs`), `ppt_stash_grid.py` (the stash cell
   frame: where a whisper's stash cell lies on the screen, after
   SlimTrade's grid, and the highlight key's cycle through the whispers; tests
-  `daemon-stash-grid.test.mjs`), `ppt_overlay.py` (the optional overlay
+  `daemon-stash-grid.test.mjs`), `ppt_value_grid.py` (the value key: which
+  stash tab a press shows, `GET /daemon/stash-grid` for its cells, their
+  rectangles on the stash cell frame's grid, the grid or a notification of
+  the dearest items, and a card for every case without a grid; tests
+  `daemon-value-grid.test.mjs`), `ppt_overlay.py` (the optional overlay
   process: PySide6 on Qt's xcb platform, click-through windows that never take
   focus, JSON lines on stdin and stdout; tests `daemon-overlay-qt.test.mjs` on
   the offscreen platform, skipped without PySide6), `selftest.sh` (tests
@@ -117,6 +121,8 @@ in [`SECURITY.md`](SECURITY.md), not in a public issue. Pull requests: see
     (valued entries → snapshot), `listing-audit.mjs` (price notes from the
     stash against the market value: "Listed below market", by the whisper
     verdict's rule; also the stored stack size at a whisper's tab and cell),
+    `stash-grid.mjs` (the answer of `GET /daemon/stash-grid`: the stored tab
+    list and one tab's cells for the daemon's value grid, from the store only),
     `price-guard.mjs` (the implausible-price brake for the
     recorded history).
   - Prices: `faustus.mjs` (GGG Currency Exchange client: hourly digests →

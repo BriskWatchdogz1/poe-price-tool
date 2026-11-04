@@ -19,10 +19,11 @@
  *  - daemon channel: GET /daemon/events (long-poll feed of the daemon's own
  *    cards, its buyer-whisper verdicts and the user's session changes), POST
  *    /daemon/heartbeat (version, features, game), POST /daemon/whisper (a
- *    buyer's trade whisper, checked against the market without the trade API)
- *    and POST /daemon/session (the session key: start, end or toggle a farm
- *    session); X-User and X-PPT-Daemon required, no USERS[0] fallback
- *    (frontend/PROTOCOL.md).
+ *    buyer's trade whisper, checked against the market without the trade
+ *    API), POST /daemon/session (the session key: start, end or toggle a farm
+ *    session) and GET /daemon/stash-grid (the value key: what each item in a
+ *    stored stash tab is worth, at its cell); X-User and X-PPT-Daemon
+ *    required, no USERS[0] fallback (frontend/PROTOCOL.md).
  * The same identity also carries the CLIENT LANGUAGE (POE_USER_LANGS, see
  * user-langs.mjs): a user on a German client is parsed by a second, parse-only
  * engine instance (engine-instances.mjs). Trade calls stay on the one primary
@@ -67,6 +68,7 @@ import { loadItemsIndex, normalizeItem, descriptorForName } from './networth/nor
 import { createValuator } from './networth/valuator.mjs'
 import { aggregate, unpricedStock } from './networth/aggregate.mjs'
 import { createNetworthStore } from './networth/store.mjs'
+import { stashGridAnswer, tabIndexOf, STASH_GRID_VERSION } from './networth/stash-grid.mjs'
 import { valueTab } from './networth/scan.mjs'
 import { auditListings, createStackLookup, createQuadLookup } from './networth/listing-audit.mjs'
 import { createNetworthRefresher, slowStepMsFromEnv } from './networth/refresher.mjs'
@@ -1559,6 +1561,11 @@ const DAEMON_SESSION_BODY_MAX = 1024
 // Session-key requests per user and minute (each accepted start or end writes
 // the sessions file); the same sliding-minute gate as the whispers'.
 const daemonSessionRate = createRateGate({ perMin: envNum('POE_DAEMON_SESSION_MAX_PER_MIN') })
+// Value-grid requests (GET /daemon/stash-grid) per user and minute. A fixed
+// number and no setting: the daemon asks once per key press, and one press a
+// second is already more than anyone steps through stash tabs; the gate only
+// stops a stuck key or a loop. Each request reads the store, never GGG.
+const daemonGridRate = createRateGate({ perMin: 60 })
 // One line per presence edge (never one per beat), and the page hears of it.
 // presenceEdges counts them, so the heartbeat route can tell whether its beat
 // already sent the page an update.
@@ -4349,7 +4356,7 @@ const server = createServer(async (req, res) => {
   // header, so no web page can send the custom header these routes require.
   if (path.startsWith('/daemon/')) {
     const json = (code, body) => res.writeHead(code, { 'content-type': 'application/json', 'cache-control': 'no-store' }).end(JSON.stringify(body))
-    const DAEMON_ROUTES = { '/daemon/events': 'GET', '/daemon/heartbeat': 'POST', '/daemon/whisper': 'POST', '/daemon/session': 'POST' }
+    const DAEMON_ROUTES = { '/daemon/events': 'GET', '/daemon/heartbeat': 'POST', '/daemon/whisper': 'POST', '/daemon/session': 'POST', '/daemon/stash-grid': 'GET' }
     if (!Object.hasOwn(DAEMON_ROUTES, path)) { json(404, { error: 'unknown daemon route', path }); return }
     if (req.method !== DAEMON_ROUTES[path]) { json(405, { error: 'method not allowed', allow: DAEMON_ROUTES[path] }); return }
     // The rest in try/catch: this handler is async and nothing catches its
@@ -4393,6 +4400,18 @@ const server = createServer(async (req, res) => {
         // is 'not-compared' with reason 'error'.
         const out = await whisperHandler.handle({ user: who.user, instance: who.instance, league: room.league }, wbody.value)
         if (!res.writableEnded) json(out.status, out.body)
+        return
+      }
+
+      if (path === '/daemon/stash-grid') {
+        // The daemon's value key (networth/stash-grid.mjs): the stored tab
+        // list, and with ?tab=<index> that tab's cells. Reads the store only.
+        const q = new URL(req.url, 'http://localhost').searchParams
+        const index = q.has('tab') ? tabIndexOf(q.get('tab')) : null
+        if (q.has('tab') && index == null) { json(400, { error: 'bad tab index' }); return }
+        if (!daemonGridRate.admit(who.user)) { json(429, { v: STASH_GRID_VERSION, error: 'too-many-grid-requests' }); return }
+        const out = stashGridAnswer(networthStore, who.user, index)
+        json(out.status, out.body)
         return
       }
 

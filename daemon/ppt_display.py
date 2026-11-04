@@ -6,7 +6,8 @@ overlay), never silence.
 
 Notifier     notify-send, one notification per slot that replaces itself
              ('item' for the price check, 'whisper:<wid>' per buyer whisper,
-             'session' for the farm and game session cards).
+             'session' for the farm and game session cards, 'grid' for the
+             value grid).
 OverlayLink  the daemon's side of ppt_overlay.py (PySide6, a process of its
              own, JSON lines on its stdin and stdout). Exit 3 (no PySide6) and
              a hello on another platform than xcb are final until the daemon
@@ -20,7 +21,8 @@ Display      where a card goes: the overlay while it is 'ok' and (with
              An item card goes next to the mouse, a whisper card
              (show_whisper) and a session card (show_session) into the
              overlay's stack at a fixed anchor, the stash cell frame
-             (show_frame) to the overlay only.
+             (show_frame) to the overlay only, the value grid (show_grid)
+             over the stash, else as a notification of its dearest cells.
 
 Why notify-send: the standard library has no D-Bus, and notify-send is part of
 libnotify on every desktop that shows notifications. A fact it cannot see:
@@ -406,6 +408,15 @@ class OverlayLink:
                           "w": frame.get("w"), "h": frame.get("h"), "label": frame.get("label"),
                           "hold_ms": frame.get("hold_ms")})
 
+    def show_grid(self, grid):
+        """The value grid (ppt_value_grid); True when it went out."""
+        if self._state == "no-display" and self._retry_at is not None and self.clock() >= self._retry_at:
+            self.start(self.clock())
+            return False
+        return self.send({"cmd": "grid", "key": grid.get("key"), "x": grid.get("x"), "y": grid.get("y"),
+                          "w": grid.get("w"), "h": grid.get("h"), "cells": grid.get("cells") or [],
+                          "label": grid.get("label"), "hold_ms": grid.get("hold_ms")})
+
     def _read(self):
         p = self._proc
         for f, buf in ((p.stdout, self._in), (p.stderr, self._errbuf)):
@@ -606,6 +617,7 @@ class Display:
         self._on_overlay = None  # key of the item card the overlay took last
         self._whispers_on_overlay = OrderedDict()  # keys of whisper cards the overlay took
         self._frame_on_overlay = None  # key of the stash cell frame the overlay took
+        self._grid_on_overlay = None   # key of the value grid the overlay took
 
     def _focus_missing(self):
         return (self.overlay is not None and self.only_in_game and self.focus is not None
@@ -716,6 +728,37 @@ class Display:
             self._frame_on_overlay = frame.get("key")
         return ok
 
+    def show_grid(self, grid, toast):
+        """The value grid: to the overlay while it can take it (the same
+        choice as for a price card), else toast (summary, body) into the
+        notification slot 'grid'. -> 'overlay', 'notification' or None
+        (neither is on)."""
+        if self._use_overlay():
+            try:
+                if self.overlay.show_grid(grid):
+                    self._grid_on_overlay = grid.get("key")
+                    return "overlay"
+            except Exception:
+                pass  # the overlay's own state says what broke; the grid still goes out below
+        if self._grid_on_overlay is not None:
+            key, self._grid_on_overlay = self._grid_on_overlay, None
+            self._send_hide(key)
+        if self.overlay is not None and self.overlay.state() == "no-display":
+            try:
+                self.overlay.show_grid(grid)  # only re-checks the display when it is due
+            except Exception:
+                pass
+        if self.notifier is None:
+            return None
+        self.notifier.show("grid", *toast)
+        return "notification"
+
+    def hide_grid(self, key):
+        """The value grid goes (the press after the last tab)."""
+        if self._grid_on_overlay is not None and self._grid_on_overlay == key:
+            self._grid_on_overlay = None
+            self._send_hide(key)
+
     def _send_hide(self, key):
         if key is None or self.overlay is None or self.overlay.state() != "ok":
             return  # an overlay that is not 'ok' was stopped and shows nothing
@@ -749,6 +792,9 @@ class Display:
                     self._hide_whispers()
                 if self._frame_on_overlay is not None:
                     key, self._frame_on_overlay = self._frame_on_overlay, None
+                    self._send_hide(key)
+                if self._grid_on_overlay is not None:
+                    key, self._grid_on_overlay = self._grid_on_overlay, None
                     self._send_hide(key)
         for part in (self.notifier, self.overlay):
             if part is not None:

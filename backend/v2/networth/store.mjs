@@ -23,7 +23,7 @@
 //                   // the same unpriced items in PIECES. A tab written before
 //                   // unpricedPieces existed simply lacks the key; aggregate.mjs
 //                   // falls back to the row sum until the tab is next synced.
-//         listed:   [ {name,kind,qty,x,y,note,fromTab,chaosEach,uncertain} ] } },
+//         listed:   [ {name,kind,qty,x,y,note,fromTab,chaosEach,uncertain} ],
 //                   // one per priced stash ENTRY with a price note (the item's
 //                   // own `note`, or the tab's name when that is one), its
 //                   // 0-based cell and the market value of the same sync,
@@ -31,6 +31,14 @@
 //                   // premium tabs only). A tab written
 //                   // before the key existed lacks it and lists nothing until
 //                   // the sync reads it again; the schema_version stays 2.
+//         cells:    [ {x,y,w,h,c,n,u?} ] } },
+//                   // the value grid (GET /daemon/stash-grid): one per priced
+//                   // ENTRY worth >= 1 c with its 0-based cell, size in cells,
+//                   // chaos total to 0.1 and name, dearest first, at most 600
+//                   // (scan.mjs); u: true only when its price is uncertain.
+//                   // Empty for a tab type whose items do not
+//                   // sit on cells. A tab written before the key existed lacks
+//                   // it ('not-read-since-update') until the sync reads it again.
 //       history: [ {at, totalChaos, totalDivine, league} ]  // small, last N
 //     } } }
 import { writeFile, rename, unlink } from 'node:fs/promises'

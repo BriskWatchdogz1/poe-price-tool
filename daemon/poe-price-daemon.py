@@ -16,7 +16,7 @@ Macros (config `[macros]`, optional): evdev keys bound to chat commands; on
 press it opens chat, types the command layout-aware via ydotool, and sends it
 (e.g. F5 -> "/hideout"), only while PoE has focus, and copes with USB hotplug
 (a device that re-enumerates, as some macro keypads do). No `[macros]`
-section, no highlight key and no session key -> no input device is opened
+section, no highlight key, no session key and no value key -> no input device is opened
 (python-evdev must still be installed, the import is unconditional).
 
 Failures go to the journal (stderr) as one line each, with cause and next
@@ -66,6 +66,12 @@ an evdev key; while the game has focus, ppt_stash_grid frames the stash cell
 of the newest whisper with a position on the overlay; each further press
 within whisper_hold_s goes one whisper older.
 
+Value grid ([stash_grid] value_key; empty = off): an evdev key; while the
+game has focus, ppt_value_grid shows over the stash what each item of a tab
+is worth, from the cells the server stores per tab (GET /daemon/stash-grid,
+no stash request); each further press within value_hold_s goes to the next
+tab. Without the overlay it is a notification of the dearest items.
+
 Farm and game sessions (config [session]; key empty = off): an evdev key
 pressed while the game has focus sends POST /daemon/session
 {"action": "toggle"} (ppt_session): the server starts the user's farm
@@ -77,9 +83,9 @@ answer to a press.
 
 Each loop round calls tick(): the curl pool, the long-poll, the game probe,
 the heartbeat, the result cards, the whispers, the stash cell frame, the
-session key's answer and the display (with the overlay's focus check); none of
-them waits for a child process. is_poe_focused() serves the macros, the
-highlight key and the session key only.
+value grid, the session key's answer and the display (with the overlay's
+focus check); none of them waits for a child process. is_poe_focused() serves
+the macros, the highlight key, the value key and the session key only.
 """
 import json
 import math
@@ -108,6 +114,7 @@ from ppt_session import SessionKey
 from ppt_display import Notifier, Display, OverlayLink, FocusProbe, kde_fullscreen_mute
 from ppt_presence import GameProbe
 from ppt_stash_grid import Highlighter, read_grid_config
+from ppt_value_grid import ValueGrid, read_value_config
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DAEMON_VERSION = read_version(REPO_ROOT)
@@ -386,6 +393,10 @@ class PriceDaemon:
         self.highlight_key = ""
         self.highlight_code = None
         self.highlighter = None
+        # The value key ([stash_grid] value_key; empty: off); read further down.
+        self.value_cfg = None
+        self.value_code = None
+        self.value_grid = None
 
         self._focus_cache = (0.0, False)
         self._focus_warned = False
@@ -483,6 +494,31 @@ class PriceDaemon:
                 raise SystemExit(f"[poe-price-daemon] [session] key {session_key} is also [whispers] "
                                  "highlight_key; one key cannot do both")
             self.session_code = code
+        # The value key ([stash_grid] value_key; empty: off): read through
+        # evdev like the macro keys; a press while the game has focus shows a
+        # stash tab's values over the grid [stash_grid] places.
+        value_cfg, err = read_value_config(_section(cfg, "stash_grid"))
+        if err:
+            raise SystemExit(f"[poe-price-daemon] {err}")
+        self.value_cfg = value_cfg
+        value_key = value_cfg["key"]
+        if value_key:
+            try:
+                code = keycode(value_key)
+            except AttributeError:
+                raise SystemExit(f"[poe-price-daemon] [stash_grid] value_key {value_key!r} is not a key name "
+                                 f"evdev knows (names like \"F9\", \"KP1\", \"DOT\")") from None
+            if code in self.macros:
+                raise SystemExit(f"[poe-price-daemon] [stash_grid] value_key {value_key} is also a key in "
+                                 "[macros.keys]; one key cannot do both")
+            if highlight_key and code == keycode(highlight_key):
+                raise SystemExit(f"[poe-price-daemon] [stash_grid] value_key {value_key} is also [whispers] "
+                                 "highlight_key; one key cannot do both")
+            if code == self.session_code:
+                raise SystemExit(f"[poe-price-daemon] [stash_grid] value_key {value_key} is also [session] "
+                                 "key; one key cannot do both")
+            if grid["mode"] != "off":
+                self.value_code = code
         overlay_style = {
             "item_hold_ms": int(style.pop("item_hold_s") * 1000),
             "pending_hold_ms": int(style.pop("pending_hold_s") * 1000),
@@ -580,13 +616,21 @@ class PriceDaemon:
                 positions=lambda: self.whispers.positions() if self.whispers is not None else [],
                 show_frame=self.display.show_frame, show_card=self._show,
                 xdotool=shutil.which("xdotool"), config_path=self.config_path)
+        if self.value_code is not None:
+            self.value_grid = ValueGrid(
+                pool=self.pool, base_url=self.backend_url, hdrs=self.hdrs, log=self.log, grid=grid,
+                cfg=value_cfg, whisper_hold_s=whisper_hold_s,
+                positions=lambda: self.whispers.positions() if self.whispers is not None else [],
+                show_grid=self._show_grid, hide_grid=self.display.hide_grid, show_card=self._show,
+                xdotool=shutil.which("xdotool"), lang=lang or "en", config_path=self.config_path,
+                user=self.user)
 
     def watched_keys(self):
         """The evdev key codes the daemon opens input devices for: the macro
-        keys, the highlight key and the session key. Empty: no device is
-        opened."""
+        keys, the highlight key, the session key and the value key. Empty: no
+        device is opened."""
         keys = set(self.macros)
-        for code in (self.highlight_code, self.session_code):
+        for code in (self.highlight_code, self.session_code, self.value_code):
             if code is not None:
                 keys.add(code)
         return keys
@@ -629,6 +673,28 @@ class PriceDaemon:
             line += "; but the overlay is off ([results] overlay = \"off\"), and only the overlay draws the frame"
         return line + "."
 
+    def _value_line(self):
+        """The journal line at start about the value key, or None without one."""
+        if not self.value_cfg or not self.value_cfg["key"]:
+            return None
+        key = self.value_cfg["key"]
+        g = self.grid
+        if g["mode"] == "off":
+            return (f"Value grid: off ([stash_grid] mode = \"off\"); the key {key} is not watched.")
+        if g["mode"] == "manual":
+            x, y, w, h = g["rect"]
+            where = f"manual (x {x}, y {y}, {w}x{h} px)"
+        else:
+            where = f"auto (folders {g['folders']}, from the game window's size)"
+        v = self.value_cfg
+        tabs = ", ".join(f'"{t}"' for t in v["tabs"]) if v["tabs"] else "every tab with a grid"
+        line = (f"Value grid: key {key}, pressed while the game has focus: what each item of a stash tab is "
+                f"worth, over the grid {where}; from {v['min_c']:g} c, {v['hold_s']:g} s a tab, tabs: {tabs}")
+        if self.overlay_setting == "off":
+            line += ("; but the overlay is off ([results] overlay = \"off\"), so it comes as a notification of "
+                     "the 5 dearest items")
+        return line + "."
+
     def features(self):
         """What the heartbeat reports: one state word per part."""
         return {"downlink": self.downlink.state(), **self.display.features(),
@@ -667,6 +733,16 @@ class PriceDaemon:
                                  f"A session card could not be shown: {type(ex).__name__}: {ex}. "
                                  "Next: journalctl --user -u poe-price-daemon; the session is on the History page")
 
+    def _show_grid(self, grid, toast):
+        """The value grid to the display, guarded like _show."""
+        try:
+            return self.display.show_grid(grid, toast)
+        except Exception as ex:
+            self.log.failure(("notify", "internal", type(ex).__name__),
+                             f"The value grid could not be shown: {type(ex).__name__}: {ex}. "
+                             "Next: journalctl --user -u poe-price-daemon; the values are on the Net Worth page")
+            return None
+
     def _on_events(self, events):
         now = time.monotonic()
         for ev in events:
@@ -701,6 +777,8 @@ class PriceDaemon:
             self._show_whisper(self.whispers.tick(now))
         if self.highlighter is not None:
             self.highlighter.tick(now)
+        if self.value_grid is not None:
+            self.value_grid.tick(now)
         self._show_session(self.session.tick(now))
         self.display.tick(now)
 
@@ -812,6 +890,11 @@ class PriceDaemon:
         if ev.value == 1 and self.highlighter is not None and ev.code == self.highlight_code:
             if self.is_poe_focused():
                 self.highlighter.press(time.monotonic())
+            return
+        # The value key: the same focus gate; a press shows a tab's values.
+        if ev.value == 1 and self.value_grid is not None and ev.code == self.value_code:
+            if self.is_poe_focused():
+                self.value_grid.press(time.monotonic())
             return
         # The session key: the same focus gate; a press toggles the farm session.
         if ev.value == 1 and ev.code == self.session_code and self.session_code is not None:
@@ -1000,6 +1083,7 @@ class PriceDaemon:
         url = self.backend_url.rstrip("/")
         rc, out, err = self._curl(["-o", "/dev/null", "-w", "%{http_code} %{redirect_url}", f"{url}/health"])
         key, text = health_report(rc, out, err, url, self.config_path)
+        backend_up = key is None
         if key is not None:
             self.log.failure(key, text)
         else:
@@ -1021,6 +1105,8 @@ class PriceDaemon:
                 if lang in ("en", "de"):
                     self.results.lang = lang
                     self.session.lang = lang
+                    if self.value_grid is not None:
+                        self.value_grid.lang = lang
                     if self.whispers is not None:
                         self.whispers.lang = lang
             if self.downlink.enabled and (verdict is None or verdict[0] is None):
@@ -1041,9 +1127,13 @@ class PriceDaemon:
 
         if self.game is None:
             self.log.info(self._game_line())
-        for line in (self._highlight_line(), self._session_line()):
+        for line in (self._highlight_line(), self._value_line(), self._session_line()):
             if line:
                 self.log.info(line)
+        if self.value_grid is not None and backend_up:
+            # The tab list once (the server's store, no stash request): a
+            # value_tabs name no stored tab has is one line now, not at a press.
+            self.value_grid.start(time.monotonic())
         self.display.start(time.monotonic())  # the overlay process; its hello comes in tick()
         features = self.display.features()
         self.log.info(f"Results in the game: notification {features['notify']}, overlay {features['overlay']}.")
@@ -1069,10 +1159,10 @@ class PriceDaemon:
 
 
 def find_keyboards(keycodes):
-    """Devices exposing a macro key, the highlight key or the session key (they
-    may live on different physical keyboards, e.g. a hardware macro keypad plus
-    the F5-F9 row). Without a [macros] section, a highlight key and a session
-    key no device is opened."""
+    """Devices exposing a macro key, the highlight key, the session key or the
+    value key (they may live on different physical keyboards, e.g. a hardware
+    macro keypad plus the F5-F9 row). Without a [macros] section and any of
+    those keys no device is opened."""
     kbs = []
     for path in evdev.list_devices():
         try:
@@ -1096,9 +1186,9 @@ def main():
     cfg, path = load_config()
     app = PriceDaemon(cfg, path)
     # price check: the clipboard is polled in the main loop (poll_clipboard).
-    # Macro keys, the highlight key and the session key: they may sit on
-    # different physical devices (e.g. a macro keypad plus the F5-F9 row), all
-    # must be watched. Empty without [macros], a highlight key and a session key.
+    # Macro keys, the highlight key, the session key and the value key: they
+    # may sit on different physical devices (e.g. a macro keypad plus the F5-F9
+    # row), all must be watched. Empty without [macros] and any of those keys.
     relevant_keys = app.watched_keys()
     sel = selectors.DefaultSelector()
     registered = {}  # path -> InputDevice
@@ -1138,7 +1228,7 @@ def main():
         print(f"[poe-price-daemon] Chat macros active ({app.keyboard_layout} layout): "
               + ", ".join(f"{k}" for k in cfg.get('macros', {}).get('keys', {})))
     if relevant_keys and not registered:
-        print("[poe-price-daemon] No keyboard with a macro, highlight or session key found yet — waiting for devices "
+        print("[poe-price-daemon] No keyboard with a macro, highlight, session or value key found yet — waiting for devices "
               "(is the user in the 'input' group?).", file=sys.stderr)
     app.startup_checks()
 

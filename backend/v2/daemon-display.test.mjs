@@ -573,6 +573,59 @@ print(json.dumps(r))
   assert.equal(out.refused, false)
 })
 
+test('the value grid goes to the overlay while the game has focus, else to the notification slot \'grid\'', () => {
+  const out = py(`
+class O:
+    def __init__(self, ok=True, st='ok'): self.sent, self.ok, self.st = [], ok, st
+    def state(self): return self.st
+    def show_grid(self, grid): self.sent.append(['grid', grid['key'], len(grid['cells'])]); return self.ok
+    def hide(self, key): self.sent.append(['hide', key]); return True
+    def tick(self, now): pass
+    def close(self): pass
+class F:
+    def __init__(self, st): self.st = st
+    def state(self): return self.st
+    def tick(self, now): pass
+class N:
+    def __init__(self): self.shown = []
+    def show(self, slot, summary, body): self.shown.append([slot, summary, body])
+    def state(self): return 'ok'
+    def tick(self, now): pass
+GRID = {'key': 'grid', 'x': 15, 'y': 125, 'w': 634, 'h': 634, 'cells': [{'x': 15, 'y': 125, 'w': 53, 'h': 53, 'label': '12c'}],
+        'label': '1/2 tab "Sale"', 'hold_ms': 20000}
+TOAST = ('Value grid · tab "Sale"', 'left 1, top 1: 12c Chaos Orb')
+r = {}
+f, o, n = F('focused'), O(), N()
+d = Display(log, notifier=n, overlay=o, focus=f, only_in_game=True)
+r['overlay'] = d.show_grid(GRID, TOAST)
+d.tick(0)
+f.st = 'not-focused'
+d.tick(1); d.tick(2)
+r['sent'] = o.sent
+r['away'] = d.show_grid(GRID, TOAST)
+r['shown'] = n.shown
+o2, n2 = O(), N()
+d2 = Display(log, notifier=n2, overlay=o2, focus=F('focused'))
+d2.show_grid(GRID, TOAST)
+d2.hide_grid('grid')
+d2.hide_grid('grid')
+r['hidden'] = o2.sent
+n3 = N()
+r['refused'] = Display(log, notifier=n3, overlay=O(ok=False), focus=F('focused')).show_grid(GRID, TOAST)
+r['refused_toast'] = n3.shown
+r['nothing'] = Display(log, notifier=None, overlay=None).show_grid(GRID, TOAST)
+print(json.dumps(r))
+`)
+  assert.equal(out.overlay, 'overlay')
+  assert.deepEqual(out.sent, [['grid', 'grid', 1], ['hide', 'grid']], 'hidden once when the game loses focus')
+  assert.equal(out.away, 'notification', 'without focus: the notification, as for a price card')
+  assert.deepEqual(out.shown, [['grid', 'Value grid · tab "Sale"', 'left 1, top 1: 12c Chaos Orb']])
+  assert.deepEqual(out.hidden, [['grid', 'grid', 1], ['hide', 'grid']], 'the end of the run hides it, once')
+  assert.equal(out.refused, 'notification')
+  assert.equal(out.refused_toast.length, 1)
+  assert.equal(out.nothing, null, 'neither overlay nor notification: nothing')
+})
+
 test('a frame press leaves a missing display to the card that follows it', () => {
   // The overlay found no display (started before the desktop session was
   // up). The frame is not sent; the press then shows a card (ppt_stash_grid),
@@ -613,6 +666,25 @@ print(json.dumps(r))
   assert.equal(out.sent, true)
   const run = Object.values(out.got)[0]
   assert.deepEqual(run.at(-1), { cmd: 'frame', key: 'frame', x: 1, y: 2, w: 3, h: 4, label: 'L', hold_ms: 5 })
+  assert.equal(out.closed, false)
+})
+
+test('the overlay link sends a value grid as a grid command', () => {
+  const out = pyLink(`
+l = link('ok')
+l.start(0)
+wait_state(l, ('ok',))
+G = {'key': 'grid', 'x': 1, 'y': 2, 'w': 3, 'h': 4, 'cells': [{'x': 1, 'y': 2, 'w': 1, 'h': 1, 'label': '5c'}], 'label': 'L', 'hold_ms': 5}
+r = {'sent': l.show_grid(G)}
+time.sleep(0.3); l.tick(T[0])
+r['got'] = got()
+l.close()
+r['closed'] = l.show_grid(G)
+print(json.dumps(r))
+`)
+  assert.equal(out.sent, true)
+  const run = Object.values(out.got)[0]
+  assert.deepEqual(run.at(-1), { cmd: 'grid', key: 'grid', x: 1, y: 2, w: 3, h: 4, cells: [{ x: 1, y: 2, w: 1, h: 1, label: '5c' }], label: 'L', hold_ms: 5 })
   assert.equal(out.closed, false)
 })
 
