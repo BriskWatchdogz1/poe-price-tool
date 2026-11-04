@@ -161,8 +161,18 @@ test('a heartbeat that says the game runs starts a game session; it can be disca
   assert.ok(v.game, 'the game session the heartbeat starts shows up within 10 s')
   assert.equal(v.game.kind, 'game')
   assert.equal(v.game.state, 'starting')
-  const ev = (await feed('player2', seq0, boot)).events.filter(e => e.kind === 'session')
-  assert.equal(ev.length, 1)
+  // The feed hears the start right after the sessions file is written
+  // (session-control.mjs start: sessions.start, then tell), so the view can
+  // show the session a moment before the event is there; on a slow machine
+  // one read of the feed lands in that gap. Asked until the event comes.
+  let ev = []
+  const feedDeadline = Date.now() + 10_000
+  do {
+    ev = (await feed('player2', seq0, boot)).events.filter(e => e.kind === 'session')
+    if (ev.length) break
+    await new Promise(resolve => setTimeout(resolve, 20))
+  } while (Date.now() < feedDeadline)
+  assert.equal(ev.length, 1, 'the feed carries the session start within 10 s')
   assert.equal(ev[0].by, null, 'started by the game, not by a key')
   assert.equal(ev[0].session.kind, 'game')
 
